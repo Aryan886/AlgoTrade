@@ -1,0 +1,15 @@
+# Ignore Python cache
+__pycache__/
+*.pyc
+
+# Ignore data and database
+*.csv
+*.db
+*.sqlite
+db/
+database/datas
+
+# Ignore virtual environments
+venv/
+.env/
+db/trading_bot.db 
