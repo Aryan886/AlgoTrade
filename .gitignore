@@ -6,7 +6,7 @@ __pycache__/
 *.csv
 *.db
 *.sqlite
-db/
+db/trading_bot.db
 database/datas
 
 # Ignore virtual environments

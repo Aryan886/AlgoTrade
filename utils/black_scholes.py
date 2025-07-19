@@ -8,36 +8,10 @@ import numpy as np
 from scipy.stats import norm
 from datetime import datetime, date
 from typing import Dict, List, Optional, Tuple
+from utils.iv import ProductionIVCalculator
 
 # Risk-free rate (can be made configurable)
 RISK_FREE_RATE = 0.065  # 6.5%
-
-def calculate_time_to_expiry(expiry_date: str, current_date: Optional[date] = None) -> float:
-    """
-    Calculate time to expiry in years.
-    
-    Parameters:
-        expiry_date: Expiry date string (format: YYYY-MM-DD)
-        current_date: Current date (defaults to today)
-    
-    Returns:
-        Time to expiry in years (using 365 calendar days per year)
-    """
-    if current_date is None:
-        current_date = date.today()
-    
-    try:
-        expiry = datetime.strptime(expiry_date, "%Y-%m-%d").date()
-        days_to_expiry = (expiry - current_date).days
-        
-        if days_to_expiry <= 0:
-            return 0.0  # Expired options
-        
-        # Convert to years (using 365 calendar days per year)
-        return days_to_expiry / 365.0
-    except ValueError:
-        print(f"Invalid expiry date format: {expiry_date}")
-        return 0.0
 
 def calculate_black_scholes_delta(
     spot_price: float,
@@ -126,6 +100,7 @@ def log_option_details(prefix: str, option: Dict, T: float):
     print(f"  Volume: {option.get('volume')}")
     print(f"  OI: {option.get('oi')}")
     print(f"  Time to Expiry (years): {T}")
+    
 
 def calculate_delta_for_strike_band(
     spot_price: float,
@@ -141,6 +116,7 @@ def calculate_delta_for_strike_band(
         current_date = date.today()
 
     delta_results = {}
+    iv_calc = ProductionIVCalculator()
 
     for strike in strike_band:
         # Find all CE and PE options for this strike
@@ -161,8 +137,8 @@ def calculate_delta_for_strike_band(
                 
                 # Check if option is not expired
                 if expiry >= str(current_date):
-                    # Calculate time to expiry
-                    T = calculate_time_to_expiry(expiry, current_date)
+                    # Calculate time to expiry using iv_calc
+                    T = iv_calc.calculate_time_to_expiry(expiry)
                     
                     # Filter options with reasonable time to expiry (1-60 days preferred)
                     if 1/365 <= T <= 60/365:  # 1 day to 60 days
@@ -175,7 +151,7 @@ def calculate_delta_for_strike_band(
                     if not isinstance(expiry, str):
                         expiry = str(expiry)
                     if expiry >= str(current_date):
-                        T = calculate_time_to_expiry(expiry, current_date)
+                        T = iv_calc.calculate_time_to_expiry(expiry)
                         if T > 0:
                             valid_options.append((opt, T))
             
@@ -203,16 +179,16 @@ def calculate_delta_for_strike_band(
         # Calculate CE delta
         if ce_option:
             try:
-                T = calculate_time_to_expiry(ce_option['expiry_date'], current_date)
+                T = iv_calc.calculate_time_to_expiry(ce_option['expiry_date'])
                 log_option_details(f"[DEBUG] Using CE option for strike {strike}:", ce_option, T)
-                print(f"[DEBUG] Inputs to calculate_black_scholes_delta (CE): spot_price={spot_price}, strike_price={strike}, T={T}, IV={ce_option['iv']}, option_type=CE")
-                ce_delta = calculate_black_scholes_delta(
-                    spot_price=spot_price,
-                    strike_price=strike,
-                    time_to_expiry=T,
-                    implied_volatility=ce_option['iv'],
+                ce_delta = iv_calc.calculate_delta(
+                    spot=spot_price,
+                    strike=strike,
+                    T=T,
+                    iv=ce_option['iv'],
                     option_type='CE'
                 )
+                print(f"  Delta: {ce_delta*100}")
                 strike_results['CE'] = {
                     'delta': ce_delta,
                     'iv': ce_option['iv'],
@@ -227,16 +203,16 @@ def calculate_delta_for_strike_band(
         # Calculate PE delta
         if pe_option:
             try:
-                T = calculate_time_to_expiry(pe_option['expiry_date'], current_date)
+                T = iv_calc.calculate_time_to_expiry(pe_option['expiry_date'])
                 log_option_details(f"[DEBUG] Using PE option for strike {strike}:", pe_option, T)
-                print(f"[DEBUG] Inputs to calculate_black_scholes_delta (PE): spot_price={spot_price}, strike_price={strike}, T={T}, IV={pe_option['iv']}, option_type=PE")
-                pe_delta = calculate_black_scholes_delta(
-                    spot_price=spot_price,
-                    strike_price=strike,
-                    time_to_expiry=T,
-                    implied_volatility=pe_option['iv'],
+                pe_delta = iv_calc.calculate_delta(
+                    spot=spot_price,
+                    strike=strike,
+                    T=T,
+                    iv=pe_option['iv'],
                     option_type='PE'
                 )
+                print(f"  Delta: {pe_delta*100}")
                 strike_results['PE'] = {
                     'delta': pe_delta,
                     'iv': pe_option['iv'],
@@ -335,6 +311,7 @@ def get_current_delta(
     if current_date is None:
         current_date = date.today()
     
+    iv_calc = ProductionIVCalculator()
     # Find all options for this strike and type
     matching_options = [
         opt for opt in cached_options 
@@ -352,7 +329,7 @@ def get_current_delta(
             expiry = str(expiry)
         
         if expiry >= str(current_date):
-            T = calculate_time_to_expiry(expiry, current_date)
+            T = iv_calc.calculate_time_to_expiry(expiry)
             if 1/365 <= T <= 60/365:  # 1 day to 60 days preferred
                 valid_options.append((opt, T))
     
@@ -363,7 +340,7 @@ def get_current_delta(
             if not isinstance(expiry, str):
                 expiry = str(expiry)
             if expiry >= str(current_date):
-                T = calculate_time_to_expiry(expiry, current_date)
+                T = iv_calc.calculate_time_to_expiry(expiry)
                 if T > 0:
                     valid_options.append((opt, T))
     

@@ -5,11 +5,10 @@ from typing import Optional, List, Dict
 from datetime import datetime
 from config.config import CONFIG
 from utils.black_scholes import (
-    calculate_black_scholes_delta,
-    calculate_time_to_expiry,
     calculate_delta_for_strike_band,
     get_current_delta
 )
+from utils.iv import ProductionIVCalculator
 
 DB_PATH = 'db/trading_bot.db'
 
@@ -367,16 +366,28 @@ def calculate_and_store_high_accuracy_delta(
                 return None
             # Map fresh options to expected format
             formatted_options = []
+            iv_calc = ProductionIVCalculator()
             for opt in fresh_options:
-                iv_val = opt.get('IV')
-                iv_decimal = (iv_val / 100.0) if iv_val is not None else None
+                expiry_date = str(opt.get('expiry'))
+                spot = spot_price
+                strike = opt.get('strikePrice')
+                ltp = opt.get('lastPrice')
+                option_type = opt.get('optionType')
+                # Calculate IV using the new ProductionIVCalculator
+                iv_val = None
+                if spot and strike and ltp and option_type:
+                    try:
+                        iv_result = iv_calc.calculate_iv(spot, strike, ltp, expiry_date, option_type)
+                        iv_val = iv_result['iv'] if iv_result and 'iv' in iv_result else None
+                    except Exception:
+                        iv_val = None
                 formatted_options.append({
-                    'strike_price': opt.get('strikePrice'),
-                    'option_type': opt.get('optionType'),
-                    'ltp': opt.get('lastPrice'),
-                    'iv': iv_decimal,  # <-- store as decimal
-                    'expiry_date': str(opt.get('expiry')),
-                    'spot_price': spot_price,
+                    'strike_price': strike,
+                    'option_type': option_type,
+                    'ltp': ltp,
+                    'iv': iv_val,  # <-- store as decimal (manual IV)
+                    'expiry_date': expiry_date,
+                    'spot_price': spot,
                     'tradingsymbol': opt.get('tradingsymbol'),
                     'open_interest': opt.get('openInterest', 0)
                 })
@@ -408,19 +419,22 @@ def calculate_and_store_high_accuracy_delta(
                     # Robust delta value extraction and scaling
                     if isinstance(option_data, dict) and 'delta' in option_data and isinstance(option_data['delta'], (float, int)):
                         delta_value = option_data['delta'] * 100
+                        ltp_value = option_data.get('ltp', None)
                     elif isinstance(option_data, (float, int)):
                         delta_value = option_data * 100
+                        ltp_value = None
                     else:
                         delta_value = None  # Could not extract delta value
+                        ltp_value = None
                     if delta_value is not None:
                         cursor.execute("""
                             INSERT INTO delta_cache (
                                 timestamp, strike_price, option_type, delta,
-                                expiry_date, spot_price, symbol
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                                expiry_date, spot_price, symbol, ltp
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
                             timestamp_str, strike, option_type, delta_value,
-                            cached_options[0]['expiry_date'], spot_price, symbol
+                            cached_options[0]['expiry_date'], spot_price, symbol, ltp_value
                         ))
             conn.commit()
             conn.close()

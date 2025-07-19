@@ -10,6 +10,7 @@ from utils.db_func import store_vix_data_bulk, fetch_vix_data, store_high_accura
 from broker.zerodha_client import kite_from_saved_token
 import time
 import sqlite3
+from utils.iv import ProductionIVCalculator
 
 def get_nifty50_spot_price():
     """
@@ -39,6 +40,7 @@ def get_nifty50_spot_price():
 def fetch_live_option_chain():
     """
     Fetch live option chain data from Kite API for NIFTY 50 using batch quotes
+    Now calculates IV using ProductionIVCalculator instead of using API IV.
     """
     try:
         kite = kite_from_saved_token()
@@ -71,6 +73,11 @@ def fetch_live_option_chain():
         # Batch fetch quotes in groups of 50 (Kite API limit)
         batch_size = 50
         nifty_options = []
+        iv_calc = ProductionIVCalculator()
+        spot_price = get_nifty50_spot_price()
+        if spot_price is None:
+            print("Could not get NIFTY 50 spot price for IV calculation")
+            return None
         
         for i in range(0, len(nifty_option_symbols), batch_size):
             batch = nifty_option_symbols[i:i + batch_size]
@@ -87,15 +94,28 @@ def fetch_live_option_chain():
                     if quote_key in quotes:
                         option_data = quotes[quote_key]
                         if isinstance(option_data, dict):
-                            # Extract option data
-                            iv = option_data.get('impliedVolatility')
+                            # Remove API IV fetching, calculate IV using ProductionIVCalculator
+                            ltp = option_data.get('last_price', 0)
+                            strike = instrument['strike']
+                            option_type = instrument['instrument_type']
+                            expiry = instrument['expiry']
+                            expiry_str = str(expiry)
+                            # Calculate IV using your calculator
+                            iv_result = iv_calc.calculate_iv(
+                                spot=spot_price,
+                                strike=strike,
+                                ltp=ltp,
+                                expiry_date_str=expiry_str,
+                                option_type=option_type
+                            )
+                            calculated_iv = iv_result['iv'] if iv_result and 'iv' in iv_result else None
                             option_info = {
-                                'strikePrice': instrument['strike'],
-                                'IV': iv if iv is not None else 0.0,
+                                'strikePrice': strike,
+                                'IV': calculated_iv,  # Use calculated IV only
                                 'openInterest': option_data.get('oi', 0),
-                                'lastPrice': option_data.get('last_price', 0),
-                                'optionType': instrument['instrument_type'],
-                                'expiry': instrument['expiry'],
+                                'lastPrice': ltp,
+                                'optionType': option_type,
+                                'expiry': expiry,
                                 'tradingsymbol': instrument['tradingsymbol']
                             }
                             nifty_options.append(option_info)
@@ -328,9 +348,20 @@ def debug_print_iv_values():
     print(f"\n[INFO] Found {count} NIFTY options with nonzero IV.")
     print("[INFO] If you see IV values > 100, the API is returning them as percent or there is a data issue.")
 
+# Update store_vix_data to accept new columns
+def store_vix_data(timestamp, symbol, vix_value, vix_ao_value=None, vix_donchian_upper=None, vix_donchian_lower=None, vix_donchian_mid=None, db_path='db/trading_bot.db'):
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT OR REPLACE INTO vix_data (timestamp, symbol, vix_value, vix_ao_value, vix_donchian_upper, vix_donchian_lower, vix_donchian_mid)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (timestamp, symbol, vix_value, vix_ao_value, vix_donchian_upper, vix_donchian_lower, vix_donchian_mid))
+    conn.commit()
+    conn.close() 
 if __name__ == "__main__":
-    print("[DEBUG] Running IV debug script...")
-    debug_print_iv_values()
+    #print("[DEBUG] Running IV debug script...")
+    #debug_print_iv_values()
+    get_nifty50_spot_price()
     """
     # Example usage
     symbol = "NIFTY50"
@@ -349,13 +380,3 @@ if __name__ == "__main__":
     
     # continuous_vix_monitoring(symbol, interval_minutes=5, duration_hours=2) 
     """
-# Update store_vix_data to accept new columns
-def store_vix_data(timestamp, symbol, vix_value, vix_ao_value=None, vix_donchian_upper=None, vix_donchian_lower=None, vix_donchian_mid=None, db_path='db/trading_bot.db'):
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT OR REPLACE INTO vix_data (timestamp, symbol, vix_value, vix_ao_value, vix_donchian_upper, vix_donchian_lower, vix_donchian_mid)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (timestamp, symbol, vix_value, vix_ao_value, vix_donchian_upper, vix_donchian_lower, vix_donchian_mid))
-    conn.commit()
-    conn.close() 

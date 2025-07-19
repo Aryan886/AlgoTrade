@@ -1,6 +1,5 @@
 #calculation of req stuff for strategies
 import math
-import yfinance as yf
 import pandas as pd
 from database.load_data import load_latest_data
 from utils.db_func import fetch_vix_data
