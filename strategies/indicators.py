@@ -31,7 +31,7 @@ def add_donchian_channel(df, period=28, suffix=""):
     df = df.copy()
     df[f"Donchian_High{suffix}"] = df["High"].rolling(window=period).max()
     df[f"Donchian_Low{suffix}"] = df["Low"].rolling(window=period).min()
-    df[f"Donchian_Mid{suffix}"] = (df[f"Donchian_High{suffix}"] + df[f"Donchain_Low{suffix}"]) / 2
+    df[f"Donchian_Mid{suffix}"] = (df[f"Donchian_High{suffix}"] + df[f"Donchian_Low{suffix}"]) / 2
     return df
     
 

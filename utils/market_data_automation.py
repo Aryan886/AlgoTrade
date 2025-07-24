@@ -11,6 +11,7 @@ from strategies.indicators import compute_indicators, generate_signals
 import os
 from typing import Optional, Dict
 from broker.zerodha_client import kite_from_saved_token
+from strategies.strategy import donchian_ao_strategy
 
 # Set up logging with rotation
 from logging.handlers import RotatingFileHandler
@@ -28,6 +29,25 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Set up logging for trades
+logging.basicConfig(filename='logs/trade_actions.log',
+                    level=logging.INFO,
+                    format='%(asctime)s %(levelname)s %(message)s')
+
+
+def log_trade_action(first_leg, second_leg):
+    if first_leg and second_leg:
+        delta_diff = abs(abs(first_leg['delta']) - abs(second_leg['delta']))
+        msg = (f"TRADE TAKEN: {first_leg['tradingsymbol']} (Delta: {first_leg['delta']}) & "
+               f"{second_leg['tradingsymbol']} (Delta: {second_leg['delta']}) | "
+               f"Delta Difference: {delta_diff}")
+        print(msg)
+        logging.info(msg)
+    else:
+        msg = "NO TRADE: No suitable option pair found."
+        print(msg)
+        logging.info(msg)
 
 def calculate_vix_separately():
     """Calculate VIX independently of market data fetching"""
@@ -81,6 +101,19 @@ def generate_and_store_signals(df, symbol="NIFTY50"):
             
     except Exception as e:
         logger.error(f"Error in signal generation: {e}")
+
+def run_trading_strategy():
+    """Execute the main trading strategy and log the outcome."""
+    try:
+        logger.info("Running Donchian AO trading strategy...")
+        result = donchian_ao_strategy(symbol="NIFTY50")
+        if isinstance(result, tuple) and len(result) == 2:
+            first_leg, second_leg = result
+            log_trade_action(first_leg, second_leg)
+        else:
+            log_trade_action(None, None) # Log that no trade was taken
+    except Exception as e:
+        logger.error(f"Error running trading strategy: {e}")
 
 class MarketDataAutomation:
     def __init__(self):
@@ -217,12 +250,16 @@ class MarketDataAutomation:
         # High-accuracy delta calculation (for delta neutral strategies)
         schedule.every().minute.do(calculate_high_accuracy_delta)
         
+        # Run the main trading strategy
+        schedule.every().minute.do(run_trading_strategy)
+
         logger.info("Schedule setup completed:")
         logger.info("- 1m data: Every minute (during market hours)")
         logger.info("- 5m data: Every 5 minutes (during market hours)")
         logger.info("- 15m data: Every 15 minutes (during market hours)")
         logger.info("- VIX calculation: Every 5 minutes (independent)")
         logger.info("- High-accuracy delta: Every minute (Black-Scholes)")
+        logger.info("- Trading Strategy: Every minute")
         logger.info("- Signal generation: Integrated with data fetching")
     
     def run_scheduler(self):

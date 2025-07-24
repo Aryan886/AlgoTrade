@@ -8,6 +8,7 @@ __pycache__/
 *.sqlite
 db/trading_bot.db
 database/datas
+*.log
 
 # Ignore virtual environments
 venv/

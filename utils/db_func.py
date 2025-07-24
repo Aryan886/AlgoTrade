@@ -80,7 +80,7 @@ def store_market_data(df, symbol: str = 'NIFTY50', interval: str = '5m', vix_val
 
     conn.commit()
     conn.close()
-    print(f"Stored {len(df)} rows into {table_name} successfully!!!")
+    print(f"Market data stored successfully in {table_name}.")
 
 #Fetches historical market data for a given symbol and date range.
 def fetch_market_data(symbol: str = 'NIFTY50', start=None, end=None, interval=None, db_path=DB_PATH):
@@ -268,7 +268,7 @@ def store_high_accuracy_options_data(options_list: List[Dict], symbol: str, spot
             continue
     conn.commit()
     conn.close()
-    print(f"Stored {len(options_list)} high-accuracy options data points for {symbol} successfully!!!")
+    print("Options data stored successfully.")
 
 
 def fetch_cached_options_data(symbol: str = 'NIFTY50', db_path=DB_PATH) -> List[Dict]:
@@ -329,9 +329,11 @@ def calculate_and_store_high_accuracy_delta(
         else:
             print("Could not get spot price")
             return None
+        
         # Get cached options data
         cached_options = fetch_cached_options_data(symbol, db_path)
         # Log the age of cached data
+        """
         if cached_options:
             import sqlite3
             conn = sqlite3.connect(db_path)
@@ -347,6 +349,8 @@ def calculate_and_store_high_accuracy_delta(
                 oldest_age = (now - dt.strptime(oldest[0], "%Y-%m-%d %H:%M:%S")).total_seconds()
                 print(f"[CACHE] Option data age: newest = {newest_age:.1f}s, oldest = {oldest_age:.1f}s")
         today = date.today()
+        """
+        
         # Check if all cached options are expired
         all_expired = True
         for opt in cached_options:
@@ -356,6 +360,7 @@ def calculate_and_store_high_accuracy_delta(
             if expiry >= str(today):
                 all_expired = False
                 break
+                
         # If all expired, fetch fresh option data
         if all_expired or not cached_options:
             print("All cached options are expired or cache is empty. Fetching fresh option data...")
@@ -364,6 +369,7 @@ def calculate_and_store_high_accuracy_delta(
             if not fresh_options:
                 print("Failed to fetch fresh option data.")
                 return None
+                
             # Map fresh options to expected format
             formatted_options = []
             iv_calc = ProductionIVCalculator()
@@ -393,22 +399,25 @@ def calculate_and_store_high_accuracy_delta(
                 })
             store_high_accuracy_options_data(formatted_options, symbol, spot_price, db_path)
             cached_options = fetch_cached_options_data(symbol, db_path)
-        # Determine strike band if not provided
+            
         if not cached_options:
             print("No options data available after refresh.")
             return None
+            
         if strike_band is None:
             strikes = [opt['strike_price'] for opt in cached_options]
             atm_strike = min(strikes, key=lambda x: abs(x - spot_price))
             band = STRIKE_BAND
             interval = STRIKE_INTERVAL
             strike_band = [atm_strike + i*interval for i in range(-band//interval, band//interval+1)]
+            
         # Calculate deltas for the strike band
         delta_results = calculate_delta_for_strike_band(
             spot_price=spot_price,
             strike_band=strike_band,
             option_data=cached_options
         )
+        
         # Store delta results in delta_cache table if logging enabled
         if ENABLE_DELTA_LOGGING:
             conn = sqlite3.connect(db_path)
@@ -438,7 +447,7 @@ def calculate_and_store_high_accuracy_delta(
                         ))
             conn.commit()
             conn.close()
-        print(f"High-accuracy delta calculated{' and stored' if ENABLE_DELTA_LOGGING else ''} for {len(delta_results)} strikes")
+        print("Delta calculations completed and stored successfully.")
         return {
             'spot_price': spot_price,
             'strike_band': strike_band,
@@ -446,7 +455,7 @@ def calculate_and_store_high_accuracy_delta(
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
     except Exception as e:
-        print(f"Error in high-accuracy delta calculation: {e}")
+        print(f"Error in delta calculation: {e}")
         return None
 
 
@@ -507,5 +516,42 @@ def print_latest_market_data_timestamps(db_path=DB_PATH):
             print(f"Error querying {table_name}: {e}")
         finally:
             conn.close()
+
+
+def fetch_latest_delta_data(symbol: str = 'NIFTY50', db_path=DB_PATH) -> List[Dict]:
+    """
+    Fetches the most recent delta data for all strikes from the delta_cache table.
+    """
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    # Find the most recent timestamp in the delta_cache
+    cursor.execute("SELECT MAX(timestamp) FROM delta_cache WHERE symbol = ?", (symbol,))
+    latest_timestamp = cursor.fetchone()[0]
+
+    if not latest_timestamp:
+        conn.close()
+        return []
+
+    # Fetch all records with that timestamp
+    cursor.execute("""
+        SELECT strike_price, option_type, delta, ltp, tradingsymbol
+        FROM delta_cache
+        WHERE timestamp = ? AND symbol = ?
+    """, (latest_timestamp, symbol))
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    options_data = []
+    for row in rows:
+        options_data.append({
+            'strike_price': row[0],
+            'option_type': row[1],
+            'delta': row[2],
+            'ltp': row[3],
+            'tradingsymbol': row[4]
+        })
+    return options_data
 
 
