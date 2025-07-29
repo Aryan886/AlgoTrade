@@ -48,7 +48,7 @@ def donchian_ao_strategy(symbol="NIFTY50"):
         if latest_5min['Close'] > latest_5min['Donchian_High_5m'] and \
            latest_15min['Close'] > latest_15min['Donchian_High_15m']:
             print("Simultaneous breakout on 5m and 15m charts. No positions until 1:00 PM.")
-            return
+            return None 
 
     # --- Essentials for Trade Evaluation ---
     essentials = {
@@ -58,6 +58,7 @@ def donchian_ao_strategy(symbol="NIFTY50"):
         '15m_ao': 1 if latest_15min['AO'] > 0 else -1,
     }
 
+    essentials['vix_condition'] = 1 if latest_vix['Close'] <= latest_vix['Donchian_Mid_vix'] else -1
     #Ask chatgpt-man I'm not sure how this works(something like constructor loop)
     positive_essentials = sum(1 for value in essentials.values() if value == 1)
 
@@ -165,6 +166,50 @@ def select_options_for_trade(options_data):
         return None, None
         
     return first_leg, second_leg
+
+def get_current_entry_criteria(symbol = "NIFTY50"):
+    """
+    Extract current market conditin for entry criteria validation
+    This function duplicates the logic from donchian_ao_strategy to get current conditions
+    """
+
+    try:
+        #Fetch the same data as in the main strategy
+        df_5min = fetch_market_data(symbol=symbol, interval="5m")
+        df_15min = fetch_market_data(symbol=symbol, interval="15m")
+        vix_data = fetch_vix_data(symbol="VIX")
+
+        if df_5min.empty or df_15min.empty or vix_data.empty:
+            return None
+        
+        # Calculate indicators
+        df_5min = add_donchian_channel(df_5min, period=20, suffix="_5m")
+        df_5min = add_awesome_oscillator(df_5min)
+        
+        df_15min = add_donchian_channel(df_15min, period=20, suffix="_15m")
+        df_15min = add_awesome_oscillator(df_15min)
+        
+        vix_data = add_donchian_channel(vix_data, period=20, suffix="_vix")
+        
+        # Get latest values
+        latest_5min = df_5min.iloc[-1]
+        latest_15min = df_15min.iloc[-1]
+        latest_vix = vix_data.iloc[-1]
+
+        # Return the same essentials structure used in the main strategy
+        essentials = {
+            '5m_donchian': 1 if latest_5min['Close'] > latest_5min['Donchian_Mid_5m'] else -1,
+            '5m_ao': 1 if latest_5min['AO'] > 0 else -1,
+            '15m_donchian': 1 if latest_15min['Close'] > latest_15min['Donchian_Mid_15m'] else -1,
+            '15m_ao': 1 if latest_15min['AO'] > 0 else -1,
+            'vix_condition': 1 if latest_vix['Close'] <= latest_vix['Donchian_Mid_vix'] else -1
+        }
+        
+        return essentials
+        
+    except Exception as e:
+        logging.error(f"Error getting current entry criteria: {e}")
+        return None
 
 if __name__ == "__main__":
     donchian_ao_strategy()

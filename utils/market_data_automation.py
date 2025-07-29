@@ -12,6 +12,10 @@ import os
 from typing import Optional, Dict
 from broker.zerodha_client import kite_from_saved_token
 from strategies.strategy import donchian_ao_strategy
+from strategies.paper_trades import PaperTrader
+import argparse
+import json
+
 
 # Set up logging with rotation
 from logging.handlers import RotatingFileHandler
@@ -115,6 +119,7 @@ def run_trading_strategy():
     except Exception as e:
         logger.error(f"Error running trading strategy: {e}")
 
+
 class MarketDataAutomation:
     def __init__(self):
         self.is_running = False
@@ -123,6 +128,9 @@ class MarketDataAutomation:
             'start': '09:15',
             'end': '15:30'
         }
+
+        self.paper_trader = PaperTrader("NIFTY50")
+        logger.info("Paper trader successfully initialised....")
         
         # Market holidays for 2025 (you can update this list)
         self.market_holidays_2025 = [
@@ -234,6 +242,63 @@ class MarketDataAutomation:
         """Fetch 15-minute data"""
         return self.fetch_data_with_retry('15m')
     
+    def run_paper_trading_cycle(self):
+        """Run one cycle of paper trading logic"""
+        if not self.is_market_open():
+            return
+            
+        try:
+            logger.info("Running paper trading cycle...")
+            
+            # Check for new signals if no active position
+            if not self.paper_trader.has_active_position():
+                signal = donchian_ao_strategy(self.paper_trader.symbol)
+                if signal:
+                    logger.info("New trading signal received, executing paper trade")
+                    self.paper_trader.execute_paper_trade(signal)
+                else:
+                    logger.debug("No new trading signals")
+
+            # Manage existing position
+            if self.paper_trader.has_active_position():
+                logger.debug("Managing existing positions")
+                self.paper_trader.manage_existing_positions()
+                
+                # Log current position status
+                status = self.paper_trader.get_position_status()
+                if isinstance(status, dict):
+                    logger.info(f"Position Status - P&L: {status.get('current_profit', 0):.2f}, "
+                              f"Adjustments: {status.get('adjustments_count', 0)}")
+                
+        except Exception as e:
+            logger.error(f"Error in paper trading cycle: {e}")
+
+
+    def get_paper_trading_summary(self):
+        """Get detailed paper trading summary"""
+        try:
+            status = self.paper_trader.get_position_status()
+
+            if isinstance(status, dict) and status.get('position_active'):
+                return{
+                    'active_position':True,
+                    'entry_time': status['entry_time'].strftime('%Y-%m-%d %H:%M:%S') if status['entry_time'] else None,
+                    'current_profit': round(status['current_profit'], 2),
+                    'adjustment_costs' : round(status['adjustment_costs'], 2),
+                    'adjustments_count': status['adjustments_count'],
+                    'ce_price': status['ce_price'],
+                    'pe_price': status['pe_price'],
+                    'total_adjustments': len(self.paper_trader.adjustment_history),
+                    'position_duration': str(datetime.now() - status['entry_time'])
+                }
+            
+            else:
+                return {'active_position': False, 'message': 'No active position'}
+            
+        except Exception as e:
+            return {'error': f'Error getting paper trading status : {e}'}
+        
+
     def setup_schedule(self):
         """Setup the schedule for data fetching"""
         # Clear any existing schedules
@@ -252,6 +317,9 @@ class MarketDataAutomation:
         
         # Run the main trading strategy
         schedule.every().minute.do(run_trading_strategy)
+
+        #PAPER TRADING - Run every minute during market hours
+        schedule.every().minute.do(self.run_paper_trading_cycle)
 
         logger.info("Schedule setup completed:")
         logger.info("- 1m data: Every minute (during market hours)")
@@ -306,16 +374,23 @@ class MarketDataAutomation:
         """Stop the market data automation"""
         logger.info("Stopping market data automation...")
         self.is_running = False
+
+        if self.paper_trader.has_active_position():
+            logger.info("Closing paper trading position due to system shutdown")
+            self.paper_trader.close_position("System shutdown")
+
         if self.scheduler_thread and self.scheduler_thread.is_alive():
             self.scheduler_thread.join(timeout=5)
         logger.info("Market data automation stopped")
     
     def get_status(self):
         """Get the current status of the automation"""
+        paper_status = self.paper_trader.get_position_status()
         return {
             'is_running': self.is_running,
             'market_open': self.is_market_open(),
-            'last_fetch_times': self.last_fetch_times
+            'last_fetch_times': self.last_fetch_times,
+            'paper_trading_status': paper_status
         }
     
     def test_connection(self):
@@ -335,19 +410,99 @@ class MarketDataAutomation:
             logger.error(f"Connection test failed: {e}")
             return False
 
+
+    def print_status_report(automation):
+        """Print a formatted status report"""
+        print("\n" + "="*60)
+        print("📊 MARKET DATA & PAPER TRADING STATUS")
+        print("="*60)
+        
+        # General Status
+        general_status = automation.get_status()
+        print(f"🔄 System Running: {'✅ YES' if general_status['is_running'] else '❌ NO'}")
+        print(f"📈 Market Open: {'✅ YES' if general_status['market_open'] else '❌ NO'}")
+        print(f"⏰ Current Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        # Data Fetch Status
+        print(f"\n📊 LAST DATA FETCH TIMES:")
+        for interval, last_time in general_status['last_fetch_times'].items():
+            if last_time:
+                time_str = last_time.strftime('%H:%M:%S')
+                time_ago = (datetime.now() - last_time).total_seconds() / 60
+                print(f"   {interval}: {time_str} ({time_ago:.1f} min ago)")
+            else:
+                print(f"   {interval}: Never")
+        
+        # Paper Trading Status
+        print(f"\n💼 PAPER TRADING STATUS:")
+        paper_status = automation.get_paper_trading_summary()
+        
+        if paper_status.get('active_position'):
+            print(f"   📍 Position: ✅ ACTIVE")
+            print(f"   💰 Current P&L: ₹{paper_status['current_profit']}")
+            print(f"   ⏱️  Entry Time: {paper_status['entry_time']}")
+            print(f"   📏 Duration: {paper_status['position_duration']}")
+            print(f"   🔄 Adjustments: {paper_status['adjustments_count']}")
+            print(f"   💸 Adjustment Costs: ₹{paper_status['adjustment_costs']}")
+            if paper_status['ce_price']:
+                print(f"   📞 CE Price: ₹{paper_status['ce_price']}")
+            if paper_status['pe_price']:
+                print(f"   📞 PE Price: ₹{paper_status['pe_price']}")
+        else:
+            print(f"   📍 Position: ❌ NO ACTIVE POSITION")
+            print(f"   💡 Status: Waiting for trading signals...")
+        
+        if paper_status.get('error'):
+            print(f"   ⚠️  Error: {paper_status['error']}")
+        
+        print("="*60)
+        print()
+
 def main():
-    """Main function to run the market data automation"""
+    """Main function to run the market data automation + command line support"""
+    parser = argparse.ArgumentParser(description='Market Data Automation with Paper Trading')
+    parser.add_argument('--status', '-s', action='store_true', 
+                       help='Show current status and exit')
+    parser.add_argument('--json', '-j', action='store_true',
+                       help='Output status in JSON format (use with --status)')
+    
+    args = parser.parse_args()
+    
+    
     automation = MarketDataAutomation()
+
+    if args.status:
+        try:
+            if args.json:
+                #JSON output for clearer understanding
+                status_data = {
+                    'general': automation.get_status(),
+                    'paper_trading': automation.get_paper_trading_summary(),
+                    'timestamp': datetime.now().isoformat()
+                }
+                print(json.dumps(status_data, indent=2, default=str))
+
+            else:
+                #Easy readable understanding
+                automation.print_status_report()
+
+        except Exception as e:
+            print(f"Error getting status : {e}")
+        return
     
     try:
         automation.start()
+
+        logger.info("==== INTEGRATED AUTOMATION STARTED===")
+        logger.info("Runnign : Market Data gathering and Paper Trading")
+        logger.info("Press Ctrl+C to stop")
         
         # Keep the main thread alive
         while automation.is_running:
             time.sleep(1)
             
     except KeyboardInterrupt:
-        logger.info("Received interrupt signal")
+        logger.info("Received interrupt signal....")
     finally:
         automation.stop()
 
