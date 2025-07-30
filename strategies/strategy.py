@@ -13,6 +13,11 @@ CUTOFF_TIME = pd.to_datetime("13:00").time()
 
 def donchian_ao_strategy(symbol="NIFTY50"):
     # 1. Fetch Data from database
+    print(f"[DEBUG] Running strategy for symbol : {symbol}")
+    if not symbol:
+        symbol = "NIFTY50"
+
+    print(f"[DEBUG] fetch_market_data called eith symbol : {symbol}")
     df_5min = fetch_market_data(symbol=symbol, interval="5m")
     df_15min = fetch_market_data(symbol=symbol, interval="15m")
     vix_data = fetch_vix_data(symbol="VIX") # Fetches from vix_data table
@@ -167,11 +172,13 @@ def select_options_for_trade(options_data):
         
     return first_leg, second_leg
 
-def get_current_entry_criteria(symbol = "NIFTY50"):
+def get_current_entry_criteria(symbol="NIFTY50"):
     """
     Extract current market conditin for entry criteria validation
     This function duplicates the logic from donchian_ao_strategy to get current conditions
     """
+    if not symbol:
+        symbol = "NIFTY50"
 
     try:
         #Fetch the same data as in the main strategy

@@ -180,7 +180,16 @@ def calculate_delta_for_strike_band(
         if ce_option:
             try:
                 T = iv_calc.calculate_time_to_expiry(ce_option['expiry_date'])
+                if T is None:
+                    print(f"[SKIP] CE option for strike {strike} has invalid time to expiry....")
+                    continue
+                
                 log_option_details(f"[DEBUG] Using CE option for strike {strike}:", ce_option, T)
+                iv_val = ce_option.get('iv')
+                if iv_val is None:
+                    print(f"[SKIP] CE option for strike {strike} has no valid IV")
+                    continue
+                
                 ce_delta = iv_calc.calculate_delta(
                     spot=spot_price,
                     strike=strike,
@@ -204,7 +213,16 @@ def calculate_delta_for_strike_band(
         if pe_option:
             try:
                 T = iv_calc.calculate_time_to_expiry(pe_option['expiry_date'])
+                if T is None:
+                    print(f"[SKIP] PE option for strike {strike} has invalid time to expiry")
+                    continue
+
                 log_option_details(f"[DEBUG] Using PE option for strike {strike}:", pe_option, T)
+                iv_val = pe_option.get('iv')
+                if iv_val is None:
+                    print(f"[SKIP] PE option for strike {strike} has no valid IV")
+                    continue
+
                 pe_delta = iv_calc.calculate_delta(
                     spot=spot_price,
                     strike=strike,
@@ -330,7 +348,7 @@ def get_current_delta(
         
         if expiry >= str(current_date):
             T = iv_calc.calculate_time_to_expiry(expiry)
-            if 1/365 <= T <= 60/365:  # 1 day to 60 days preferred
+            if T is not None and 1/365 <= T <= 60/365:  # 1 day to 60 days preferred
                 valid_options.append((opt, T))
     
     if not valid_options:
@@ -341,7 +359,7 @@ def get_current_delta(
                 expiry = str(expiry)
             if expiry >= str(current_date):
                 T = iv_calc.calculate_time_to_expiry(expiry)
-                if T > 0:
+                if T is not None and T> 0:
                     valid_options.append((opt, T))
     
     if not valid_options:
@@ -354,9 +372,16 @@ def get_current_delta(
         volume = opt.get('volume', 0) or opt.get('oi', 0) or 0
         return time_preference, -volume
     
+    for vo in valid_options:
+        if not isinstance(vo, tuple) or len(vo) != 2:
+            print(f"[ERROR] Malformed valid_options entry : {vo}")
     valid_options.sort(key=sort_key)
     target_option, T = valid_options[0][0], valid_options[0][1]
     
+    if T is None:
+        print(f"[SKIP] Cannot calculate delta: T is None for strike {strike}, option type : {option_type}")
+        return None
+
     try:
         log_option_details(f"[DEBUG] Selected {option_type} option for strike {strike}:", target_option, T)
         print(f"[DEBUG] Inputs to calculate_black_scholes_delta: spot_price={spot_price}, strike_price={strike}, T={T}, IV={target_option['iv']}, option_type={option_type}")

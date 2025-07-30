@@ -90,6 +90,7 @@ def fetch_market_data(symbol: str = 'NIFTY50', start=None, end=None, interval=No
     Now includes VIX data alongside other market data.
     """
     conn = sqlite3.connect(db_path)
+    print(f"[DEBUG] fetch_market_data called with symbol={symbol}")
     
     # Determine which table to query based on interval
     if interval:
@@ -113,7 +114,10 @@ def fetch_market_data(symbol: str = 'NIFTY50', start=None, end=None, interval=No
 
     query += " ORDER BY timestamp"
 
-    df = pd.read_sql_query(query, conn, parse_dates=["timestamp"])
+    print(f"[DEBUG] Final query : {query}")
+    print(f"[DEBUG] Params : {params}")
+
+    df = pd.read_sql_query(query, conn,params=params, parse_dates=["timestamp"])
     df.set_index("timestamp", inplace=True)
     conn.close()
     return df

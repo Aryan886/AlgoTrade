@@ -14,13 +14,14 @@ logging.basicConfig(filename="logs/paper_trades.log", level=logging.INFO,
 class PaperTrader:
     def __init__(self, symbol="NIFTY50"):
         self.symbol = symbol
-        self.position = None,
-        self.adjustment_history = [],
-        self.adjustment_cost = 0,
-        self.entry_criteria = None,
-        self.last_risk_check = None,
-        self.last_profit_check = None,
+        self.position = None
+        self.adjustment_history = []
+        self.adjustment_cost = 0
+        self.entry_criteria = None
+        self.last_risk_check = None
+        self.last_profit_check = None
         self.entry_time = None
+
 
     @property
     def total_adjustment_costs(self):
@@ -296,7 +297,7 @@ class PaperTrader:
             if self.position['ce_option']:
                 ce_symbol = self.position['ce_option']['tradingsymbol']
                 for opt in options_data:
-                    if opt['tradingsymbol'] == ce_symbol:
+                    if isinstance(opt, dict) and opt.get('tradingsymbol') == ce_symbol:
                         self.position['current_prices']['CE'] = opt['ltp']
                         break
 
@@ -304,7 +305,7 @@ class PaperTrader:
             if self.position['pe_option']:
                 pe_symbol = self.position['pe_option']['tradingsymbol']
                 for opt in options_data:
-                    if opt['tradingsymbol'] == pe_symbol:
+                    if isinstance(opt, dict) and opt.get('tradingsymbol') == pe_symbol:
                         self.position['current_prices']['PE'] = opt['ltp']
                         break
                 
