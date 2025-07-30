@@ -3,6 +3,7 @@ import pandas as pd
 import os
 from typing import Optional, List, Dict
 from datetime import datetime
+from datetime import date
 from config.config import CONFIG
 from utils.black_scholes import (
     calculate_delta_for_strike_band,
@@ -100,7 +101,7 @@ def fetch_market_data(symbol: str = 'NIFTY50', start=None, end=None, interval=No
     
     params = []
 
-    if symbol:
+    if symbol is not None and symbol != "":
         query += " AND symbol = ?"
         params.append(symbol)
     if start:
@@ -333,7 +334,7 @@ def calculate_and_store_high_accuracy_delta(
         # Get cached options data
         cached_options = fetch_cached_options_data(symbol, db_path)
         # Log the age of cached data
-        """
+
         if cached_options:
             import sqlite3
             conn = sqlite3.connect(db_path)
@@ -348,11 +349,18 @@ def calculate_and_store_high_accuracy_delta(
                 newest_age = (now - dt.strptime(newest[0], "%Y-%m-%d %H:%M:%S")).total_seconds()
                 oldest_age = (now - dt.strptime(oldest[0], "%Y-%m-%d %H:%M:%S")).total_seconds()
                 print(f"[CACHE] Option data age: newest = {newest_age:.1f}s, oldest = {oldest_age:.1f}s")
+
         today = date.today()
-        """
+        print(f"DEBUG: today = {today}, type = {type(today)}")  # Add this debug line
         
         # Check if all cached options are expired
         all_expired = True
+        today_str = str(today) if today else None
+
+        if not today_str:
+            print("ERROR: Could not get today's date..")
+            return None
+
         for opt in cached_options:
             expiry = opt['expiry_date']
             if not isinstance(expiry, str):
@@ -439,11 +447,12 @@ def calculate_and_store_high_accuracy_delta(
                         cursor.execute("""
                             INSERT INTO delta_cache (
                                 timestamp, strike_price, option_type, delta,
-                                expiry_date, spot_price, symbol, ltp
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                expiry_date, spot_price, symbol, ltp, tradingsymbol
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
                             timestamp_str, strike, option_type, delta_value,
-                            cached_options[0]['expiry_date'], spot_price, symbol, ltp_value
+                            cached_options[0]['expiry_date'], spot_price, symbol, ltp_value,
+                            cached_options[0].get('tradingsymbol', 'N/A')
                         ))
             conn.commit()
             conn.close()

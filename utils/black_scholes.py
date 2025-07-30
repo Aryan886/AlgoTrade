@@ -141,7 +141,7 @@ def calculate_delta_for_strike_band(
                     T = iv_calc.calculate_time_to_expiry(expiry)
                     
                     # Filter options with reasonable time to expiry (1-60 days preferred)
-                    if 1/365 <= T <= 60/365:  # 1 day to 60 days
+                    if T is not None and 1/365 <= T <= 60/365:  # 1 day to 60 days
                         valid_options.append((opt, T))
             
             if not valid_options:
@@ -152,7 +152,7 @@ def calculate_delta_for_strike_band(
                         expiry = str(expiry)
                     if expiry >= str(current_date):
                         T = iv_calc.calculate_time_to_expiry(expiry)
-                        if T > 0:
+                        if T is not None and T > 0:
                             valid_options.append((opt, T))
             
             if not valid_options:

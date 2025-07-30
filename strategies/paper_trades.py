@@ -322,7 +322,7 @@ class PaperTrader:
         if self.should_check_profit(current_time):
             if self.check_profit_target():
                 return #Position closed
-            self.last_profit_check = current_time()
+            self.last_profit_check = current_time
             
         #Rule 2: Dynamic position adjustment
         self.check_positon_adjustment()
