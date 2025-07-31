@@ -20,7 +20,7 @@ def donchian_ao_strategy(symbol="NIFTY50"):
     print(f"[DEBUG] fetch_market_data called eith symbol : {symbol}")
     df_5min = fetch_market_data(symbol=symbol, interval="5m")
     df_15min = fetch_market_data(symbol=symbol, interval="15m")
-    vix_data = fetch_vix_data(symbol="VIX") # Fetches from vix_data table
+    vix_data = fetch_vix_data(symbol=symbol) # Fetches from vix_data table
 
     if df_5min.empty or df_15min.empty or vix_data.empty:
         logging.warning("Data not available for one or more timeframes. Skipping strategy.")
@@ -43,27 +43,27 @@ def donchian_ao_strategy(symbol="NIFTY50"):
     # --- Conditions to Avoid Taking a Position ---
     
     # 1. VIX Condition
-    if latest_vix['Close'] > latest_vix['Donchian_Mid_vix']:
+    if latest_vix['close'] > latest_vix['donchian_mid_vix']:
         logging.info("VIX is too high. No positions will be taken.")
         return None
 
     # 2. Simultaneous Breakout Condition
     now = pd.Timestamp.now().time()
     if now < CUTOFF_TIME:
-        if latest_5min['Close'] > latest_5min['Donchian_High_5m'] and \
-           latest_15min['Close'] > latest_15min['Donchian_High_15m']:
+        if latest_5min['close'] > latest_5min['donchian_upper_5m'] and \
+           latest_15min['close'] > latest_15min['donchian_upper_15m']:
             print("Simultaneous breakout on 5m and 15m charts. No positions until 1:00 PM.")
             return None 
 
     # --- Essentials for Trade Evaluation ---
     essentials = {
-        '5m_donchian': 1 if latest_5min['Close'] > latest_5min['Donchian_Mid_5m'] else -1,
-        '5m_ao': 1 if latest_5min['AO'] > 0 else -1,
-        '15m_donchian': 1 if latest_15min['Close'] > latest_15min['Donchian_Mid_15m'] else -1,
-        '15m_ao': 1 if latest_15min['AO'] > 0 else -1,
+        '5m_donchian': 1 if latest_5min['close'] > latest_5min['donchian_mid_5m'] else -1,
+        '5m_ao': 1 if latest_5min['ao_value'] > 0 else -1,
+        '15m_donchian': 1 if latest_15min['close'] > latest_15min['donchian_mid_15m'] else -1,
+        '15m_ao': 1 if latest_15min['ao_value'] > 0 else -1,
     }
 
-    essentials['vix_condition'] = 1 if latest_vix['Close'] <= latest_vix['Donchian_Mid_vix'] else -1
+    essentials['vix_condition'] = 1 if latest_vix['close'] <= latest_vix['donchian_mid_vix'] else -1
     #Ask chatgpt-man I'm not sure how this works(something like constructor loop)
     positive_essentials = sum(1 for value in essentials.values() if value == 1)
 
@@ -78,7 +78,7 @@ def donchian_ao_strategy(symbol="NIFTY50"):
     if positive_essentials == 1 or positive_essentials == 2 :
         # Check for the specific condition to sell ATM Call and Put
         if positive_essentials ==1 and essentials['5m_donchian'] == 1:
-            logging.info("SELL signal: 5m close is above 5m mid Donchian, and all other essentials are negative.")
+            logging.info("SELL signal: 5m'close is above 5m mid Donchian, and all other essentials are negative.")
             
             # 1. Calculate and store latest deltas
             calculate_and_store_high_accuracy_delta(symbol=symbol)
@@ -100,7 +100,7 @@ def donchian_ao_strategy(symbol="NIFTY50"):
 
         
         elif positive_essentials == 2 and (essentials['5m_donchian'] == 1 and essentials['5m_ao'] == 1):
-            logging.info("SELL Signal: 5m close is above mid-donchian and 5m AO is positive")
+            logging.info("SELL Signal: 5m'close is above mid-donchian and 5m AO is positive")
 
             #1.Calculate and store deltas 
             calculate_and_store_high_accuracy_delta(symbol=symbol)  
@@ -142,13 +142,13 @@ def select_options_for_trade(options_data):
         print("Not enough options data to select a pair.")
         return None, None
 
-    # 1. Find the option with delta closest to 50
+    # 1. Find the option with delta'closest to 50
     all_options = calls + puts
     first_leg = min(all_options, key=lambda x: abs(abs(x['delta']) - 50))
 
     # Ensure the first leg is within the +/- 5 range
     if abs(abs(first_leg['delta']) - 50) > 5:
-        print(f"No option found with delta within +/- 5 of 50. Closest was {first_leg['delta']}.")
+        print(f"No option found with delta within +/- 5 of 50.'closest was {first_leg['delta']}.")
         return None, None
 
     # 2. Find the second leg
@@ -205,11 +205,11 @@ def get_current_entry_criteria(symbol="NIFTY50"):
 
         # Return the same essentials structure used in the main strategy
         essentials = {
-            '5m_donchian': 1 if latest_5min['Close'] > latest_5min['Donchian_Mid_5m'] else -1,
-            '5m_ao': 1 if latest_5min['AO'] > 0 else -1,
-            '15m_donchian': 1 if latest_15min['Close'] > latest_15min['Donchian_Mid_15m'] else -1,
-            '15m_ao': 1 if latest_15min['AO'] > 0 else -1,
-            'vix_condition': 1 if latest_vix['Close'] <= latest_vix['Donchian_Mid_vix'] else -1
+            '5m_donchian': 1 if latest_5min['close'] > latest_5min['donchian_mid_5m'] else -1,
+            '5m_ao': 1 if latest_5min['ao_value'] > 0 else -1,
+            '15m_donchian': 1 if latest_15min['close'] > latest_15min['donchian_mid_15m'] else -1,
+            '15m_ao': 1 if latest_15min['ao_value'] > 0 else -1,
+            'vix_condition': 1 if latest_vix['close'] <= latest_vix['donchian_mid_vix'] else -1
         }
         
         return essentials

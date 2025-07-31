@@ -77,7 +77,7 @@ class PaperTrader:
         return (current_time - self.last_profit_check).total_seconds() > 300
     
     def close_position(self, reason):
-        """Close active position(completely)"""
+        """close active position(completely)"""
         if not self.has_active_position():
             return
         
@@ -124,14 +124,14 @@ class PaperTrader:
         try:
             from strategies.indicators import add_donchian_channel
 
-            vix_data = fetch_vix_data("VIX")
+            vix_data = fetch_vix_data("NIFTY50")
             if vix_data.empty:
                 return False
             
             vix_data = add_donchian_channel(vix_data, period=20, suffix="_vix")
             latest_vix = vix_data.iloc[-1]
 
-            if latest_vix['Close'] > latest_vix['Donchian_Mid_vix']:
+            if latest_vix['close'] > latest_vix['donchian_mid_vix']:
                 logging.info(f"VIX BREACH : Closing position due to high VIX")
                 self.close_position("VIX Breach")
                 return True
@@ -194,7 +194,7 @@ class PaperTrader:
             logging.error(f"Error finding replacement option : {e}")
             
     def close_option(self, option_type):
-        """Close specific option (CE/PE) and add adjustment costs"""
+        """close specific option (CE/PE) and add adjustment costs"""
         if option_type in self.position['current_prices']:
             close_price = self.position['current_prices'][option_type]
             entry_price = self.position['entry_prices'][option_type]
@@ -215,7 +215,7 @@ class PaperTrader:
 
             self.adjustment_history.append({
                 'timestamp': datetime.now(),
-                'action' : f'Closed {option_type}',
+                'action' : f'closed {option_type}',
                 'price' : close_price,
                 'cost': adjustment_cost
             })
@@ -234,14 +234,14 @@ class PaperTrader:
                 price_diff = abs(ce_price - pe_price)
 
                 if price_diff > 18:
-                    #Close the higher priced option
+                    #close the higher priced option
                     if ce_price > pe_price:
                         self.close_option('CE')
-                        logging.info(f"Close CE option at {ce_price} due to adjustment criteria")
+                        logging.info(f"close CE option at {ce_price} due to adjustment criteria")
                     
                     else:
                         self.close_option('PE')
-                        logging.info(f"Close PE option at {pe_price} due to adjustment criteria")
+                        logging.info(f"close PE option at {pe_price} due to adjustment criteria")
 
                     #Find replacement option
                     self.find_replacement_option()
