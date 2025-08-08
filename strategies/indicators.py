@@ -4,7 +4,7 @@ import pandas as pd
 from database.load_data import load_latest_data
 from utils.db_func import fetch_vix_data
 from utils.iv import ProductionIVCalculator
-
+from datetime import datetime, time
 
 def add_awesome_oscillator(df, small=5, large=34):
     df = df.copy()
@@ -322,209 +322,360 @@ def calculate_vix2(option_data, spot_price, strike_window=300):
     return vix
 
 
-def calculate_enhanced_vix(option_data, spot_price, futures_price=None, strike_window=300, spread_threshold=0.30):
+
+def calculate_enhanced_vix(
+    option_data,
+    spot_price,
+    futures_price=None,
+    spread_threshold=0.75,
+    oi_min=20,
+    forward_pct_cutoff=0.10,
+    qk_cap_fraction=1/3,
+    verbose=False
+):
     """
-    Enhanced VIX calculation following NSE methodology using option mid-prices.
+    Production-ready NSE-like VIX estimator (price-based).
 
     Parameters:
-        option_data: list of option dicts (must contain strikePrice, midPrice/lastPrice, bestBid, bestAsk, openInterest, optionType, expiry)
+        option_data: list of dicts containing (per option): 
+                     strikePrice (or strike), optionType ('CE'/'PE'), expiry (YYYY-MM-DD),
+                     bestBid/bid, bestAsk/ask, lastPrice/last_price/ltp, openInterest/oi
         spot_price: current spot index (float)
-        futures_price: optional forward/futures price (float); if provided used as forward index
-        strike_window: include strikes within +/- strike_window of forward index
-        spread_threshold: maximum allowed relative spread (ask-bid)/mid to accept an option (default 0.30)
+        futures_price: optional forward/futures price (float). If provided, used as forward F.
+        spread_threshold: (ask-bid)/QK max allowed before excluding the strike.
+        oi_min: minimum open interest for robust inclusion (used downstream if desired).
+        forward_pct_cutoff: exclude strikes outside [F*(1-forward_pct_cutoff), F*(1+forward_pct_cutoff)]
+        qk_cap_fraction: caps Q(K) at (max(spot, F) * qk_cap_fraction)
+        verbose: print debug info when True
 
     Returns:
-        float VIX (percentage), or None on failure.
+        float VIX (percentage) or None on failure.
     """
-    import math
-    from datetime import datetime, time
 
     if not option_data:
-        print("No option data provided")
+        if verbose: print("No option_data provided")
         return None
 
-    forward_index = futures_price if futures_price else spot_price
-
-    # Build mapping strike -> {'CE': row, 'PE': row}
-    strikes_data = {}
-    for row in option_data:
-        strike = row.get("strikePrice")
-        if strike is None:
-            continue
-        strikes_data.setdefault(strike, {})
-        opt_type = row.get("optionType")
-        if opt_type in ("CE", "PE"):
-            strikes_data[strike][opt_type] = row
-
-    if not strikes_data:
-        print("No strikes found in option_data")
-        return None
-
-    sorted_strikes = sorted(strikes_data.keys())
-
-    # determine K0: largest strike <= forward_index, else smallest strike
-    strikes_below_forward = [s for s in sorted_strikes if s <= forward_index]
-    if strikes_below_forward:
-        K0 = max(strikes_below_forward)
-    else:
-        K0 = min(sorted_strikes)
-
-    # Choose strikes within strike_window
-    candidate_strikes = [s for s in sorted_strikes if abs(s - forward_index) <= strike_window]
-    if len(candidate_strikes) < 3:
-        # fallback to using all strikes if range was too narrow
-        candidate_strikes = sorted_strikes
-
-    # Collect Q(Ki) (premium to be used) per strike following NSE logic:
-    # - If Ki < F: use Put (PE)
-    # - If Ki > F: use Call (CE)
-    # - If Ki == K0: handled as ATM (average CE+PE)
-    valid_options = []
-    filtered_counts = {"missing": 0, "spread": 0, "zero": 0, "selected": 0}
-
-    for strike in candidate_strikes:
-        if strike == K0:
-            # ATM will be added later
-            continue
-
-        row_pair = strikes_data.get(strike, {})
-        if strike < forward_index:
-            selected = row_pair.get("PE")
-        else:
-            selected = row_pair.get("CE")
-
-        if not selected:
-            filtered_counts["missing"] += 1
-            continue
-
-        mid = selected.get("midPrice") or selected.get("lastPrice") or 0
-        oi = selected.get("openInterest", 0)
-        bid = selected.get("bestBid") or 0
-        ask = selected.get("bestAsk") or 0
-
-        if mid <= 0 or oi <= 0:
-            filtered_counts["zero"] += 1
-            continue
-
-        # compute relative spread if possible
-        spread = 0.0
-        if bid and ask and mid:
-            spread = (ask - bid) / mid
-            if spread > spread_threshold:
-                filtered_counts["spread"] += 1
+    # --- Normalize rows ---
+    rows = []
+    for r in option_data:
+        try:
+            strike = r.get("strikePrice") or r.get("strike")
+            if strike is None:
                 continue
-
-        valid_options.append({
-            "strike": strike,
-            "mid_price": float(mid),
-            "oi": oi,
-            "bid": bid,
-            "ask": ask,
-            "expiry": selected.get("expiry")
-        })
-        filtered_counts["selected"] += 1
-
-    # Add ATM (K0) as average of CE and PE if both present
-    ce_atm = strikes_data.get(K0, {}).get("CE")
-    pe_atm = strikes_data.get(K0, {}).get("PE")
-    if ce_atm or pe_atm:
-        call_mid = ce_atm.get("midPrice") if ce_atm else None
-        put_mid = pe_atm.get("midPrice") if pe_atm else None
-        call_mid = call_mid or (ce_atm.get("lastPrice") if ce_atm else 0)
-        put_mid = put_mid or (pe_atm.get("lastPrice") if pe_atm else 0)
-        if call_mid and put_mid:
-            atm_mid = (float(call_mid) + float(put_mid)) / 2.0
-            atm_oi = (ce_atm.get("openInterest", 0) + pe_atm.get("openInterest", 0)) / 2.0
-            valid_options.append({
-                "strike": K0,
-                "mid_price": float(atm_mid),
-                "oi": atm_oi,
-                "bid": ce_atm.get("bestBid") or pe_atm.get("bestBid") or 0,
-                "ask": ce_atm.get("bestAsk") or pe_atm.get("bestAsk") or 0,
-                "expiry": ce_atm.get("expiry") if ce_atm else pe_atm.get("expiry")
+            opt_type = str(r.get("optionType") or r.get("instrument_type") or "").upper()
+            expiry = r.get("expiry")
+            bid = r.get("bestBid") or r.get("bid") or 0.0
+            ask = r.get("bestAsk") or r.get("ask") or 0.0
+            last = r.get("lastPrice") or r.get("last_price") or r.get("ltp") or 0.0
+            mid = (float(bid) + float(ask)) / 2.0 if (bid and ask) else float(last or 0.0)
+            oi = float(r.get("openInterest") or r.get("oi") or 0.0)
+            rows.append({
+                "strike": float(strike),
+                "type": opt_type,
+                "expiry": expiry,
+                "bid": float(bid or 0.0),
+                "ask": float(ask or 0.0),
+                "mid": float(mid or 0.0),
+                "oi": oi,
+                "last": float(last or 0.0)
             })
+        except Exception:
+            continue
 
-    if not valid_options:
-        print("No valid options for VIX calculation after filtering")
-        print(f"Filter counts: {filtered_counts}")
+    if not rows:
+        if verbose: print("No normalized rows")
         return None
 
-    # Sort by strike
-    valid_options.sort(key=lambda x: x["strike"])
-    strikes_list = [opt["strike"] for opt in valid_options]
+    # --- Group per strike ---
+    strikes_map = {}
+    for r in rows:
+        strikes_map.setdefault(r["strike"], []).append(r)
+    sorted_strikes = sorted(strikes_map.keys())
 
-    # delta_k calculation (NSE method)
-    def delta_k_at(i, strikes):
+    # --- Forward index, K0 ---
+    forward_index = float(futures_price) if futures_price is not None else float(spot_price)
+    strikes_below_f = [s for s in sorted_strikes if s <= forward_index]
+    K0 = max(strikes_below_f) if strikes_below_f else sorted_strikes[0]
+
+    # Build per-strike CE/PE map
+    per_strike = {}
+    for s in sorted_strikes:
+        ce = next((x for x in strikes_map[s] if x["type"] == "CE"), None)
+        pe = next((x for x in strikes_map[s] if x["type"] == "PE"), None)
+        per_strike[s] = {"CE": ce, "PE": pe}
+
+    # --- Forward cutoff range ---
+    lower_bound = forward_index * (1 - forward_pct_cutoff)
+    upper_bound = forward_index * (1 + forward_pct_cutoff)
+
+    # --- NSE-style expansion from K0 until 2 consecutive zero bids, but respect forward cutoff ---
+    selected = set([K0])
+    idx0 = sorted_strikes.index(K0)
+
+    # left side (puts)
+    consecutive_zero = 0
+    for i in range(idx0 - 1, -1, -1):
+        s = sorted_strikes[i]
+        if s < lower_bound:
+            break
+        pe = per_strike[s].get("PE")
+        bid = pe.get("bid", 0) if pe else 0
+        selected.add(s)
+        if bid == 0:
+            consecutive_zero += 1
+        else:
+            consecutive_zero = 0
+        if consecutive_zero >= 2:
+            break
+
+    # right side (calls)
+    consecutive_zero = 0
+    for i in range(idx0 + 1, len(sorted_strikes)):
+        s = sorted_strikes[i]
+        if s > upper_bound:
+            break
+        ce = per_strike[s].get("CE")
+        bid = ce.get("bid", 0) if ce else 0
+        selected.add(s)
+        if bid == 0:
+            consecutive_zero += 1
+        else:
+            consecutive_zero = 0
+        if consecutive_zero >= 2:
+            break
+
+    strikes_used = sorted(selected)
+    if verbose:
+        print(f"Strikes in chain: {len(sorted_strikes)}, strikes used: {len(strikes_used)}, K0={K0}, forward={forward_index:.2f}")
+
+    # --- Determine nearest expiry among used strikes ---
+    today = datetime.now().date()
+    expiry_dates = []
+    for s in strikes_used:
+        pair = per_strike[s]
+        for side in ("CE", "PE"):
+            obj = pair.get(side)
+            if obj and obj.get("expiry"):
+                try:
+                    ed = datetime.strptime(str(obj["expiry"]), "%Y-%m-%d").date()
+                    if ed >= today:
+                        expiry_dates.append(ed)
+                except:
+                    pass
+    nearest_expiry = min(expiry_dates) if expiry_dates else None
+
+    # compute T (years)
+    if nearest_expiry:
+        expiry_dt = datetime.combine(nearest_expiry, time(15, 30))
+        seconds = (expiry_dt - datetime.now()).total_seconds()
+        T = max(seconds / (365 * 24 * 3600), 1/365)
+    else:
+        T = 30.0 / 365.0
+    if verbose:
+        print(f"Nearest expiry: {nearest_expiry}, T(years)={T:.6f}")
+
+    # --- qk cap --- 
+    cap_base = max(float(spot_price or 0.0), float(forward_index or 0.0)) or 1.0
+    qk_cap = cap_base * qk_cap_fraction
+
+    # --- compute contributions using time value ---
+    def delta_k(i, strikes):
         if len(strikes) == 1:
-            return strikes[0] * 0.1 if strikes[0] != 0 else 100
+            return strikes[0] * 0.1
         if i == 0:
             return strikes[1] - strikes[0]
         if i == len(strikes) - 1:
             return strikes[-1] - strikes[-2]
-        return (strikes[i+1] - strikes[i-1]) / 2.0
+        return (strikes[i + 1] - strikes[i - 1]) / 2.0
 
-    # Time to expiry T in years: use first expiry found (assume all same near-term series)
-    T = 30.0 / 365.0
-    # try to calculate real T precisely
-    expiry_candidate = None
-    for opt in valid_options:
-        exp = opt.get("expiry")
-        if exp:
-            expiry_candidate = exp
-            break
-
-    if expiry_candidate:
-        try:
-            # expiry might be a string 'YYYY-MM-DD' or a date/datetime
-            if isinstance(expiry_candidate, str):
-                expiry_dt = datetime.strptime(expiry_candidate, "%Y-%m-%d")
-            elif hasattr(expiry_candidate, "strftime"):
-                expiry_dt = expiry_candidate if isinstance(expiry_candidate, datetime) else datetime.combine(expiry_candidate, time(15,30))
+    contribs = []
+    for i, s in enumerate(strikes_used):
+        pair = per_strike[s]
+        # determine which side to use or ATM
+        if s == K0 and pair.get("CE") and pair.get("PE"):
+            ce = pair["CE"]
+            pe = pair["PE"]
+            tv_ce = max(ce["mid"] - max(spot_price - s, 0), 0)
+            tv_pe = max(pe["mid"] - max(s - spot_price, 0), 0)
+            QK = (tv_ce + tv_pe) / 2.0
+            oi = (ce["oi"] + pe["oi"]) / 2.0
+            bid = ce["bid"] or pe["bid"] or 0.0
+            ask = ce["ask"] or pe["ask"] or 0.0
+            side = "ATM"
+        else:
+            if s < forward_index:
+                chosen = pair.get("PE")
+                side = "PE"
             else:
-                expiry_dt = datetime.strptime(str(expiry_candidate), "%Y-%m-%d")
-            # NSE expiry time is 15:30 by convention for option series
-            expiry_dt = expiry_dt.replace(hour=15, minute=30, second=0, microsecond=0)
-            now = datetime.now()
-            seconds = (expiry_dt - now).total_seconds()
-            if seconds <= 0:
-                T = 1.0 / 365.0
-            else:
-                T = seconds / (365.0 * 24.0 * 3600.0)
-        except Exception as e:
-            print(f"[WARN] Could not compute precise expiry, using default T=30/365. Error: {e}")
+                chosen = pair.get("CE")
+                side = "CE"
+            if not chosen:
+                continue
+            mid = chosen["mid"]
+            oi = chosen["oi"]
+            bid = chosen["bid"]
+            ask = chosen["ask"]
+            intrinsic = max(s - spot_price, 0) if side == "PE" else max(spot_price - s, 0)
+            QK = max(mid - intrinsic, 0)
 
-    # Now compute total contribution Σ[(ΔKi / Ki^2) * Q(Ki)]
-    total_contrib = 0.0
-    for i, opt in enumerate(valid_options):
-        Ki = opt["strike"]
-        QKi = opt["mid_price"]
-        dk = delta_k_at(i, strikes_list)
-        total_contrib += (dk / (Ki * Ki)) * QKi
-        if i < 12:
-            print(f"Debug contrib - Strike {Ki}: ΔK={dk}, Q(K)={QKi:.2f}, term={(dk / (Ki*Ki) * QKi):.8f}")
+        if QK <= 0 or oi <= 0:
+            continue
 
-    if total_contrib <= 0:
-        print(f"Invalid total contribution: {total_contrib}")
+        # spread filter
+        rel_spread = None
+        if bid and ask and QK:
+            rel_spread = (ask - bid) / QK
+            if rel_spread > spread_threshold:
+                # exclude if spread too wide
+                continue
+
+        # cap QK
+        if QK > qk_cap:
+            QK = qk_cap
+
+        dk = delta_k(i, strikes_used)
+        term = (dk / (s * s)) * QK
+        contribs.append({"strike": s, "side": side, "QK": QK, "oi": oi, "dk": dk, "term": term, "rel_spread": rel_spread})
+
+    if not contribs:
+        if verbose: print("No contributions after filtering/time-value")
         return None
 
+    total_contrib = sum(c["term"] for c in contribs)
     forward_term = ((forward_index / K0) - 1.0) ** 2
-    sigma_squared = (2.0 / T) * total_contrib - (1.0 / T) * forward_term
 
-    print(f"Summary: forward_index={forward_index}, K0={K0}, T={T:.6f} years")
-    print(f"Total contribution: {total_contrib:.8f}, forward_term: {forward_term:.8f}")
-    print(f"Sigma^2 (raw): {sigma_squared:.8f}")
-
-    if sigma_squared <= 0:
-        # Try fallback without forward term if forward_term dominates (conservative)
-        print("[WARN] Non-positive sigma_squared computed. Trying fallback without forward adjustment.")
-        sigma_squared = (2.0 / T) * total_contrib
-        if sigma_squared <= 0:
-            print("[ERROR] Fallback sigma_squared still non-positive")
+    # sigma^2
+    sigma_sq = (2.0 / T) * total_contrib - (1.0 / T) * forward_term
+    if sigma_sq <= 0:
+        sigma_sq = (2.0 / T) * total_contrib
+        if sigma_sq <= 0:
+            if verbose: print("Non-positive sigma squared after fallback")
             return None
 
-    vix = 100.0 * math.sqrt(sigma_squared)
-    print(f"Enhanced VIX: {vix:.2f}")
+    vix = 100.0 * math.sqrt(sigma_sq)
+
+    if verbose:
+        contribs_sorted = sorted(contribs, key=lambda x: x["term"], reverse=True)
+        print(f"Contributors used: {len(contribs_sorted)}, total_contrib={total_contrib:.10f}, forward_term={forward_term:.10f}")
+        for c in contribs_sorted[:20]:
+            print(f"  {c['strike']:8.0f} {c['side']:3} QK={c['QK']:.4f} oi={c['oi']:.0f} dk={c['dk']:.1f} term={c['term']:.8f} spread={c['rel_spread'] if c['rel_spread'] is not None else 'NA'}")
+        print(f"VIX computed: {vix:.4f}")
+
     return vix
+
+def calculate_enhanced_vix_30d(
+    option_data,
+    spot_price,
+    futures_price=None,
+    spread_threshold=0.6,
+    oi_min=100,
+    forward_pct_cutoff=0.10,
+    qk_cap_fraction=0.20,
+    verbose=False
+):
+    """
+    30-day constant maturity VIX using two nearest expiries (official-style).
+    Relies on calculate_enhanced_vix() for per-expiry variance computation.
+
+    Parameters match calculate_enhanced_vix().
+    """
+    if not option_data:
+        if verbose: print("No option data provided.")
+        return None
+
+    # Group by expiry date
+    expiry_map = {}
+    for r in option_data:
+        expiry = r.get("expiry")
+        if not expiry:
+            continue
+        try:
+            ed = datetime.strptime(str(expiry), "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        expiry_map.setdefault(ed, []).append(r)
+
+    if not expiry_map:
+        if verbose: print("No valid expiries in option data.")
+        return None
+
+    today = datetime.now().date()
+    target_days = 30.0
+    T_target = target_days / 365.0
+
+    expiries_sorted = sorted(expiry_map.keys())
+    # Find the two expiries around 30 days
+    before_expiry = None
+    after_expiry = None
+    for ed in expiries_sorted:
+        days_to_expiry = (ed - today).days
+        if days_to_expiry < target_days:
+            before_expiry = ed
+        elif days_to_expiry >= target_days and after_expiry is None:
+            after_expiry = ed
+            break
+
+    if before_expiry is None:
+        # No expiry before 30d, take nearest two after
+        if len(expiries_sorted) < 2:
+            if verbose: print("Not enough expiries to interpolate.")
+            return None
+        before_expiry, after_expiry = expiries_sorted[0], expiries_sorted[1]
+    elif after_expiry is None:
+        # No expiry after 30d, take nearest two before
+        if len(expiries_sorted) < 2:
+            if verbose: print("Not enough expiries to interpolate.")
+            return None
+        before_expiry, after_expiry = expiries_sorted[-2], expiries_sorted[-1]
+
+    if verbose:
+        print(f"Using expiries {before_expiry} and {after_expiry} for 30-day interpolation.")
+
+    # Helper: compute variance from VIX
+    def variance_from_expiry(expiry_date):
+        vix_val = calculate_enhanced_vix(
+            expiry_map[expiry_date],
+            spot_price,
+            futures_price=futures_price,
+            spread_threshold=spread_threshold,
+            oi_min=oi_min,
+            forward_pct_cutoff=forward_pct_cutoff,
+            qk_cap_fraction=qk_cap_fraction,
+            verbose=verbose
+        )
+        if vix_val is None:
+            return None, None
+        days_to_expiry = max((expiry_date - today).days, 1)
+        T = days_to_expiry / 365.0
+        variance = (vix_val / 100.0) ** 2
+        return variance, T
+
+    var1, T1 = variance_from_expiry(before_expiry)
+    var2, T2 = variance_from_expiry(after_expiry)
+
+    if var1 is None or var2 is None or T1 is None or T2 is None:
+        if verbose: print("Could not compute variance for one of the expiries.")
+        return None
+
+    # Interpolate to 30 days (official formula)
+    w1 = (T2 - T_target) / (T2 - T1)
+    w2 = (T_target - T1) / (T2 - T1)
+    sigma2_30d = (T1 * var1 * w1 + T2 * var2 * w2) / T_target
+    if sigma2_30d <= 0:
+        if verbose: print("Non-positive sigma² after interpolation.")
+        return None
+
+    vix_30d = 100.0 * (sigma2_30d ** 0.5)
+
+    if verbose:
+        print(f"VIX from {before_expiry} ({T1*365:.1f}d): {math.sqrt(var1)*100:.4f}")
+        print(f"VIX from {after_expiry} ({T2*365:.1f}d): {math.sqrt(var2)*100:.4f}")
+        print(f"Interpolated 30-day VIX: {vix_30d:.4f}")
+
+    return vix_30d
+
+
 
 if __name__ == "__main__":
     calculate_vix()
