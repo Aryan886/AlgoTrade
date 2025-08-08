@@ -12,6 +12,21 @@ import time
 import sqlite3
 from utils.iv import ProductionIVCalculator
 
+
+def safe_expiry_to_string(expiry):
+    """Safely convert expiry to string format for IV calculation"""
+    try:
+        if isinstance(expiry, str):
+            return expiry
+        elif hasattr(expiry, 'strftime'):
+            return expiry.strftime('%Y-%m-%d')
+        elif hasattr(expiry, 'date'):
+            return expiry.date().strftime('%Y-%m-%d')
+        else:
+            return str(expiry)
+    except:
+        return str(expiry)
+
 def get_nifty50_spot_price():
     """
     Get current NIFTY 50 spot price from Kite API
@@ -39,8 +54,8 @@ def get_nifty50_spot_price():
 
 def fetch_live_option_chain():
     """
-    Fetch live option chain data from Kite API for NIFTY 50 using batch quotes
-    Now calculates IV using ProductionIVCalculator instead of using API IV.
+    Fixed version of fetch_live_option_chain with proper datetime handling
+    Now uses bid-ask mid-price instead of last_price for IV calculation
     """
     try:
         kite = kite_from_saved_token()
@@ -48,43 +63,65 @@ def fetch_live_option_chain():
             print("Failed to connect to Kite API")
             return None
         
-        # Get all NFO instruments (options and futures)
         instruments = kite.instruments("NFO")
         print(f"Total NFO instruments: {len(instruments)}")
-        
-        # Filter for NIFTY 50 options
-        nifty_option_symbols = []
         current_date = datetime.now().date()
+
+        expiry_counts = {}
+        for instrument in instruments:
+            if instrument['name'] == 'NIFTY' and instrument['instrument_type'] in ['CE', 'PE']:
+                exp_str = str(instrument['expiry'])
+                expiry_counts[exp_str] = expiry_counts.get(exp_str, 0) + 1
+
+        print("Available NIFTY option expiries:")
+        for exp, count in sorted(expiry_counts.items()):
+            days = (datetime.strptime(exp, '%Y-%m-%d').date() - current_date).days
+            print(f"  {exp}: {count} options ({days} days)")
+        
+        nifty_option_symbols = []
         
         for instrument in instruments:
-            # Check if it's a NIFTY option
             if (instrument['name'] == 'NIFTY' and 
-                instrument['instrument_type'] in ['CE', 'PE'] and
-                instrument['expiry'] >= current_date):
+                instrument['instrument_type'] in ['CE', 'PE']):
                 
-                quote_key = f"NFO:{instrument['tradingsymbol']}"
-                nifty_option_symbols.append({
-                    'quote_key': quote_key,
-                    'instrument': instrument
-                })
+                # Fix expiry comparison
+                instrument_expiry = instrument['expiry']
+                if isinstance(instrument_expiry, str):
+                    instrument_expiry = datetime.strptime(instrument_expiry, '%Y-%m-%d').date()
+                elif hasattr(instrument_expiry, 'date'):
+                    instrument_expiry = instrument_expiry.date() if hasattr(instrument_expiry, 'date') else instrument_expiry
+                
+                if instrument_expiry >= current_date:
+                    days_to_expiry = (instrument_expiry - current_date).days
+                    # Only use options with 20-40 days to expiry for VIX calculation
+                    if 20 <= days_to_expiry <= 40:
+                        quote_key = f"NFO:{instrument['tradingsymbol']}"
+                        nifty_option_symbols.append({
+                            'quote_key': quote_key,
+                            'instrument': instrument
+                        })
         
         print(f"Found {len(nifty_option_symbols)} NIFTY options to fetch quotes for")
+
         
-        # Batch fetch quotes in groups of 50 (Kite API limit)
+        # Batch fetch quotes
         batch_size = 50
         nifty_options = []
         iv_calc = ProductionIVCalculator()
         spot_price = get_nifty50_spot_price()
+        
         if spot_price is None:
             print("Could not get NIFTY 50 spot price for IV calculation")
             return None
+        
+        debug_count = 0  # Counter for debug prints
         
         for i in range(0, len(nifty_option_symbols), batch_size):
             batch = nifty_option_symbols[i:i + batch_size]
             quote_keys = [item['quote_key'] for item in batch]
             
             try:
-                print(f"Fetching batch {i//batch_size + 1}/{(len(nifty_option_symbols) + batch_size - 1)//batch_size} ({len(quote_keys)} instruments)")
+                print(f"Fetching batch {i//batch_size + 1}/{(len(nifty_option_symbols) + batch_size - 1)//batch_size}")
                 quotes = kite.quote(quote_keys)
                 
                 for item in batch:
@@ -94,41 +131,102 @@ def fetch_live_option_chain():
                     if quote_key in quotes:
                         option_data = quotes[quote_key]
                         if isinstance(option_data, dict):
-                            # Remove API IV fetching, calculate IV using ProductionIVCalculator
                             ltp = option_data.get('last_price', 0)
                             strike = instrument['strike']
                             option_type = instrument['instrument_type']
                             expiry = instrument['expiry']
-                            expiry_str = str(expiry)
-                            # Calculate IV using your calculator
+                            
+                            # Extract bid/ask prices from depth data
+                            best_bid = None
+                            best_ask = None
+                            mid_price = None
+                            price_for_iv = ltp  # Default fallback
+                            
+                            depth = option_data.get('depth', {})
+                            if isinstance(depth, dict):
+                                # Get best bid (highest buy price)
+                                buy_orders = depth.get('buy', [])
+                                if buy_orders and len(buy_orders) > 0 and isinstance(buy_orders[0], dict):
+                                    best_bid = buy_orders[0].get('price', None)
+                                
+                                # Get best ask (lowest sell price)
+                                sell_orders = depth.get('sell', [])
+                                if sell_orders and len(sell_orders) > 0 and isinstance(sell_orders[0], dict):
+                                    best_ask = sell_orders[0].get('price', None)
+                                
+                                # Calculate mid-price if both bid and ask are available
+                                if best_bid is not None and best_ask is not None and best_bid > 0 and best_ask > 0:
+                                    mid_price = (best_bid + best_ask) / 2
+                                    price_for_iv = mid_price
+                                else:
+                                    # Fall back to last_price
+                                    price_for_iv = ltp
+                            
+                            # Fix expiry string conversion
+                            expiry_str = safe_expiry_to_string(expiry)
+                            
+                            # Calculate IV using the price_for_iv (mid_price or LTP)
                             iv_result = iv_calc.calculate_iv(
                                 spot=spot_price,
                                 strike=strike,
-                                ltp=ltp,
+                                ltp=price_for_iv,  # Now using mid_price when available
                                 expiry_date_str=expiry_str,
                                 option_type=option_type
                             )
+                            
                             calculated_iv = iv_result['iv'] if iv_result and 'iv' in iv_result else None
+
+                            # Normalize if suspiciously high (optional safeguard)
+                            if calculated_iv and calculated_iv > 1.0:
+                                print(f"[WARN] IV {calculated_iv:.2f} seems high. Adjusting to decimal.")
+                                calculated_iv = calculated_iv / 100.0
+                            
+                            # Debug: Print first 5 options with bid/ask/mid_price info
+                            if debug_count < 5:
+                                mid_str = f"{mid_price:.4f}" if mid_price is not None else "N/A"
+                                used_price_str = f"{price_for_iv:.4f}" if price_for_iv is not None else "N/A"
+                                iv_str = f"{calculated_iv:.6f}" if calculated_iv is not None else "N/A"
+                                print(f"DEBUG {debug_count+1}: Strike={strike}, Type={option_type}, "
+                                      f"Bid={best_bid}, Ask={best_ask}, Mid={mid_str}, "
+                                      f"LTP={ltp}, Used_Price={used_price_str}, IV={iv_str}")
+                                debug_count += 1
+                            
                             option_info = {
                                 'strikePrice': strike,
-                                'IV': calculated_iv,  # Use calculated IV only
+                                'IV': calculated_iv,
                                 'openInterest': option_data.get('oi', 0),
-                                'lastPrice': ltp,
+                                'lastPrice': ltp,  # Keep original LTP
+                                'bestBid': best_bid,  # Add best bid
+                                'bestAsk': best_ask,  # Add best ask
+                                'midPrice': mid_price,  # Add calculated mid price
+                                'priceUsedForIV': price_for_iv,  # Add the price actually used for IV
                                 'optionType': option_type,
                                 'expiry': expiry,
                                 'tradingsymbol': instrument['tradingsymbol']
                             }
                             nifty_options.append(option_info)
                 
-                # Add delay between batches to avoid rate limiting
                 if i + batch_size < len(nifty_option_symbols):
-                    time.sleep(0.5)  # 500ms delay between batches
+                    time.sleep(0.5)
                     
             except Exception as e:
                 print(f"Error fetching batch {i//batch_size + 1}: {e}")
                 continue
         
         print(f"Successfully fetched quotes for {len(nifty_options)} NIFTY options")
+        
+        # Debug: Check IV distribution
+        valid_ivs = [opt['IV'] for opt in nifty_options if opt['IV'] and opt['IV'] > 0]
+        if valid_ivs:
+            import numpy as np
+            print(f"IV Stats: Min={min(valid_ivs):.6f}, Max={max(valid_ivs):.6f}, Mean={np.mean(valid_ivs):.6f}")
+            if max(valid_ivs) > 1.0:
+                print("⚠️ WARNING: IVs > 1.0 detected - likely in percentage form")
+        
+        # Debug: Check bid/ask availability
+        options_with_bid_ask = [opt for opt in nifty_options if opt['bestBid'] is not None and opt['bestAsk'] is not None]
+        print(f"Options with bid/ask data: {len(options_with_bid_ask)}/{len(nifty_options)} ({len(options_with_bid_ask)/len(nifty_options)*100:.1f}%)")
+        
         return nifty_options
         
     except Exception as e:
@@ -164,8 +262,18 @@ def calculate_live_vix(spot_price=None, strike_window=300):
         print(f"Calculating VIX with {len(option_data)} options around spot price {spot_price}")
         
         # Calculate VIX using the existing function
-        from strategies.indicators import calculate_vix
-        vix_value = calculate_vix(option_data, spot_price, strike_window)
+        from strategies.indicators import calculate_enhanced_vix,calculate_vix,calculate_vix2
+        #vix_value = calculate_vix2(option_data, spot_price, strike_window)
+        #vix_value = calculate_enhanced_vix(option_data, spot_price, strike_window)
+        #vix_value = calculate_vix2(option_data, spot_price, strike_window)
+        
+        futures_price = None  # <-- optionally fetch real futures price and set it here
+        vix_value = calculate_enhanced_vix(option_data, spot_price, futures_price=futures_price, strike_window=strike_window)
+        # If enhanced method fails, fallback to IV-based or simpler method:
+        if vix_value is None:
+            print("[WARN] enhanced VIX calculation failed; falling back to IV-based calculate_vix2")
+            vix_value = calculate_vix2(option_data, spot_price, strike_window)
+
         
         if vix_value is not None:
             # Fetch recent VIX data for indicator calculation
@@ -233,6 +341,8 @@ def calculate_and_store_vix(symbol: str = "NIFTY50", spot_price: float = None, s
     if not symbol or not isinstance(symbol, str):
         symbol = "NIFTY50"
     if symbol == "NIFTY50" or symbol == "^NIFTY50":
+        vix_check = calculate_live_vix(spot_price, strike_window)
+        print(f"Calculated vix is : {vix_check}")
         return calculate_live_vix(spot_price, strike_window)
     else:
         print(f"Live VIX calculation not supported for symbol: {symbol}")
@@ -358,25 +468,7 @@ def store_vix_data(timestamp, symbol, vix_value, vix_ao_value=None, vix_donchian
     """, (timestamp, symbol, vix_value, vix_ao_value, vix_donchian_upper, vix_donchian_lower, vix_donchian_mid))
     conn.commit()
     conn.close() 
-if __name__ == "__main__":
-    #print("[DEBUG] Running IV debug script...")
-    #debug_print_iv_values()
-    get_nifty50_spot_price()
-    """
-    # Example usage
-    symbol = "NIFTY50"
-    
-    # Calculate and store live VIX once
-    if symbol is not None:
-        vix_value = calculate_and_store_vix(symbol)
-    else:
-        print("[WARN] symbol is None, skipping calculate_and_store_vix.")
-    
-    # Export recent VIX data
-    if symbol is not None:
-        export_vix_to_csv(symbol, days=7)
-    else:
-        print("[WARN] symbol is None, skipping export_vix_to_csv.")
-    
-    # continuous_vix_monitoring(symbol, interval_minutes=5, duration_hours=2) 
-    """
+
+if __name__ =="__main__":
+    calculate_live_vix()
+    #fetch_live_option_chain()

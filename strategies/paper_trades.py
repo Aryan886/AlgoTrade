@@ -4,12 +4,18 @@ from datetime import datetime
 import time
 from typing import Dict, List, Tuple, Optional
 from strategies.strategy import donchian_ao_strategy
+from utils.utility import setup_paper_trading_logger
 from utils.db_func import (
     fetch_latest_delta_data, 
     fetch_vix_data,
 )
-logging.basicConfig(filename="logs/paper_trades.log", level=logging.INFO, 
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+import os
+
+# Create logs directory if it doesn't exist
+os.makedirs('logs', exist_ok=True)
+
+# Initialize loggers
+paper_logger, trade_logger, position_logger = setup_paper_trading_logger()
 
 class PaperTrader:
     def __init__(self, symbol="NIFTY50"):
@@ -21,37 +27,81 @@ class PaperTrader:
         self.last_risk_check = None
         self.last_profit_check = None
         self.entry_time = None
+        self.last_data_refresh = None
+        self.data_freshness_threshold = 30  # seconds
+        
+        # Use dedicated loggers instead of generic logging
+        self.logger = paper_logger
+        self.trade_logger = trade_logger
+        self.position_logger = position_logger
 
+    def is_data_fresh(self, timestamp, max_age_seconds=30):
+        """Check if data is fresh enough for trading decisions"""
+        if not timestamp:
+            return False
+        
+        current_time = datetime.now()
+        data_age = (current_time - timestamp).total_seconds()
+        return data_age <= max_age_seconds
+
+    def refresh_all_data(self):
+        """Centralized data refresh with validation"""
+        try:
+            # Fetch all required data
+            options_data = fetch_latest_delta_data(self.symbol)
+            
+            # Validate data freshness and quality
+            if not options_data:
+                self.logger.warning("No options data received")
+                return False
+                
+            # Store timestamp for freshness tracking
+            self.last_data_refresh = datetime.now()
+            self.logger.debug(f"Data refreshed at {self.last_data_refresh}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Data refresh failed: {e}")
+            return False
 
     @property
     def total_adjustment_costs(self):
         """Property to get total adjustment costs"""
         return self.adjustment_cost
 
-    def  main_trading_loop(self):
+    def main_trading_loop(self):
         """ Run continuously in the background during Trading hours """
-        logging.info("Starting paper trading.....")
+        self.logger.info("Starting paper trading.....")
 
         while self.is_market_open():
             try:
                 current_time = datetime.now()
 
-                #Check for new signals if no active position
+                # Always try to refresh data first
+                data_refreshed = self.refresh_all_data()
+                
+                if not data_refreshed:
+                    self.logger.warning("Data refresh failed, waiting before retry")
+                    time.sleep(10)  # Shorter sleep for retry
+                    continue
+
+                # Only make trading decisions with fresh data
                 if not self.has_active_position():
                     signal = donchian_ao_strategy(self.symbol)
                     if signal:
                         self.execute_paper_trade(signal)
 
-                #Manage existing position
+                # Manage existing position
                 if self.has_active_position():
                     self.manage_existing_positions()
                 
-                #Sleep for 1min before next iteration
-                time.sleep(60)
+                # Adaptive sleep based on market conditions
+                sleep_time = 30 if self.has_active_position() else 60
+                time.sleep(sleep_time)
 
             except Exception as e:
-                logging.error(f"Encountered this error : {e}")
-                time.sleep(60)
+                self.logger.error(f"Encountered this error : {e}")
+                time.sleep(30)  # Shorter retry interval
 
     def is_market_open(self):
         """Check if market is open (9:15 to 3:30 )"""
@@ -71,7 +121,7 @@ class PaperTrader:
         return (current_time - self.last_risk_check).total_seconds() > 300
     
     def should_check_profit(self, current_time):
-        """Checks for profit (every 1min)"""
+        """Checks for profit (every 5min) - Fixed comment and timing"""
         if not self.last_profit_check:
             return True
         return (current_time - self.last_profit_check).total_seconds() > 300
@@ -84,10 +134,13 @@ class PaperTrader:
         try:
             final_profit = self.calculate_current_profit()
 
-            logging.info(f"POSITION CLOSED - Reason: {reason}")
-            logging.info(f"Final P&L: {final_profit} points")
-            logging.info(f"Total adjustment costs: {self.total_adjustment_costs}")
-            logging.info(f"Position duration: {datetime.now() - self.entry_time}")
+            self.logger.info(f"POSITION CLOSED - Reason: {reason}")
+            self.logger.info(f"Final P&L: {final_profit} points")
+            self.logger.info(f"Total adjustment costs: {self.total_adjustment_costs}")
+            self.logger.info(f"Position duration: {datetime.now() - self.entry_time}")
+
+            # Also log to main paper trading log
+            self.logger.info(f"POSITION CLOSED - {reason} | P&L: {final_profit} | Duration: {datetime.now() - self.entry_time}")
 
             #Resets position
             self.position = None
@@ -97,7 +150,7 @@ class PaperTrader:
             self.adjustment_cost = 0 
 
         except Exception as e:
-            logging.error(f"Error closing position: {e}")
+            self.logger.error(f"Error closing position: {e}")
     
     def check_entry_criteria_violation(self):
         """Rule 4: Check if entry criteria is still valid"""
@@ -110,36 +163,38 @@ class PaperTrader:
                 #If any essential condition has reversed, close position
                 for key in self.entry_criteria:
                     if self.entry_criteria[key] != current_criteria.get(key):
-                        logging.info(f"ENTRY CRITERIA VIOLATION : {key} changed from {self.entry_criteria[key]} to {current_criteria.get(key)}")
+                        self.logger.info(f"ENTRY CRITERIA VIOLATION : {key} changed from {self.entry_criteria[key]} to {current_criteria.get(key)}")
                         self.close_position("Entry criteria violation")
                         return True
                     
             return False
         except Exception as e:
-            logging.error(f"Error checking entry criteria : {e}")
+            self.logger.error(f"Error checking entry criteria : {e}")
             return False
         
     def check_vix_breach(self):
         """Rule 3 : Check if VIX breached mid-donchian"""
         try:
-            from strategies.indicators import add_donchian_channel
-
             vix_data = fetch_vix_data("NIFTY50")
             if vix_data.empty:
                 return False
             
-            vix_data = add_donchian_channel(vix_data, period=20, suffix="_vix")
+            # Apply the same emergency fix used in main strategy
+            from strategies.strategy import emergency_column_fix
+            vix_data = emergency_column_fix(vix_data, "VIX")
+            
             latest_vix = vix_data.iloc[-1]
 
-            if latest_vix['close'] > latest_vix['donchian_mid_vix']:
-                logging.info(f"VIX BREACH : Closing position due to high VIX")
+            # Use the correct column name after emergency fix
+            if latest_vix['close'] > latest_vix['donchian_mid_vix']: 
+                self.logger.info(f"VIX BREACH : Closing position due to high VIX")
                 self.close_position("VIX Breach")
                 return True
             
             return False
         
         except Exception as e:
-            logging.error(f"Error checking vix breach : {e}")
+            self.logger.error(f"Error checking vix breach : {e}")
             return False
         
     def find_replacement_option(self):
@@ -187,11 +242,12 @@ class PaperTrader:
 
                 self.position['entry_prices'][target_type] = best_candidate['ltp']
                 self.position['current_prices'][target_type] = best_candidate['ltp']
+                self.position['price_timestamps'][target_type] = datetime.now()
 
-                logging.info(f"Added replacement {target_type} : {best_candidate['tradingsymbol']} at {best_candidate['ltp']}")
+                self.logger.info(f"Added replacement {target_type} : {best_candidate['tradingsymbol']} at {best_candidate['ltp']}")
 
         except Exception as e : 
-            logging.error(f"Error finding replacement option : {e}")
+            self.logger.error(f"Error finding replacement option : {e}")
             
     def close_option(self, option_type):
         """close specific option (CE/PE) and add adjustment costs"""
@@ -212,6 +268,8 @@ class PaperTrader:
 
             del self.position['current_prices'][option_type]
             del self.position['entry_prices'][option_type]
+            if option_type in self.position.get('price_timestamps', {}):
+                del self.position['price_timestamps'][option_type]
 
             self.adjustment_history.append({
                 'timestamp': datetime.now(),
@@ -237,17 +295,17 @@ class PaperTrader:
                     #close the higher priced option
                     if ce_price > pe_price:
                         self.close_option('CE')
-                        logging.info(f"close CE option at {ce_price} due to adjustment criteria")
+                        self.logger.info(f"close CE option at {ce_price} due to adjustment criteria")
                     
                     else:
                         self.close_option('PE')
-                        logging.info(f"close PE option at {pe_price} due to adjustment criteria")
+                        self.logger.info(f"close PE option at {pe_price} due to adjustment criteria")
 
                     #Find replacement option
                     self.find_replacement_option()
 
         except Exception as e:
-            logging.error(f"Error in position adjustment : {e}")
+            self.logger.error(f"Error in position adjustment : {e}")
 
 
     def calculate_current_profit(self):
@@ -274,31 +332,49 @@ class PaperTrader:
             profit = self.calculate_current_profit()
 
             if profit >= 16:
-                logging.info(f"PROFIT TARGET REACHED : {profit} points")
+                self.logger.info(f"PROFIT TARGET REACHED : {profit} points")
                 self.close_position("Profit target reached")
                 return True
             
             return False
         except Exception as e:
-            logging.error(f"Error checking profit target : {e}")
+            self.logger.error(f"Error checking profit target : {e}")
             return False
         
     def update_current_prices(self):
-        """Update current ooption prices"""
+        """Update current option prices with freshness validation"""
         if not self.has_active_position():
-            return 
+            return False
         
         try: 
             options_data = fetch_latest_delta_data(self.symbol)
             if not options_data:
-                return 
+                self.logger.warning("No options data received for price update")
+                return False
+            
+            # Check data freshness
+            data_timestamp = datetime.now()  # Assuming current data
+            if not self.is_data_fresh(self.last_data_refresh):
+                self.logger.warning(f"Data too old for price update: {self.last_data_refresh}")
+                return False
+            
+            prices_updated = False
             
             #Update CE price
             if self.position['ce_option']:
                 ce_symbol = self.position['ce_option']['tradingsymbol']
                 for opt in options_data:
                     if isinstance(opt, dict) and opt.get('tradingsymbol') == ce_symbol:
+                        old_price = self.position['current_prices'].get('CE')
                         self.position['current_prices']['CE'] = opt['ltp']
+                        
+                        # Initialize price_timestamps if not exists
+                        if 'price_timestamps' not in self.position:
+                            self.position['price_timestamps'] = {}
+                        self.position['price_timestamps']['CE'] = data_timestamp
+                        
+                        self.logger.debug(f"CE price updated: {old_price} -> {opt['ltp']}")
+                        prices_updated = True
                         break
 
             #Update PE price
@@ -306,26 +382,45 @@ class PaperTrader:
                 pe_symbol = self.position['pe_option']['tradingsymbol']
                 for opt in options_data:
                     if isinstance(opt, dict) and opt.get('tradingsymbol') == pe_symbol:
+                        old_price = self.position['current_prices'].get('PE')
                         self.position['current_prices']['PE'] = opt['ltp']
+                        
+                        # Initialize price_timestamps if not exists
+                        if 'price_timestamps' not in self.position:
+                            self.position['price_timestamps'] = {}
+                        self.position['price_timestamps']['PE'] = data_timestamp
+                        
+                        self.logger.debug(f"PE price updated: {old_price} -> {opt['ltp']}")
+                        prices_updated = True
                         break
+            
+            if not prices_updated:
+                self.logger.warning("No price updates found for current position")
+            
+            return prices_updated
                 
         except Exception as e:
-            logging.error(f"Error updating current prices : {e}")
+            self.logger.error(f"Error updating current prices : {e}")
+            return False
 
     def manage_existing_positions(self):
-        """Mnage exisiting positions according to profit booking rule"""
+        """Manage existing positions with data freshness checks"""
         current_time = datetime.now()
 
-        #Update current prices
-        self.update_current_prices()
+        # Update current prices with freshness validation
+        prices_updated = self.update_current_prices()
+        
+        if not prices_updated:
+            self.logger.warning("Skipping position management - stale/no price data")
+            return  # Skip this iteration if data is stale
 
-        #Rule 1: Check profit target every min(Universal override rule)
+        # Rule 1: Check profit target every 5min (only with fresh data)
         if self.should_check_profit(current_time):
             if self.check_profit_target():
                 return #Position closed
             self.last_profit_check = current_time
             
-        #Rule 2: Dynamic position adjustment
+        #Rule 2: Dynamic position adjustment (only with fresh data)
         self.check_positon_adjustment()
 
         #Rule 3 & 4 : Risk management checks every 5 min
@@ -346,16 +441,18 @@ class PaperTrader:
                 options = [first_leg, second_leg]
 
             else:
-                logging.warning("Invalid signal format received")
+                self.logger.warning("Invalid signal format received")
                 return 
             
             #Create position
+            current_time = datetime.now()
             self.position = {
                 'ce_option': None,
                 'pe_option': None,
                 'entry_prices': {},
                 'current_prices': {},
-                'entry_time': datetime.now()
+                'price_timestamps': {},
+                'entry_time': current_time
             }
 
             #Classify and store options
@@ -364,26 +461,29 @@ class PaperTrader:
                     self.position['ce_option'] = option
                     self.position['entry_prices']['CE'] = option['ltp']
                     self.position['current_prices']['CE'] = option['ltp']
+                    self.position['price_timestamps']['CE'] = current_time
                 elif option['option_type'] == 'PE':
                     self.position['pe_option'] = option
                     self.position['entry_prices']['PE'] = option['ltp']
                     self.position['current_prices']['PE'] = option['ltp']
+                    self.position['price_timestamps']['PE'] = current_time
 
             # Store entry criteria for validation
             # Note: You'll need to modify your strategy to return entry criteria
             from strategies.strategy import get_current_entry_criteria
             self.entry_criteria = get_current_entry_criteria(self.symbol)
-            self.entry_time = datetime.now()
-            self.last_profit_check = datetime.now()
-            self.last_risk_check = datetime.now()
+            self.entry_time = current_time
+            self.last_profit_check = current_time
+            self.last_risk_check = current_time
             
-            logging.info(f"NEW POSITION OPENED:")
-            logging.info(f"CE: {self.position['ce_option']['tradingsymbol']} at {self.position['entry_prices']['CE']}")
-            logging.info(f"PE: {self.position['pe_option']['tradingsymbol']} at {self.position['entry_prices']['PE']}")
-            logging.info(f"Total entry points: {sum(self.position['entry_prices'].values())}")
+            self.logger.info(f"NEW POSITION OPENED:")
+            self.logger.info(f"CE: {self.position['ce_option']['tradingsymbol']} at {self.position['entry_prices']['CE']}")
+            self.logger.info(f"PE: {self.position['pe_option']['tradingsymbol']} at {self.position['entry_prices']['PE']}")
+            self.logger.info(f"Total entry points: {sum(self.position['entry_prices'].values())}")
+            self.logger.info(f"Position opened at: {current_time}")
             
         except Exception as e:
-            logging.error(f"Error executing paper trade: {e}")
+            self.logger.error(f"Error executing paper trade: {e}")
     
     def get_position_status(self):
         """Get current position status for monitoring"""
@@ -399,7 +499,9 @@ class PaperTrader:
                 'adjustment_costs': self.total_adjustment_costs,
                 'adjustments_count': len(self.adjustment_history),
                 'ce_price': self.position['current_prices'].get('CE'),
-                'pe_price': self.position['current_prices'].get('PE')
+                'pe_price': self.position['current_prices'].get('PE'),
+                'last_data_refresh': self.last_data_refresh,
+                'price_timestamps': self.position.get('price_timestamps', {})
             }
         except Exception as e:
             return f"Error getting status: {e}"
@@ -407,4 +509,4 @@ class PaperTrader:
 if __name__ == "__main__":
     trader = PaperTrader("NIFTY50")
     print("Paper trader initialized....")
-    trader.main_trading_loop() #this runs continuously
+    trader.main_trading_loop() # this runs continuously

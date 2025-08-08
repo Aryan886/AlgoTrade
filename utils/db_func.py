@@ -10,6 +10,7 @@ from utils.black_scholes import (
     get_current_delta
 )
 from utils.iv import ProductionIVCalculator
+from utils.utility import standardize_column_names
 
 DB_PATH = 'db/trading_bot.db'
 
@@ -119,6 +120,7 @@ def fetch_market_data(symbol: str = 'NIFTY50', start=None, end=None, interval=No
 
     df = pd.read_sql_query(query, conn,params=params, parse_dates=["timestamp"])
     df.set_index("timestamp", inplace=True)
+    df = standardize_column_names(df)
     conn.close()
     return df
 
@@ -200,6 +202,7 @@ def fetch_vix_data(symbol: str = 'NIFTY50', start=None, end=None, db_path=DB_PAT
 
     df = pd.read_sql_query(query, conn, params=params, parse_dates=["timestamp"])
     df.set_index("timestamp", inplace=True)
+    #df = standardize_column_names(df)
     conn.close()
     return df
 

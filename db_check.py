@@ -2,6 +2,12 @@ import pandas as pd
 import sqlite3
 import os
 from datetime import datetime
+from utils.db_func import fetch_market_data, fetch_vix_data
+from strategies.indicators import add_donchian_channel, add_awesome_oscillator
+from utils.utility import setup_paper_trading_logger
+
+paper_logger = setup_paper_trading_logger()
+
 
 def simple_data_test():
     """Simple test to verify data exists in database"""
@@ -235,6 +241,103 @@ def test_indicators():
         print(f"Indicator test error: {e}")
         import traceback
         traceback.print_exc()
+
+def debug_dataframe_columns(df, df_name="DataFrame"):
+    """Debug function to identify column name issues"""
+    print(f"\n=== DEBUG: {df_name} ===")
+    print(f"Shape: {df.shape}")
+    print(f"Columns: {list(df.columns)}")
+    print(f"Column types: {df.dtypes}")
+    
+    # Check for common column variations
+    possible_columns = ['open', 'high', 'low', 'close', 'volume', 
+                       'Open', 'High', 'Low', 'Close', 'Volume']
+    
+    found_columns = [col for col in possible_columns if col in df.columns]
+    missing_columns = [col for col in ['High', 'Low', 'Close', 'Open'] if col not in df.columns]
+    
+    print(f"Found standard columns: {found_columns}")
+    print(f"Missing expected columns: {missing_columns}")
+    
+    if not df.empty:
+        print(f"Sample data (first row):")
+        print(df.iloc[0])
+    print("=" * 50)
+
+# Add this to your donchian_ao_strategy function for debugging:
+def donchian_ao_strategy_debug(symbol="NIFTY50"):
+    """Debug version of your strategy to identify the column issue"""
+    
+    print(f"[DEBUG] Running strategy for symbol : {symbol}")
+    if not symbol:
+        symbol = "NIFTY50"
+
+    try:
+        # Fetch data with debug info
+        print(f"[DEBUG] Fetching market data...")
+        df_5min = fetch_market_data(symbol=symbol, interval="5m")
+        df_15min = fetch_market_data(symbol=symbol, interval="15m")
+        vix_data = fetch_vix_data(symbol=symbol)
+
+        # Debug each dataframe
+        debug_dataframe_columns(df_5min, "5min Data")
+        debug_dataframe_columns(df_15min, "15min Data") 
+        debug_dataframe_columns(vix_data, "VIX Data")
+
+        if df_5min.empty or df_15min.empty or vix_data.empty:
+            paper_logger.warning("Data not available for one or more timeframes. Skipping strategy.")
+            return None
+
+        # Try to add indicators and catch the specific error
+        print("[DEBUG] Adding Donchian Channel to 5min data...")
+        try:
+            df_5min = add_donchian_channel(df_5min, period=20, suffix="_5m")
+            print("[DEBUG]  5min Donchian Channel added successfully")
+        except Exception as e:
+            print(f"[DEBUG]  Error adding 5min Donchian Channel: {e}")
+            return None
+
+        print("[DEBUG] Adding Awesome Oscillator to 5min data...")
+        try:
+            df_5min = add_awesome_oscillator(df_5min)
+            print("[DEBUG]  5min Awesome Oscillator added successfully")
+        except Exception as e:
+            print(f"[DEBUG]  Error adding 5min Awesome Oscillator: {e}")
+            return None
+
+        print("[DEBUG] Adding Donchian Channel to 15min data...")
+        try:
+            df_15min = add_donchian_channel(df_15min, period=20, suffix="_15m")
+            print("[DEBUG]  15min Donchian Channel added successfully")
+        except Exception as e:
+            print(f"[DEBUG]  Error adding 15min Donchian Channel: {e}")
+            return None
+
+        print("[DEBUG] Adding Awesome Oscillator to 15min data...")
+        try:
+            df_15min = add_awesome_oscillator(df_15min)
+            print("[DEBUG]  15min Awesome Oscillator added successfully")
+        except Exception as e:
+            print(f"[DEBUG]  Error adding 15min Awesome Oscillator: {e}")
+            return None
+
+        print("[DEBUG] Adding Donchian Channel to VIX data...")
+        try:
+            vix_data = add_donchian_channel(vix_data, period=20, suffix="_vix")
+            print("[DEBUG] VIX Donchian Channel added successfully")
+        except Exception as e:
+            print(f"[DEBUG]  Error adding VIX Donchian Channel: {e}")
+            return None
+
+        print("[DEBUG] All indicators added successfully!")
+        return "DEBUG_SUCCESS"
+
+    except Exception as e:
+        print(f"[DEBUG]  Major error in strategy: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
 
 if __name__ == "__main__":
     simple_data_test()

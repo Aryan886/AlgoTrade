@@ -1,6 +1,7 @@
 import os
 import yaml
 from pathlib import Path
+import logging
 
 def load_config():
     base_path = os.path.dirname(os.path.abspath(__file__))
@@ -26,3 +27,93 @@ def save_debug_csv(df, name, folder="debug"):
     print(f"Saved debug file: {path}")
 
 
+# Setup dedicated paper trading logger
+def setup_paper_trading_logger():
+    """Setup dedicated logger for paper trading with separate files"""
+    
+    # Create paper trading logger
+    paper_logger = logging.getLogger('paper_trading')
+    paper_logger.setLevel(logging.INFO)
+    paper_logger.handlers.clear()  # Clear any existing handlers
+    
+    # Create formatters
+    detailed_formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s'
+    )
+    
+    trade_formatter = logging.Formatter(
+        '%(asctime)s - %(message)s'
+    )
+    
+    # 1. Main paper trading log (all paper trading activities)
+    from logging.handlers import RotatingFileHandler
+    main_handler = RotatingFileHandler(
+        'logs/paper_trading_main.log', 
+        maxBytes=10*1024*1024, 
+        backupCount=5
+    )
+    main_handler.setFormatter(detailed_formatter)
+    main_handler.setLevel(logging.INFO)
+    
+    # 2. Trade actions only (entries, exits, adjustments)
+    trade_handler = RotatingFileHandler(
+        'logs/paper_trading_actions.log',
+        maxBytes=5*1024*1024,
+        backupCount=3
+    )
+    trade_handler.setFormatter(trade_formatter)
+    trade_handler.setLevel(logging.INFO)
+    
+    # 3. Position management (profit checks, adjustments, etc.)
+    position_handler = RotatingFileHandler(
+        'logs/paper_trading_positions.log',
+        maxBytes=5*1024*1024,
+        backupCount=3
+    )
+    position_handler.setFormatter(detailed_formatter)
+    position_handler.setLevel(logging.DEBUG)
+    
+    # Add handlers to logger
+    paper_logger.addHandler(main_handler)
+    
+    # Create separate loggers for specific activities
+    trade_logger = logging.getLogger('paper_trading.trades')
+    trade_logger.setLevel(logging.INFO)
+    trade_logger.handlers.clear()
+    trade_logger.addHandler(trade_handler)
+    trade_logger.propagate = False  # Don't propagate to parent logger
+    
+    position_logger = logging.getLogger('paper_trading.positions')
+    position_logger.setLevel(logging.DEBUG)
+    position_logger.handlers.clear()
+    position_logger.addHandler(position_handler)
+    position_logger.propagate = False
+    
+    return paper_logger, trade_logger, position_logger
+
+def standardize_column_names(df):
+    """
+    Standardize column names to match expected format for indicators
+    Converts common variations to standard format
+    """
+    column_mapping = {
+        'open': 'open', #keep if already correct
+        'high': 'high', 
+        'low': 'low', #keep if already correct
+        'close': 'close', #keep if already correct
+        'volume': 'volume', #keep if already correct
+        'Open': 'open',   
+        'High': 'high',   
+        'Low': 'low',     
+        'Close': 'close', 
+        'Volume': 'volume' 
+    }
+    
+    # Rename columns if they exist
+    existing_columns = {col: column_mapping.get(col, col) for col in df.columns if col in column_mapping}
+    
+    if existing_columns:
+        df = df.rename(columns=existing_columns)
+        print(f"Standardized columns: {existing_columns}")
+    
+    return df

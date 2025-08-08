@@ -196,10 +196,10 @@ if __name__ == "__main__":
     
     # Example calculation
     result = iv_calc.calculate_iv(
-        spot=25153.70,
-        strike=25250,
-        ltp=104.75,  
-        expiry_date_str="2025-07-17",
+        spot=24501.70,
+        strike=24400,
+        ltp=101.5,  
+        expiry_date_str="2025-08-14",
         option_type="PE"
     )
     
