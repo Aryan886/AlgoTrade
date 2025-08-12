@@ -212,10 +212,10 @@ def calculate_live_vix(spot_price=None, strike_window=300):
         print(f"Calculating VIX with {len(option_data)} options around spot price {spot_price}")
         
         # Calculate VIX using the existing function
-        from strategies.indicators import calculate_enhanced_vix,calculate_vix2, calculate_enhanced_vix_30d
+        from strategies.indicators import  calculate_vix,calculate_enhanced_vix,calculate_vix2, calculate_enhanced_vix_30d
         #vix_value = calculate_vix2(option_data, spot_price, strike_window)
         #vix_value = calculate_enhanced_vix(option_data, spot_price, strike_window)
-        #vix_value = calculate_vix2(option_data, spot_price, strike_window)
+        vix_value = calculate_vix2(option_data, spot_price, strike_window)
         
         kite = kite_from_saved_token()
         futures_price = get_nearest_nifty_futures_price(kite=kite)
@@ -228,7 +228,7 @@ def calculate_live_vix(spot_price=None, strike_window=300):
 
         print(f"Using futures price (forward) = {futures_price} (spot {spot_price})")
         #vix_value = calculate_enhanced_vix(option_data, spot_price, futures_price=futures_price, verbose=True)
-        vix_value = calculate_enhanced_vix_30d(option_data, spot_price, futures_price=futures_price, verbose=True)
+        #vix_value = calculate_enhanced_vix_30d(option_data, spot_price, futures_price=futures_price, verbose=True)
 
         # fallback if enhanced fails
         if vix_value is None:

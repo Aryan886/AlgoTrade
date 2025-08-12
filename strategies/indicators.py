@@ -283,10 +283,13 @@ def calculate_vix2(option_data, spot_price, strike_window=300):
         else:
             continue  # Skip if no expiry date
 
+        """
+        """
         # Skip incomplete data
         if None in (strike, ltp, expiry_date, option_type, oi):
             continue
-
+        
+    
         # Filter strikes near ATM
         if abs(strike - spot_price) > strike_window:
             continue

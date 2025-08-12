@@ -364,7 +364,7 @@ class MarketDataAutomation:
         
         # Start scheduler in a separate thread
         self.scheduler_thread = threading.Thread(target=self.run_scheduler)
-        self.scheduler_thread.daemon = True
+        self.scheduler_thread.daemon = False
         self.scheduler_thread.start()
         
         logger.info("Market data automation started successfully")
