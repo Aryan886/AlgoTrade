@@ -146,9 +146,7 @@ def is_duplicate_signal(first_leg, second_leg):
     # Check if same options
     same_signal = (
         first_leg['tradingsymbol'] == last_first['tradingsymbol'] and
-        second_leg['tradingsymbol'] == last_second['tradingsymbol'] and
-        first_leg['ltp'] == last_first['ltp'] and
-        second_leg['ltp'] == last_second['ltp']
+        second_leg['tradingsymbol'] == last_second['tradingsymbol'] 
     )
     
     return same_signal
@@ -320,7 +318,7 @@ def donchian_ao_strategy(symbol="NIFTY50"):
             paper_logger.info("3:1 - Majority negative : Selling CE first,then PE ")
             trade_result = execute_trade(options_data, delta_limit, "CE_FIRST")
         
-        # CHECK FOR VALID TRADE RESULT (ADD THIS)
+        # CHECK FOR VALID TRADE RESULT
         if trade_result and len(trade_result) == 2:
             first_leg, second_leg = trade_result
             
@@ -330,10 +328,11 @@ def donchian_ao_strategy(symbol="NIFTY50"):
                     paper_logger.info(f"Duplicate signal detected, skipping: {first_leg['tradingsymbol']} + {second_leg['tradingsymbol']}")
                     return None
                 
-                # Update signal tracking
-                update_signal_tracking(first_leg, second_leg)
-                paper_logger.info(f"NEW UNIQUE SIGNAL GENERATED: {first_leg['tradingsymbol']} + {second_leg['tradingsymbol']}")
-                return trade_result
+               # Format for execute_paper_trade (expects dict with ce_option/pe_option keys)
+                if first_leg['option_type'] == 'CE':
+                    return {"ce_option": first_leg, "pe_option": second_leg}
+                else:
+                    return {"ce_option": second_leg, "pe_option": first_leg}
             else:
                 paper_logger.warning("Trade execution returned None for one or both legs")
                 return None
@@ -395,7 +394,12 @@ def execute_trade(options_data, delta_limit, trade_type):
     paper_logger.info(f"Selected {trade_type}: First Leg : {first_leg['tradingsymbol']} (LTP: {first_leg['ltp']}, Delta: {first_leg['delta']})")
     paper_logger.info(f"Selected {trade_type}: Second leg: {second_leg['tradingsymbol']} (LTP: {second_leg['ltp']}, Delta: {second_leg['delta']})")
 
-
+    # Standardize keys for paper trader compatibility
+    first_leg['symbol'] = first_leg['tradingsymbol'] 
+    second_leg['symbol'] = second_leg['tradingsymbol']
+    first_leg['last_price'] = first_leg['ltp']
+    second_leg['last_price'] = second_leg['ltp']
+    
     print(f"[DEBUG] Selected first_leg: {first_leg['tradingsymbol']} ({first_leg['option_type']})")
     print(f"[DEBUG] Selected second_leg: {second_leg['tradingsymbol']} ({second_leg['option_type']})")
 

@@ -679,15 +679,26 @@ class PaperTrader:
         try:
             if not self.has_active_position():
                 return False
+            
+            # ADD THIS DEBUG BLOCK
+            ce_sym = self.position.get("ce_symbol")
+            pe_sym = self.position.get("pe_symbol")
+            self.logger.info(f"[PRICE UPDATE DEBUG] Looking for CE: {ce_sym}, PE: {pe_sym}")
+            
 
             # fast lookup by symbol
             if not options_data:
                 self.logger.warning("update_current_prices called with empty options_data.")
                 return False
-            symbol_map = {o.get("symbol"): o for o in options_data if o.get("symbol")}
+            
+            self.logger.info(f"[SYMBOL LOOKUP DEBUG] First 3 options symbols: {[opt.get('symbol') for opt in options_data[:3]]}")
+            symbol_map = {o.get("symbol") or o.get("tradingsymbol"): o for o in options_data if o.get("symbol") or o.get("tradingsymbol")}
 
+            self.logger.info(f"[SYMBOL MAP DEBUG] Total symbols in map: {len(symbol_map)}")
             ce_sym = self.position.get("ce_symbol")
             pe_sym = self.position.get("pe_symbol")
+            self.logger.info(f"[SYMBOL MAP DEBUG] CE found: {ce_sym in symbol_map}, PE found: {pe_sym in symbol_map}")
+            
             if not ce_sym or not pe_sym:
                 self.logger.warning("Position missing ce_symbol/pe_symbol; cannot update.")
                 return False
@@ -706,6 +717,7 @@ class PaperTrader:
                     if new_price is not None:
                         if self.position.get("current_prices", {}).get("ce") != new_price:
                             self.position.setdefault("current_prices", {})["ce"] = new_price
+                            self.position["current_prices"]["CE"] = new_price
                             updated = True
                 else:
                     self.logger.debug("CE %s not found or missing price in options_data", ce_sym)
@@ -722,6 +734,7 @@ class PaperTrader:
                     if new_price is not None:
                         if self.position.get("current_prices", {}).get("pe") != new_price:
                             self.position.setdefault("current_prices", {})["pe"] = new_price
+                            self.position.setdefault("current_prices")["PE"] = new_price
                             updated = True
                 else:
                     self.logger.debug("PE %s not found or missing price in options_data", pe_sym)
@@ -764,7 +777,14 @@ class PaperTrader:
             return
 
         # Update current prices with freshness validation
-        prices_updated = self.update_current_prices()
+        # Get fresh options data for price updates
+        options_data = fetch_latest_delta_data(self.symbol)
+        if not options_data:
+            self.logger.warning("No options data available for price updates")
+            return
+
+        # Update current prices with freshness validation  
+        prices_updated = self.update_current_prices(options_data)
         current_profit = self.calculate_current_profit()
         self.logger.info(f"CURRENT NET P&L: {current_profit} points")
 
