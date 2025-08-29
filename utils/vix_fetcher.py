@@ -210,16 +210,23 @@ def calculate_live_vix(spot_price=None, strike_window=300):
             return None
         
         print(f"Calculating VIX with {len(option_data)} options around spot price {spot_price}")
-        
+
         # Calculate VIX using the existing function
-        from strategies.indicators import  calculate_vix,calculate_enhanced_vix,calculate_vix2, calculate_enhanced_vix_30d
+        from strategies.indicators import  calculate_vix,calculate_enhanced_vix,calculate_vix2
         #vix_value = calculate_vix2(option_data, spot_price, strike_window)
         #vix_value = calculate_enhanced_vix(option_data, spot_price, strike_window)
-        vix_value = calculate_vix2(option_data, spot_price, strike_window)
+        #vix_value = calculate_vix2(option_data, spot_price, strike_window)
         
+        current_day = datetime.now().weekday()
+        if current_day == 3:
+            vix_value = calculate_enhanced_vix(option_data, spot_price, strike_window)
+        
+        else:
+            vix_value = calculate_vix2(option_data, spot_price, strike_window)
         kite = kite_from_saved_token()
+
         futures_price = get_nearest_nifty_futures_price(kite=kite)
-        if futures_price:
+        if futures_price: 
             if isinstance(futures_price, str):
                 try:
                     futures_price = float(futures_price)
@@ -432,4 +439,3 @@ def store_vix_data(timestamp, symbol, vix_value, vix_ao_value=None, vix_donchian
 
 if __name__ =="__main__":
     calculate_live_vix()
-    #fetch_live_option_chain()

@@ -284,19 +284,19 @@ if __name__ == "__main__":
     
     if df_1m is not None:
         print(f"\nSuccessfully fetched {len(df_1m)} rows of 1m data for NIFTY 50")
-        print("Sample data:")
-        print(df_1m.head())
+       # print("Sample data:")
+       # print(df_1m.head())
     else:
         print("Failed to fetch data for NIFTY 50. Please ensure you're logged into Kite API.")
     
     if df_5m is not None:
         print(f"\nSuccessfully fetched {len(df_5m)} rows of 5m data for NIFTY 50")
-        print("Sample data:")
-        print(df_5m.head())
+       # print("Sample data:")
+       # print(df_5m.head())
     
     if df_15m is not None:
         print(f"\nSuccessfully fetched {len(df_15m)} rows of 15m data for NIFTY 50")
-        print("Sample data:")
-        print(df_15m.head())
+       # print("Sample data:")
+        #print(df_15m.head())
 
 

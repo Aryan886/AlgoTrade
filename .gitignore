@@ -9,8 +9,12 @@ __pycache__/
 db/trading_bot.db
 database/datas
 *.log
+*.json
 
 # Ignore virtual environments
 venv/
 .env/
 db/trading_bot.db 
+
+#Ignore api keys : 
+config/secrets.yaml 

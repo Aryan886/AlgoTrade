@@ -16,6 +16,8 @@ from strategies.paper_trades import PaperTrader
 import argparse
 import json
 
+#Generate signal function at line 220s generate_pdf is currently stopped
+
 
 # Set up logging with rotation
 from logging.handlers import RotatingFileHandler
@@ -94,7 +96,7 @@ def generate_and_store_signals(df, symbol="NIFTY50"):
                     reason=signal['reason'],
                     confidence_score=signal['confidence_score']
                 )
-                logger.info(f"Signal stored: {signal['signal']} for {signal['symbol']} - {signal['reason']}")
+                #logger.info(f"Signal stored: {signal['signal']} for {signal['symbol']} - {signal['reason']}")
             except Exception as e:
                 logger.error(f"Failed to store signal: {e}")
         
@@ -204,7 +206,7 @@ class MarketDataAutomation:
             
         for attempt in range(max_retries):
             try:
-                logger.info(f"Fetching {interval} data (attempt {attempt + 1}/{max_retries})...")
+               # logger.info(f"Fetching {interval} data (attempt {attempt + 1}/{max_retries})...")
                 results, df = fetch_and_save_data(intervals=[interval], return_interval=interval)
                 
                 if df is not None and not df.empty:
@@ -216,7 +218,7 @@ class MarketDataAutomation:
                     logger.info(f"Stored {interval} market data successfully")
                     
                     # Generate and store signals
-                    generate_and_store_signals(df, "NIFTY50")
+                    #generate_and_store_signals(df, "NIFTY50")
                     
                     return df
                 else:
@@ -255,24 +257,36 @@ class MarketDataAutomation:
                 signal = donchian_ao_strategy(self.paper_trader.symbol)
                 if signal:
                     logger.info("New trading signal received, executing paper trade")
-                    self.paper_trader.execute_paper_trade(signal)
+                    # Add proper error handling and check return value
+                    try:
+                        success = self.paper_trader.execute_paper_trade(signal)
+                        if success:
+                            logger.info(" Paper trade executed successfully")
+                        else:
+                            logger.error(" Paper trade execution failed")
+                    except Exception as trade_error:
+                        logger.error(f" Exception during paper trade execution: {trade_error}")
                 else:
                     logger.debug("No new trading signals")
 
             # Manage existing position
             if self.paper_trader.has_active_position():
-                logger.debug("Managing existing positions")
-                self.paper_trader.manage_existing_positions()
-                
-                # Log current position status
-                status = self.paper_trader.get_position_status()
-                if isinstance(status, dict):
-                    logger.info(f"Position Status - P&L: {status.get('current_profit', 0):.2f}, "
-                              f"Adjustments: {status.get('adjustments_count', 0)}")
+                logger.info(" Managing existing positions")  # Changed from DEBUG to INFO
+                try:
+                    self.paper_trader.manage_existing_positions()
+                    
+                    # Log current position status
+                    status = self.paper_trader.get_position_status()
+                    if isinstance(status, dict):
+                        logger.info(f" Position Status - P&L: Rs{status.get('current_profit', 0):.2f}, "
+                                f"Adjustments: {status.get('adjustments_count', 0)}")
+                except Exception as manage_error:
+                    logger.error(f" Error managing positions: {manage_error}")
+            else:
+                logger.debug("No active position to manage")
                 
         except Exception as e:
-            logger.error(f"Error in paper trading cycle: {e}")
-
+            logger.error(f" Error in paper trading cycle: {e}")
 
     def get_paper_trading_summary(self):
         """Get detailed paper trading summary"""
@@ -414,17 +428,17 @@ class MarketDataAutomation:
     def print_status_report(automation):
         """Print a formatted status report"""
         print("\n" + "="*60)
-        print("📊 MARKET DATA & PAPER TRADING STATUS")
+        print(" MARKET DATA & PAPER TRADING STATUS")
         print("="*60)
         
         # General Status
         general_status = automation.get_status()
-        print(f"🔄 System Running: {'✅ YES' if general_status['is_running'] else '❌ NO'}")
-        print(f"📈 Market Open: {'✅ YES' if general_status['market_open'] else '❌ NO'}")
-        print(f"⏰ Current Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"System Running: {' YES' if general_status['is_running'] else ' NO'}")
+        print(f"Market Open: {' YES' if general_status['market_open'] else ' NO'}")
+        print(f"Current Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
         # Data Fetch Status
-        print(f"\n📊 LAST DATA FETCH TIMES:")
+        print(f"\n LAST DATA FETCH TIMES:")
         for interval, last_time in general_status['last_fetch_times'].items():
             if last_time:
                 time_str = last_time.strftime('%H:%M:%S')
@@ -438,22 +452,22 @@ class MarketDataAutomation:
         paper_status = automation.get_paper_trading_summary()
         
         if paper_status.get('active_position'):
-            print(f"   📍 Position: ✅ ACTIVE")
-            print(f"   💰 Current P&L: ₹{paper_status['current_profit']}")
-            print(f"   ⏱️  Entry Time: {paper_status['entry_time']}")
-            print(f"   📏 Duration: {paper_status['position_duration']}")
-            print(f"   🔄 Adjustments: {paper_status['adjustments_count']}")
-            print(f"   💸 Adjustment Costs: ₹{paper_status['adjustment_costs']}")
+            print(f" Position:  ACTIVE")
+            print(f" Current P&L: Rs{paper_status['current_profit']}")
+            print(f"   Entry Time: {paper_status['entry_time']}")
+            print(f" Duration: {paper_status['position_duration']}")
+            print(f" Adjustments: {paper_status['adjustments_count']}")
+            print(f" Adjustment Costs: Rs{paper_status['adjustment_costs']}")
             if paper_status['ce_price']:
-                print(f"   📞 CE Price: ₹{paper_status['ce_price']}")
+                print(f" CE Price: Rs{paper_status['ce_price']}")
             if paper_status['pe_price']:
-                print(f"   📞 PE Price: ₹{paper_status['pe_price']}")
+                print(f" PE Price: Rs{paper_status['pe_price']}")
         else:
-            print(f"   📍 Position: ❌ NO ACTIVE POSITION")
-            print(f"   💡 Status: Waiting for trading signals...")
+            print(f" Position:  NO ACTIVE POSITION")
+            print(f" Status: Waiting for trading signals...")
         
         if paper_status.get('error'):
-            print(f"   ⚠️  Error: {paper_status['error']}")
+            print(f"     Error: {paper_status['error']}")
         
         print("="*60)
         print()

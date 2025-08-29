@@ -7,11 +7,33 @@ from utils.db_func import (
     fetch_latest_delta_data
 )
 from utils.utility import setup_paper_trading_logger
+from datetime import datetime
 
 # Initialize loggers
 paper_logger, trade_logger, position_logger = setup_paper_trading_logger()
 
 CUTOFF_TIME = pd.to_datetime("13:00").time()
+
+# GLOBAL SIGNAL TRACKING
+last_signal_time = None
+last_signal_options = None
+signal_cooldown = 300  # 5 minutes in seconds
+
+def get_delta_limit_by_day():
+    """Get delta limit based on current day of week"""
+    current_day = datetime.now().weekday() #Monday = 0 Sunday = 6
+
+    delta_config = {
+        0: 40, #Monday
+        1: 45, #Tuesday
+        2: 50, #Wednesday
+        3: 50, #Thursday (temp)
+        4: 40, #Friday
+        5: 40, #Saturday (just using)
+        6: 40, #Sunday
+    }
+
+    return delta_config[current_day]
 
 def emergency_column_fix(df, data_type="market"):
     """Emergency fix for column name case issues and indicator mapping"""
@@ -21,7 +43,7 @@ def emergency_column_fix(df, data_type="market"):
     # Create a copy to avoid modifying original
     df = df.copy()
     
-    print(f"[DEBUG] {data_type} data columns before fix: {list(df.columns)}")
+    #print(f"[DEBUG] {data_type} data columns before fix: {list(df.columns)}")
     
     # Handle VIX data with pre-calculated indicators
     if data_type.lower() == "vix":
@@ -30,7 +52,7 @@ def emergency_column_fix(df, data_type="market"):
             df['close'] = df['vix_value']  # lowercase
             df['high'] = df['vix_value']   # lowercase
             df['low'] = df['vix_value']    # lowercase
-            print(f"[VIX FIX] Mapped vix_value to OHLC columns")
+            #print(f"[VIX FIX] Mapped vix_value to OHLC columns")
         
         # Map existing VIX indicators to expected column names
         vix_indicator_mapping = {
@@ -43,9 +65,9 @@ def emergency_column_fix(df, data_type="market"):
         for old_col, new_col in vix_indicator_mapping.items():
             if old_col in df.columns:
                 df[new_col] = df[old_col]
-                print(f"[VIX FIX] Mapped {old_col} -> {new_col}")
+                #print(f"[VIX FIX] Mapped {old_col} -> {new_col}")
         
-        print(f"[DEBUG] VIX data columns after fix: {list(df.columns)}")
+        #print(f"[DEBUG] VIX data columns after fix: {list(df.columns)}")
         return df
     
     # For market data (5m, 15m), all columns should already be lowercase from standardize_column_names()
@@ -64,21 +86,21 @@ def emergency_column_fix(df, data_type="market"):
 
     if 'donchian_upper' in df.columns:
         df[f'donchian_upper{suffix}'] = df['donchian_upper']
-        print(f"[INDICATOR FIX] Mapped donchian_upper -> donchian_upper{suffix}")
+        #print(f"[INDICATOR FIX] Mapped donchian_upper -> donchian_upper{suffix}")
         mapped = True
     else:
         print(f"[WARNING] Column 'donchian_upper' missing in {data_type} data")
 
     if 'donchian_lower' in df.columns:
         df[f'donchian_lower{suffix}'] = df['donchian_lower']
-        print(f"[INDICATOR FIX] Mapped donchian_lower -> donchian_lower{suffix}")
+        #print(f"[INDICATOR FIX] Mapped donchian_lower -> donchian_lower{suffix}")
         mapped = True
     else:
         print(f"[WARNING] Column 'donchian_lower' missing in {data_type} data")
 
     if 'donchian_mid' in df.columns:
         df[f'donchian_mid{suffix}'] = df['donchian_mid']
-        print(f"[INDICATOR FIX] Mapped donchian_mid -> donchian_mid{suffix}")
+        #print(f"[INDICATOR FIX] Mapped donchian_mid -> donchian_mid{suffix}")
         mapped = True
     else:
         print(f"[WARNING] Column 'donchian_mid' missing in {data_type} data")
@@ -88,13 +110,58 @@ def emergency_column_fix(df, data_type="market"):
     
     if 'ao_value' in df.columns:
         # AO doesn't need suffix, it's used as-is
-        print(f"[INDICATOR FIX] AO value already correctly named")
+       #print(f"[INDICATOR FIX] AO value already correctly named")
+       pass
     
-   # print(f"[DEBUG] {data_type} data columns after fix: {list(df.columns)}")
-    print(f"[DEBUG] Columns in {data_type} after fix: {list(df.columns)}")
-
+    #print(f"[DEBUG] Columns in {data_type} after fix: {list(df.columns)}")
     
     return df
+
+def should_generate_signal():
+    """Check if enough time has passed since last signal"""
+    global last_signal_time, signal_cooldown
+    
+    current_time = datetime.now()
+    
+    if last_signal_time is None:
+        return True
+        
+    time_diff = (current_time - last_signal_time).total_seconds()
+    
+    if time_diff < signal_cooldown:
+        paper_logger.debug(f"Signal cooldown active: {signal_cooldown - time_diff:.0f}s remaining")
+        return False
+        
+    return True
+
+def is_duplicate_signal(first_leg, second_leg):
+    """Check if this signal is identical to the last one"""
+    global last_signal_options
+    
+    if last_signal_options is None:
+        return False
+    
+    last_first, last_second = last_signal_options
+    
+    # Check if same options
+    same_signal = (
+        first_leg['tradingsymbol'] == last_first['tradingsymbol'] and
+        second_leg['tradingsymbol'] == last_second['tradingsymbol'] and
+        first_leg['ltp'] == last_first['ltp'] and
+        second_leg['ltp'] == last_second['ltp']
+    )
+    
+    return same_signal
+
+def update_signal_tracking(first_leg, second_leg):
+    """Update global signal tracking variables"""
+    global last_signal_time, last_signal_options
+    
+    last_signal_time = datetime.now()
+    last_signal_options = (first_leg, second_leg)
+    
+    paper_logger.info(f"Signal tracking updated: {first_leg['tradingsymbol']} + {second_leg['tradingsymbol']}")
+
 def debug_vix_data(symbol="NIFTY50"):
     """Debug function to inspect VIX data structure"""
     print(f"[DEBUG] Inspecting VIX data for symbol: {symbol}")
@@ -107,9 +174,9 @@ def debug_vix_data(symbol="NIFTY50"):
             return
             
         print(f"[DEBUG] VIX data shape: {vix_data.shape}")
-        print(f"[DEBUG] VIX data columns: {list(vix_data.columns)}")
-        print(f"[DEBUG] VIX data types:\n{vix_data.dtypes}")
-        print(f"[DEBUG] VIX data sample:\n{vix_data.head()}")
+       # print(f"[DEBUG] VIX data columns: {list(vix_data.columns)}")
+        #print(f"[DEBUG] VIX data types:\n{vix_data.dtypes}")
+        #print(f"[DEBUG] VIX data sample:\n{vix_data.head()}")
         
         # Check for numeric columns
         numeric_cols = vix_data.select_dtypes(include=['number']).columns
@@ -122,20 +189,25 @@ def debug_vix_data(symbol="NIFTY50"):
         return None
 
 def donchian_ao_strategy(symbol="NIFTY50"):
-    """Main strategy function with proper error handling"""
+    """Main strategy function with proper error handling and signal tracking"""
     
     print(f"[DEBUG] Running strategy for symbol: {symbol}")
     if not symbol:
         symbol = "NIFTY50"
 
+    # CHECK SIGNAL COOLDOWN FIRST (ADD THIS)
+    if not should_generate_signal():
+        paper_logger.debug("Strategy called but signal cooldown is active")
+        return None
+
     try:
-        # 1. Fetch Data from database (REMOVED DUPLICATE CODE)
+        # 1. Fetch Data from database
         print(f"[DEBUG] Fetching market data for symbol: {symbol}")
         df_5min = fetch_market_data(symbol=symbol, interval="5m")
         df_15min = fetch_market_data(symbol=symbol, interval="15m")
         vix_data = fetch_vix_data(symbol=symbol)
 
-        #Calculate indicators for 15m only, because there seems to be some godly issue with that mf
+        # Calculate indicators for 15m only
         df_15min.columns = [col.lower() for col in df_15min.columns]
         df_15min = add_donchian_channel(df_15min, suffix="_15m")
         df_15min = add_awesome_oscillator(df_15min)
@@ -153,11 +225,10 @@ def donchian_ao_strategy(symbol="NIFTY50"):
         # EMERGENCY FIX: Apply column fixes with data type info
         try:
             df_5min = emergency_column_fix(df_5min, "5min_market")
-            #df_15min = emergency_column_fix(df_15min, "15min_market")
             vix_data = emergency_column_fix(vix_data, "VIX")
-            print("[EMERGENCY FIX] Column fixes applied successfully")
-            print("[DEBUG] Checking existence of required 15m columns...")
-            print("Available columns in df_15min:", list(df_15min.columns))
+           # print("[EMERGENCY FIX] Column fixes applied successfully")
+           # print("[DEBUG] Checking existence of required 15m columns...")
+            #print("Available columns in df_15min:", list(df_15min.columns))
 
             if 'donchian_mid_15m' not in df_15min.columns:
                 raise Exception("[FATAL] donchian_mid_15m missing from df_15min after emergency fix!")
@@ -166,7 +237,7 @@ def donchian_ao_strategy(symbol="NIFTY50"):
             print(f"[EMERGENCY FIX ERROR] {e}")
             return None
 
-        # CRITICAL: Basic data validation (no indicator calculation needed)
+        # CRITICAL: Basic data validation
         basic_cols = ['high', 'low', 'close']
         
         if df_5min.empty or not all(col in df_5min.columns for col in basic_cols):
@@ -184,9 +255,6 @@ def donchian_ao_strategy(symbol="NIFTY50"):
         
         print(f"[DEBUG] Data validated - 5min: {len(df_5min)} rows, 15min: {len(df_15min)} rows, VIX: {len(vix_data)} rows")
 
-        # All indicators are pre-calculated in database, just map them properly
-        print("[DEBUG] Using pre-calculated indicators from database")
-        
         # Get the latest data point
         latest_5min = df_5min.iloc[-1]
         latest_15min = df_15min.iloc[-1]
@@ -196,7 +264,7 @@ def donchian_ao_strategy(symbol="NIFTY50"):
         
         # 1. VIX Condition
         if latest_vix['close'] > latest_vix['donchian_mid_vix']:
-            paper_logger.info("VIX is too high. No positions will be taken.")
+            paper_logger.info("VIX is above mid-donchian. No positions will be taken.")
             return None
 
         # 2. Simultaneous Breakout Condition
@@ -214,76 +282,124 @@ def donchian_ao_strategy(symbol="NIFTY50"):
             '15m_donchian': 1 if latest_15min['close'] > latest_15min['donchian_mid_15m'] else -1,
             '15m_ao': 1 if latest_15min['ao_value'] > 0 else -1,
         }
-
-        essentials['vix_condition'] = 1 if latest_vix['close'] <= latest_vix['donchian_mid_vix'] else -1
         
         positive_essentials = sum(1 for value in essentials.values() if value == 1)
 
-        # --- Trade Decision Logic ---
+        # --- Trade Decision Logic --- #
         
-        # Avoid trade if all essentials are in the same direction
-        if positive_essentials == 5 or positive_essentials == 0:
-            paper_logger.info("All essentials are in the same direction. No trade.")
+        # Checking for 3:1 ratio (3 positive + 1 negative OR 3 negative + 1 positive)
+        if positive_essentials == 4 or positive_essentials == 0:
+            paper_logger.info("All essentials in same direction. No Trade... ")
             return None
+        
+        delta_limit = get_delta_limit_by_day()
+        paper_logger.info(f"Using delta limit : {delta_limit} for today..")
 
-        # Take a trade if 1 or 2 essentials are positive
-        if positive_essentials == 1 or positive_essentials == 2:
-            # Check for the specific condition to sell ATM Call and Put
-            if positive_essentials == 1 and essentials['5m_donchian'] == 1:
-                paper_logger.info("SELL signal: 5m close is above 5m mid Donchian, and all other essentials are negative.")
-                
-                # 1. Calculate and store latest deltas
-                calculate_and_store_high_accuracy_delta(symbol=symbol)
-                
-                # 2. Fetch options data with deltas
-                options_data = fetch_latest_delta_data(symbol=symbol)
-                if not options_data:
-                    paper_logger.info("No options data with delta available to place a trade.")
-                    return None
+        # Fetching necessary deltas
+        calculate_and_store_high_accuracy_delta(symbol=symbol)
+        options_data = fetch_latest_delta_data(symbol=symbol)
 
-                first_leg, second_leg = select_options_for_trade(options_data)
+        if not options_data:
+            paper_logger.info("No options data with delta available..")
+            return None
+        
+        # EXECUTE TRADE LOGIC
+        trade_result = None
+        
+        if positive_essentials == 3:
+            # Majority positive: Sell PE first, then CE
+            paper_logger.info("3:1 Ratio - Majority positive: PE first CE next route opted... ")
+            trade_result = execute_trade(options_data, delta_limit, "PE_FIRST")
+        
+        elif positive_essentials == 2:
+            paper_logger.info("2:2 Ratio detected: Selling CE first then PE")
+            trade_result = execute_trade(options_data, delta_limit, "CE_FIRST")
 
-                if first_leg and second_leg:
-                    paper_logger.info(f"Selected pair for trade: {first_leg['tradingsymbol']} (Delta: {first_leg['delta']}) and {second_leg['tradingsymbol']} (Delta: {second_leg['delta']})")
-                    return first_leg, second_leg
-                else:
-                    paper_logger.warning("Could not select a suitable pair of options for the trade.")
-                    return None
-
-            elif positive_essentials == 2 and (essentials['5m_donchian'] == 1 and essentials['5m_ao'] == 1):
-                paper_logger.info("SELL Signal: 5m close is above mid-donchian and 5m AO is positive")
-
-                # 1. Calculate and store deltas 
-                calculate_and_store_high_accuracy_delta(symbol=symbol)  
-                # 2. Fetch options data with deltas
-                options_data = fetch_latest_delta_data(symbol=symbol)
-
-                # Hybrid filter of PE/CE 
-                pe_candidates = sorted(
-                    [opt for opt in options_data if opt['option_type'] == 'PE' and 30 <= abs(opt['delta']) <= 50], 
-                    key=lambda x: (-x['ltp'], abs(abs(x['delta']) - 40))
-                )
-                
-                ce_candidates = sorted(
-                    [opt for opt in options_data if opt['option_type'] == 'CE' and 30 <= abs(opt['delta']) <= 50], 
-                    key=lambda x: (x['ltp'], abs(abs(x['delta']) - 40))
-                )
-
-                for pe in pe_candidates:
-                    for ce in ce_candidates:
-                        if (pe['ltp'] - ce['ltp']) > 18:
-                            paper_logger.info(f"Selected PE: {pe['tradingsymbol']} ({pe['ltp']} | {pe['delta']}), CE: {ce['tradingsymbol']} ({ce['ltp']} | {ce['delta']})")
-                            return pe, ce
+        else: # positive essentials = 1
+            # Majority Negative : Sell CE first, then PE
+            paper_logger.info("3:1 - Majority negative : Selling CE first,then PE ")
+            trade_result = execute_trade(options_data, delta_limit, "CE_FIRST")
+        
+        # CHECK FOR VALID TRADE RESULT (ADD THIS)
+        if trade_result and len(trade_result) == 2:
+            first_leg, second_leg = trade_result
             
+            if first_leg and second_leg:
+                # Check for duplicate signal
+                if is_duplicate_signal(first_leg, second_leg):
+                    paper_logger.info(f"Duplicate signal detected, skipping: {first_leg['tradingsymbol']} + {second_leg['tradingsymbol']}")
+                    return None
+                
+                # Update signal tracking
+                update_signal_tracking(first_leg, second_leg)
+                paper_logger.info(f"NEW UNIQUE SIGNAL GENERATED: {first_leg['tradingsymbol']} + {second_leg['tradingsymbol']}")
+                return trade_result
             else:
-                paper_logger.info("Trade condition met, but not the specific one for selling ATM options.")
+                paper_logger.warning("Trade execution returned None for one or both legs")
                 return None
-
-        return None
+        else:
+            paper_logger.warning(f"Invalid trade result: {trade_result}")
+            return None
 
     except Exception as e:
         paper_logger.error(f"Error in donchian_ao_strategy: {e}")
         return None
+
+def execute_trade(options_data, delta_limit, trade_type):
+    """
+    Execute PE/CE trade based on 3:1 ratio logic
+    trade_type : PE_FIRST or CE_FIRST
+    """
+    # Separate options by type
+    pe_options = [opt for opt in options_data if opt["option_type"] == "PE" and abs(opt['delta']) < delta_limit]
+    ce_options = [opt for opt in options_data if opt["option_type"] == "CE" and abs(opt['delta']) < delta_limit]
+    
+    """
+    print(f"[DEBUG] Found {len(pe_options)} PE options, {len(ce_options)} CE options")
+    print(f"[DEBUG] PE options: {[opt['tradingsymbol'] + ' (' + opt['option_type'] + ')' for opt in pe_options[:3]]}")
+    print(f"[DEBUG] CE options: {[opt['tradingsymbol'] + ' (' + opt['option_type'] + ')' for opt in ce_options[:3]]}")
+    """
+
+    if not pe_options or not ce_options:
+        print(f"Insufficient options data with delta < {delta_limit}")
+        return None  # FIX: Changed from (None, None) to None
+    
+    if trade_type == "PE_FIRST":
+        # Sell the most expensive one first
+        pe_options.sort(key=lambda x : x['ltp'], reverse=True)
+        first_leg = pe_options[0]
+
+        # Find CE with LTP lower than selected PE option
+        ce_candidates = [ce for ce in ce_options if ce['ltp'] < first_leg['ltp']]
+        if not ce_candidates:
+            print(f"No CE found with LTP lower than PE LTP : {first_leg['ltp']}")
+            return None  # FIX: Changed from (None, None) to None
+        
+        # Sort CE by highest LTP among candidates (but still lower than PE)
+        ce_candidates.sort(key=lambda x: x['ltp'], reverse=True)
+        second_leg = ce_candidates[0]
+
+    else: # CE_FIRST
+        ce_options.sort(key=lambda x: x['ltp'], reverse=True)
+        first_leg = ce_options[0]
+
+        # Find PE with LTP lower than CE
+        pe_candidates = [pe for pe in pe_options if pe['ltp'] < first_leg['ltp']]
+        if not pe_candidates:
+            print(f"No PE found with LTP lower than CE LTP : {first_leg['ltp']}")
+            return None  # FIX: Changed from (None, None) to None
+
+        pe_candidates.sort(key=lambda x:x['ltp'], reverse=True)
+        second_leg = pe_candidates[0]
+
+    paper_logger.info(f"Selected {trade_type}: First Leg : {first_leg['tradingsymbol']} (LTP: {first_leg['ltp']}, Delta: {first_leg['delta']})")
+    paper_logger.info(f"Selected {trade_type}: Second leg: {second_leg['tradingsymbol']} (LTP: {second_leg['ltp']}, Delta: {second_leg['delta']})")
+
+
+    print(f"[DEBUG] Selected first_leg: {first_leg['tradingsymbol']} ({first_leg['option_type']})")
+    print(f"[DEBUG] Selected second_leg: {second_leg['tradingsymbol']} ({second_leg['option_type']})")
+
+    return (first_leg, second_leg)  # FIX: Ensure tuple return
 
 def select_options_for_trade(options_data):
     """
@@ -295,7 +411,7 @@ def select_options_for_trade(options_data):
 
     if not calls or not puts:
         print("Not enough options data to select a pair.")
-        return None, None
+        return None
 
     # 1. Find the option with delta closest to 50
     all_options = calls + puts
@@ -304,7 +420,7 @@ def select_options_for_trade(options_data):
     # Ensure the first leg is within the +/- 5 range
     if abs(abs(first_leg['delta']) - 50) > 5:
         print(f"No option found with delta within +/- 5 of 50. closest was {first_leg['delta']}.")
-        return None, None
+        return None
 
     # 2. Find the second leg
     second_leg = None
@@ -323,11 +439,12 @@ def select_options_for_trade(options_data):
 
     if not second_leg:
         print(f"Could not find a second leg to match the first leg (delta: {first_leg_delta}).")
-        return None, None
+        return None
         
-    return first_leg, second_leg
+    return (first_leg, second_leg)
 
 def get_current_entry_criteria(symbol):
+    """Get current entry criteria for position validation"""
     try:
         df_5min = fetch_market_data(symbol=symbol, interval="5m")
         df_15min = fetch_market_data(symbol=symbol, interval="15m")
@@ -339,7 +456,7 @@ def get_current_entry_criteria(symbol):
 
         # Recalculate indicators for 15m
         df_15min.columns = [col.lower() for col in df_15min.columns]
-        df_15min = add_donchian_channel(df_15min)
+        df_15min = add_donchian_channel(df_15min, suffix="_15m")
         df_15min = add_awesome_oscillator(df_15min)
         df_15min = emergency_column_fix(df_15min, "15min_market")
 
@@ -361,6 +478,13 @@ def get_current_entry_criteria(symbol):
         paper_logger.error(f"Error in get_current_entry_criteria: {e}")
         return None
 
+#THIS FUNCTION FOR MANUAL SIGNAL RESET
+def reset_signal_tracking():
+    """Reset signal tracking - useful for testing or manual intervention"""
+    global last_signal_time, last_signal_options
+    last_signal_time = None
+    last_signal_options = None
+    paper_logger.info("Signal tracking reset manually")
 
 if __name__ == "__main__":
     donchian_ao_strategy()
