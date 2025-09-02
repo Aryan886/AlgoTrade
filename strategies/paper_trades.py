@@ -30,7 +30,7 @@ class PaperTrader:
         self.last_profit_check = None
         self.entry_time = None
         self.last_data_refresh = None
-        self.data_freshness_threshold = 45  # seconds
+        self.data_freshness_threshold = 60  # seconds
         
         self.last_signal_attempt = None
         self.signal_cooldown = 300  # 5 minutes in seconds
@@ -358,9 +358,28 @@ class PaperTrader:
             self.logger.warning("close_position called but no active position.")
             return False
 
+        if leg.lower() == "all":
+                self.logger.info("Closing ALL legs due to rule trigger")
+                success_ce = self.close_position("ce", auto_clear=False)
+                success_pe = self.close_position("pe", auto_clear=False)
+                if success_ce or success_pe:
+                    try:
+                        final_pnl = self.calculate_current_profit()
+                        self.logger.info(f"Final Net P&L on closure : {final_pnl}")
+                    except Exception as e:
+                        self.logger.error(f"Could not calculate final P&L due to : {e}")
+
+                    if auto_clear:
+                        self.logger.info("Both legs closed. Clearing in-memory active position.")
+                        self.position = None
+                        self.clear_position_file()
+                    return True
+                return False
+
         if leg not in ("ce", "pe"):
             self.logger.error("close_position called with invalid leg: %s", leg)
             return False
+
 
         try:
             entry_price = self.position.get("entry_prices", {}).get(leg)
@@ -403,6 +422,11 @@ class PaperTrader:
             if auto_clear and self.position.get("ce_closed") and self.position.get("pe_closed"):
                 # keep a final snapshot in file (we already saved). Optionally clear runtime position
                 # Do not delete adjustment_history; leave it in memory for reporting
+                try:
+                    final_pnl = self.calculate_current_profit()
+                    self.logger.info(f"Final Net P&L on closure : {final_pnl}")
+                except Exception as e:
+                    self.logger.error(f"Could Not calculate final profit due to : {e}")
                 self.logger.info("Both legs closed. Clearing in-memory active position.")
                 self.position = None
                 # persist cleared file (clear_position_file should be implemented in your file)
@@ -434,7 +458,7 @@ class PaperTrader:
                 for key in self.entry_criteria:
                     if self.entry_criteria[key] != current_criteria.get(key):
                         self.logger.info(f"ENTRY CRITERIA VIOLATION : {key} changed from {self.entry_criteria[key]} to {current_criteria.get(key)}")
-                        self.close_position("Entry criteria violation")
+                        self.close_position("all")
                         return True
                     
             return False
@@ -462,7 +486,7 @@ class PaperTrader:
                 if not prices_updated:
                     self.logger.warning("Could not update prices before VIX Closure")
 
-                self.close_position("VIX Breach")
+                self.close_position("all")
                 return True
             
             return False
@@ -495,9 +519,14 @@ class PaperTrader:
                 self.logger.warning("No remaining option open - cannot replace")
                 return
 
-            # find its price & delta
-            symbol_map = {o.get("symbol"): o for o in options_data if o.get("symbol")}
-            base_opt = symbol_map.get(remaining_symbol)
+            # build symbol lookup (support both 'symbol' and 'tradingsymbol', ignore case)
+            symbol_map = {
+                (o.get("symbol") or o.get("tradingsymbol")).upper(): o
+                for o in options_data
+                if o.get("symbol") or o.get("tradingsymbol")
+            }
+
+            base_opt = symbol_map.get(remaining_symbol.upper())
             if not base_opt:
                 self.logger.warning(f"Remaining option {remaining_symbol} not found in fresh data.")
                 return
@@ -663,7 +692,7 @@ class PaperTrader:
 
             if profit >= 16:
                 self.logger.info(f"PROFIT TARGET REACHED : {profit} points")
-                self.close_position("Profit target reached")
+                self.close_position("all")
                 return True
             
             return False
@@ -671,7 +700,7 @@ class PaperTrader:
             self.logger.error(f"Error checking profit target : {e}")
             return False
         
-    def update_current_prices(self, options_data: List[Dict]) -> bool:
+    def update_current_prices(self, options_data: Optional[List[Dict]] = None) -> bool:
         """
         Efficiently update current_prices for the active position from fresh options_data.
         Returns True if at least one price updated, False otherwise.
@@ -687,8 +716,10 @@ class PaperTrader:
             
 
             # fast lookup by symbol
+            if options_data is None:
+                options_data = fetch_latest_delta_data(self.symbol)
             if not options_data:
-                self.logger.warning("update_current_prices called with empty options_data.")
+                self.logger.warning("update_current_prices has no options_data available.")
                 return False
             
             self.logger.info(f"[SYMBOL LOOKUP DEBUG] First 3 options symbols: {[opt.get('symbol') for opt in options_data[:3]]}")
@@ -704,42 +735,54 @@ class PaperTrader:
                 return False
 
             updated = False
+            any_price_seen = False
 
             # update CE if open
             if not self.position.get("ce_closed", False):
                 ce_data = symbol_map.get(ce_sym)
-                if ce_data and ("last_price" in ce_data or "ltp" in ce_data):
-                    new_price = ce_data.get("last_price", ce_data.get("ltp"))
+                if ce_data:
+                    raw_price = ce_data.get("last_price")
+                    if raw_price is None:
+                        raw_price = ce_data.get("ltp")
                     try:
-                        new_price = float(new_price)
+                        new_price = float(raw_price) if raw_price is not None else None
                     except Exception:
                         new_price = None
                     if new_price is not None:
-                        if self.position.get("current_prices", {}).get("ce") != new_price:
-                            self.position.setdefault("current_prices", {})["ce"] = new_price
-                            self.position["current_prices"]["CE"] = new_price
+                        any_price_seen = True
+                        # track if the numeric value changed
+                        if self.position.get("current_prices", {}).get("ce") != new_price or self.position.get("current_prices", {}).get("CE") != new_price:
                             updated = True
+                        # always mirror to both lowercase and uppercase keys for downstream consumers
+                        self.position.setdefault("current_prices", {})["ce"] = new_price
+                        self.position["current_prices"]["CE"] = new_price
                 else:
                     self.logger.debug("CE %s not found or missing price in options_data", ce_sym)
 
             # update PE if open
             if not self.position.get("pe_closed", False):
                 pe_data = symbol_map.get(pe_sym)
-                if pe_data and ("last_price" in pe_data or "ltp" in pe_data):
-                    new_price = pe_data.get("last_price", pe_data.get("ltp"))
+                if pe_data:
+                    raw_price = pe_data.get("last_price")
+                    if raw_price is None:
+                        raw_price = pe_data.get("ltp")
                     try:
-                        new_price = float(new_price)
+                        new_price = float(raw_price) if raw_price is not None else None
                     except Exception:
                         new_price = None
                     if new_price is not None:
-                        if self.position.get("current_prices", {}).get("pe") != new_price:
-                            self.position.setdefault("current_prices", {})["pe"] = new_price
-                            self.position.setdefault("current_prices")["PE"] = new_price
+                        any_price_seen = True
+                        # track if the numeric value changed
+                        if self.position.get("current_prices", {}).get("pe") != new_price or self.position.get("current_prices", {}).get("PE") != new_price:
                             updated = True
+                        # always mirror to both lowercase and uppercase keys for downstream consumers
+                        self.position.setdefault("current_prices", {})["pe"] = new_price
+                        self.position["current_prices"]["PE"] = new_price
+                        
                 else:
                     self.logger.debug("PE %s not found or missing price in options_data", pe_sym)
 
-            if updated:
+            if updated or any_price_seen:
                 self.save_position()
                 self.logger.debug("Position prices updated.")
                 return True
@@ -758,7 +801,7 @@ class PaperTrader:
         # FIRST: Check for expired positions
         if self.is_position_expired():
             self.logger.warning("Position contains expired options - closing immediately")
-            self.close_position("Options expired")
+            self.close_position("all")
             return
 
         # SECOND: Check if we should close due to expiry today
@@ -766,7 +809,7 @@ class PaperTrader:
             self.logger.info("Closing position - expiry day auto-close (3:15 PM)")
             # Update prices one final time before closing
             self.update_current_prices()
-            self.close_position("Expiry day auto-close")
+            self.close_position("all")
             return
 
         # THIRD: Normal position management continues...
@@ -811,7 +854,7 @@ class PaperTrader:
         if self.has_active_position():
             ce_price = self.position['current_prices'].get('CE', 0)
             pe_price = self.position['current_prices'].get('PE', 0)
-            self.logger.info(f"CURRENT PRICES - CE: ₹{ce_price}, PE: ₹{pe_price}")
+            self.logger.info(f"CURRENT PRICES - CE: Rs{ce_price}, PE: Rs{pe_price}")
             
             # Force adjustment check
             self.check_positon_adjustment()

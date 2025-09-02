@@ -168,7 +168,7 @@ def fetch_live_option_chain():
                         "lastPrice": ltp,
                         "openInterest": oi
                     })
-                # polite pause
+                # small pause
                 time.sleep(0.2)
             except Exception as e:
                 print("Error fetching chunk quotes:", e)
@@ -213,9 +213,6 @@ def calculate_live_vix(spot_price=None, strike_window=300):
 
         # Calculate VIX using the existing function
         from strategies.indicators import  calculate_vix,calculate_enhanced_vix,calculate_vix2
-        #vix_value = calculate_vix2(option_data, spot_price, strike_window)
-        #vix_value = calculate_enhanced_vix(option_data, spot_price, strike_window)
-        #vix_value = calculate_vix2(option_data, spot_price, strike_window)
         
         current_day = datetime.now().weekday()
         if current_day == 3:
@@ -438,4 +435,4 @@ def store_vix_data(timestamp, symbol, vix_value, vix_ao_value=None, vix_donchian
     conn.close() 
 
 if __name__ =="__main__":
-    calculate_live_vix()
+    fetch_live_option_chain()

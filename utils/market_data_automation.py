@@ -391,7 +391,7 @@ class MarketDataAutomation:
 
         if self.paper_trader.has_active_position():
             logger.info("Closing paper trading position due to system shutdown")
-            self.paper_trader.close_position("System shutdown")
+            self.paper_trader.close_position("all")
 
         if self.scheduler_thread and self.scheduler_thread.is_alive():
             self.scheduler_thread.join(timeout=5)
