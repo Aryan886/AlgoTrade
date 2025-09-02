@@ -351,6 +351,7 @@ def calculate_and_store_high_accuracy_delta(
         
         # Log the age of cached data
 
+        newest_age = None
         if cached_options:
             import sqlite3
             conn = sqlite3.connect(db_path)
@@ -385,8 +386,10 @@ def calculate_and_store_high_accuracy_delta(
                 all_expired = False
                 break
                 
-        # If all expired, fetch fresh option data
-        if all_expired or not cached_options:
+        # Refresh cache if expired/empty OR too stale by age
+        STALE_THRESHOLD_SECONDS = 15
+        is_stale_by_age = newest_age is not None and newest_age > STALE_THRESHOLD_SECONDS
+        if all_expired or not cached_options or is_stale_by_age:
             print("All cached options are expired or cache is empty. Fetching fresh option data...")
             from utils.vix_fetcher import fetch_live_option_chain, store_high_accuracy_options_data
             fresh_options = fetch_live_option_chain()
@@ -450,7 +453,7 @@ def calculate_and_store_high_accuracy_delta(
             for strike, strike_data in delta_results.items():
                 for option_type, option_data in strike_data.items():
                     #print(f"[DEBUG] Looking for: strike={strike}, type={option_type}")
-
+                    """
                     # Find the correct tradingsymbol for this specific strike and option_type
                     correct_tradingsymbol = 'N/A'
                     for opt in cached_options:
@@ -461,23 +464,31 @@ def calculate_and_store_high_accuracy_delta(
                     
                     if correct_tradingsymbol == 'N/A':
                         print(f"[DEBUG] NO MATCH FOUND for strike={strike}, type={option_type}")
+                   """
                     # Robust delta value extraction and scaling
                     if isinstance(option_data, dict) and 'delta' in option_data and isinstance(option_data['delta'], (float, int)):
                         delta_value = option_data['delta'] * 100
                         ltp_value = option_data.get('ltp', None)
+                        selected_tradingsymbol = option_data.get('tradingsymbol', 'N/A')
+                        selected_expiry = option_data.get('expiry_date')
                     elif isinstance(option_data, (float, int)):
                         delta_value = option_data * 100
                         ltp_value = None
+                        selected_tradingsymbol = 'N/A'
+                        selected_expiry = None
                     else:
                         delta_value = None  # Could not extract delta value
                         ltp_value = None
+                        selected_tradingsymbol = 'N/A'
+                        selected_expiry = None
                     if delta_value is not None:
+                        """
                         correct_tradingsymbol = 'N/A'
                         for opt in cached_options:
                             if opt['strike_price'] == strike and opt['option_type'] == option_type:
                                 correct_tradingsymbol = opt.get('tradingsymbol', 'N/A')
                                 break
-
+                        """
                         cursor.execute("""
                             INSERT INTO delta_cache (
                                 timestamp, strike_price, option_type, delta,
@@ -485,8 +496,8 @@ def calculate_and_store_high_accuracy_delta(
                             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
                             timestamp_str, strike, option_type, delta_value,
-                            cached_options[0]['expiry_date'], spot_price, symbol, ltp_value,
-                            correct_tradingsymbol
+                            selected_expiry, spot_price, symbol, ltp_value,
+                            selected_tradingsymbol
                         ))
             conn.commit()
             conn.close()

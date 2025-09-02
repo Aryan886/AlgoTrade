@@ -134,7 +134,7 @@ def fetch_live_option_chain():
                     opt_type = inst.get('instrument_type')
                     expiry = inst.get('expiry')
                     tradingsymbol = inst.get('tradingsymbol')
-                    ltp = q.get('last_price') or q.get('lastPrice') or q.get('ltp') or 0
+                    #ltp = q.get('last_price') or q.get('lastPrice') or q.get('ltp') or 0
                     oi = q.get('oi') or q.get('open_interest') or q.get('openInterest') or 0
 
                     # depth may have buy/sell lists
@@ -143,20 +143,28 @@ def fetch_live_option_chain():
                     depth = q.get('depth') or {}
                     buys = depth.get('buy') or []
                     sells = depth.get('sell') or []
+
                     if buys and isinstance(buys, list) and len(buys) > 0:
                         bestBid = buys[0].get('price') or buys[0].get('price')
                     if sells and isinstance(sells, list) and len(sells) > 0:
                         bestAsk = sells[0].get('price') or sells[0].get('price')
 
-                    midPrice = None
+                    #--- Synthetic LTP Caluclation --- #
+                    
                     try:
                         if bestBid and bestAsk:
-                            midPrice = (float(bestBid) + float(bestAsk)) / 2.0
-                        else:
-                            midPrice = float(ltp)
-                    except:
-                        midPrice = float(ltp)
+                            ltp = (float(bestBid) + float(bestAsk)) / 2.0
+                        elif bestBid:
+                            ltp = float(bestBid)
+                        elif bestAsk:
+                            ltp = float(bestAsk)
 
+                        else:
+                            ltp = q.get('last_price') or q.get('lastPrice') or q.get('ltp') or 0
+                    except Exception as e:
+                        print(f"Failed to calculate ltp due to : {e}")
+                        
+                    
                     results.append({
                         "strikePrice": strike,
                         "optionType": opt_type,
@@ -164,7 +172,6 @@ def fetch_live_option_chain():
                         "tradingsymbol": tradingsymbol,
                         "bestBid": bestBid,
                         "bestAsk": bestAsk,
-                        "midPrice": midPrice,
                         "lastPrice": ltp,
                         "openInterest": oi
                     })
