@@ -609,3 +609,69 @@ def fetch_latest_delta_data(symbol: str = 'NIFTY50', db_path=DB_PATH) -> List[Di
     return options_data
 
 
+def sma_table_name(interval : str) -> str:
+    return f"market_sma{interval}"
+
+def create_sma_table(conn: sqlite3.Connection, interval : str):
+    tbl = sma_table_name(interval)
+    conn.execute(f"""
+        CREATE TABLE IF NOT EXISTS {tbl}(
+            timestamp TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            sma_5 REAL.
+            sma_20 REAL,
+            PRIMARY KEY (timestamp, symbol)
+        );      
+    """)
+    conn.commit()
+    
+def compute_smas(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return a copy of df with 'sma_5' and 'sma_20' columns computed on 'close'
+    df may have DatetimeIndex or a simple index; index values are preserverd
+    """
+    df2 = df.copy()
+    #normalize column names to lowercase(make it usable for Close/close)
+    df2.columns = [c.lower() for c in df.columns]
+    if 'close' not in df2.columns:
+        raise ValueError("compute_smas: DataFrame must contain 'close' coumn")
+    
+    #rolling with min_period=1 so early rows get valid values
+    df2['sma_5'] = df2['close'].rolling(window=5, min_periods=1).mean()
+    df2['sma_20'] = df2['close'].rolling(window=20, min_periods=1).mean()
+    return df2
+
+
+def store_sma_from_df(df: pd.DateOffset, symbol : str, interval: str, db_path: DB_PATH):
+    """
+    Compute SMA on df and store into market_sma_<interval>.
+    - df: DataFrame indexed by timestamp (index can be DatetimeIndex or strings). Must contain 'close'.
+    - symbol: single symbol string (e.g., 'NIFTY50').
+    - interval: '1m','5m','15m'
+    - db_path: path to sqlite DB file
+    """
+    df_smas = compute_smas(df)
+
+    #prepare rows for insertoin
+    rows = []
+    for ts, row in df_smas.iterrows():
+        #keep timestamp format consistent 
+        ts_str = ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, "strftime") else str(ts)
+        sma5 = float(row['sma_5'] if pd.notna(row['sma_5']) else None)
+        sma20 = float(row['sma_20'] if pd.notna(row['sma_20']) else None)
+        rows.append((ts_str, symbol, sma5, sma20))
+
+    conn = sqlite3.connect(db_path, timeout=20)
+    try:
+        create_sma_table(conn, interval)
+        tbl = sma_table_name(interval)
+        cur = conn.cursor()
+        #Insert or Replace so same code wont create duplicate
+        cur.executemany(
+            f"INSERT OR REPLACE INTO {tbl}(timestamp,symbol, sma_5, sma_20) Values (?, ?, ?, ?);",
+            rows
+        )
+
+        conn.commit()
+    finally:
+        conn.close()

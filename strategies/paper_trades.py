@@ -24,7 +24,7 @@ class PaperTrader:
         self.symbol = symbol
         self.position = None
         self.adjustment_history = []
-        self.adjustment_cost = 0
+        self.adjustment_impact = 0
         self.entry_criteria = None
         self.last_risk_check = None
         self.last_profit_check = None
@@ -62,7 +62,7 @@ class PaperTrader:
             position_data = {
                 'position': self.position,
                 'adjustment_history': self.adjustment_history,
-                'adjustment_cost': self.adjustment_cost,
+                'adjustment_cost': self.adjustment_impact,
                 'entry_criteria': self.entry_criteria,
                 'entry_time': self.entry_time.isoformat() if self.entry_time else None,
                 'last_risk_check': self.last_risk_check.isoformat() if self.last_risk_check else None,
@@ -89,7 +89,7 @@ class PaperTrader:
                 # Restore position data
                 self.position = data.get('position')
                 self.adjustment_history = data.get('adjustment_history', [])
-                self.adjustment_cost = data.get('adjustment_cost', 0)
+                self.adjustment_impact = data.get('adjustment_cost', 0)
                 self.entry_criteria = data.get('entry_criteria')
                 
                 # Restore datetime objects
@@ -117,7 +117,7 @@ class PaperTrader:
                     if pe_sym:
                         self.logger.info(f"  PE: {pe_sym} at {pe_price}")
                 self.logger.info(f"  Entry Time: {self.entry_time}")
-                self.logger.info(f"  Adjustment Cost: {self.adjustment_cost}")
+                self.logger.info(f"  Adjustment Cost: {self.adjustment_impact}")
                 self.logger.info(f"  Adjustments Count: {len(self.adjustment_history)}")
                 return True
                 
@@ -125,7 +125,6 @@ class PaperTrader:
             self.logger.error(f"Error loading position: {e}")
         
         return False
-
 
     def parse_expiry_from_symbol(self, symbol: str):
         try:
@@ -176,7 +175,6 @@ class PaperTrader:
         except Exception as e:
             self.logger.error(f"Error checking position expiry: {e}")
             return False
-
 
     def is_expiry_day(self):
         if not self.has_active_position():
@@ -275,7 +273,7 @@ class PaperTrader:
     @property
     def total_adjustment_costs(self):
         """Property to get total adjustment costs"""
-        return self.adjustment_cost
+        return self.adjustment_impact
 
     def main_trading_loop(self):
         """ Run continuously in the background during Trading hours """
@@ -401,6 +399,10 @@ class PaperTrader:
             self.logger.info("  Entry Price: %s", entry_price)
             self.logger.info("  Close Price: %s", close_price)
 
+            self.trade_logger.info("CLOSING %s OPTION:", leg.upper())
+            self.trade_logger.info("  Entry Price: %s", entry_price)
+            self.trade_logger.info("  Close Price: %s", close_price)
+
             # mark closed safely
             self.position.setdefault("current_prices", {})[leg] = close_price
             self.position[f"{leg}_closed"] = True
@@ -425,9 +427,11 @@ class PaperTrader:
                 try:
                     final_pnl = self.calculate_current_profit()
                     self.logger.info(f"Final Net P&L on closure : {final_pnl}")
+                    self.trade_logger.info(f"Final Net P&L on closure : {final_pnl}")
                 except Exception as e:
                     self.logger.error(f"Could Not calculate final profit due to : {e}")
                 self.logger.info("Both legs closed. Clearing in-memory active position.")
+                self.trade_logger.info("Both legs closed. Clearing in-memory active position.")
                 self.position = None
                 # persist cleared file (clear_position_file should be implemented in your file)
                 try:
@@ -443,8 +447,6 @@ class PaperTrader:
         except Exception as e:
             self.logger.exception("Error closing position leg: %s", e)
             return False
-
-
 
     def check_entry_criteria_violation(self):
         """Rule 4: Check if entry criteria is still valid"""
@@ -515,15 +517,20 @@ class PaperTrader:
             elif pe_sym and not pe_closed:
                 remaining_symbol, remaining_type = pe_sym, 'PE'
 
+            #if both legs are already closed, skip replacement
+            if (self.position.get("ce_closed", False) and self.position.get("pe_closed", False)):
+                self.logger.warning("Both legs already closed, No replacements to be made")
+                return
+            
             if not remaining_symbol:
                 self.logger.warning("No remaining option open - cannot replace")
                 return
 
-            # build symbol lookup (support both 'symbol' and 'tradingsymbol', ignore case)
+            # build symbol lookup (use 'tradingsymbol' consistently)
             symbol_map = {
-                (o.get("symbol") or o.get("tradingsymbol")).upper(): o
+                o.get("tradingsymbol").upper(): o
                 for o in options_data
-                if o.get("symbol") or o.get("tradingsymbol")
+                if o.get("tradingsymbol")
             }
 
             base_opt = symbol_map.get(remaining_symbol.upper())
@@ -557,7 +564,7 @@ class PaperTrader:
 
             # best candidate
             best = min(candidates, key=lambda x: abs(abs(x["delta"]) - abs(remaining_delta)))
-            best_sym, best_price = best["symbol"], best.get("last_price") or best.get("ltp")
+            best_sym, best_price = best["tradingsymbol"], best.get("last_price") or best.get("ltp")
             self.logger.info(f"Best replacement: {best_sym} price={best_price}, delta={best['delta']}")
 
             if target_type == "CE":
@@ -587,21 +594,21 @@ class PaperTrader:
             self.logger.info(f"  Entry Price: {entry_price}")
             self.logger.info(f"  Close Price: {close_price}")
 
-            adjustment_cost = max(0, (close_price - entry_price))
-            self.adjustment_cost += adjustment_cost
+            adjustment_impact = close_price - entry_price
+            self.adjustment_impact += adjustment_impact
 
-            self.logger.info(f"  Adjustment Cost: {adjustment_cost}")
-            self.logger.info(f"  Total Adjustment Cost: {self.adjustment_cost}")
+            self.logger.info(f"  Adjustment Cost: {adjustment_impact}(positive = loss, negative = profit)")
+            self.logger.info(f"  Total Adjustment Cost: {self.adjustment_impact}")
 
             # mark as closed instead of deleting symbol
             self.position[f"{key}_closed"] = True
-            self.position['current_prices'][key] = 0
+            self.logger.info(f"Marked {option_type} leg was CLOSED. Will be ignored untill replacement is found")
 
             self.adjustment_history.append({
                 'timestamp': datetime.now().isoformat(sep=" "),
                 'action': f'closed {option_type}',
                 'price': close_price,
-                'cost': adjustment_cost
+                'cost': adjustment_impact
             })
 
             self.save_position()
@@ -619,6 +626,13 @@ class PaperTrader:
             ce_price = self.position['current_prices'].get('CE', 0)
             pe_price = self.position['current_prices'].get('PE', 0)
             
+            #Ignore closed legs by setting them to infinite so tbey don't trigger adjustment
+            if self.position.get("ce_closed", False):
+                ce_price = float('inf')
+            if self.position.get("pe_closed", False):
+                pe_price = float('inf')
+
+
             # ADD DETAILED LOGGING
             self.logger.debug(f"ADJUSTMENT CHECK - CE: {ce_price}, PE: {pe_price}")
             
@@ -653,7 +667,6 @@ class PaperTrader:
         except Exception as e:
             self.logger.error(f"Error in position adjustment : {e}")
 
-
     def calculate_current_profit(self):
         """Calculate current profit considering all adjustments"""
         self.logger.debug("Calculate Profit function sucessfully Called!!")
@@ -670,10 +683,10 @@ class PaperTrader:
             current_profit = entry_total - current_total
 
             #Subtract adjustment costs
-            net_profit = current_profit - self.total_adjustment_costs
+            net_profit = current_profit + self.adjustment_impact
 
             self.logger.debug(f"Entry total: {entry_total}, Current total: {current_total}")
-            self.logger.debug(f"Gross profit: {current_profit}, Adjustment costs: {self.total_adjustment_costs}")
+            self.logger.debug(f"Gross profit: {current_profit}, Adjustment impact: {self.total_adjustment_costs}")
             self.logger.debug(f"Net profit: {net_profit}")
 
             return net_profit
@@ -722,8 +735,8 @@ class PaperTrader:
                 self.logger.warning("update_current_prices has no options_data available.")
                 return False
             
-            self.logger.info(f"[SYMBOL LOOKUP DEBUG] First 3 options symbols: {[opt.get('symbol') for opt in options_data[:3]]}")
-            symbol_map = {o.get("symbol") or o.get("tradingsymbol"): o for o in options_data if o.get("symbol") or o.get("tradingsymbol")}
+            self.logger.info(f"[SYMBOL LOOKUP DEBUG] First 3 options symbols: {[opt.get('tradingsymbol') for opt in options_data[:3]]}")
+            symbol_map = {o.get("tradingsymbol"): o for o in options_data if o.get("tradingsymbol")}
 
             self.logger.info(f"[SYMBOL MAP DEBUG] Total symbols in map: {len(symbol_map)}")
             ce_sym = self.position.get("ce_symbol")
@@ -797,6 +810,16 @@ class PaperTrader:
     def manage_existing_positions(self):
         """Manage existing positions with data freshness checks and expiry handling"""
         current_time = datetime.now()
+        self.logger.info("----- Position management cycle started at %s -----", current_time.strftime("%H:%M:%S"))
+
+        # SAFETY NET: If both legs are closed, clear the position
+        if self.has_active_position():
+            if self.position.get("ce_closed", False) and self.position.get("pe_closed", False):
+                self.logger.warning("Both legs already closed. Clearing active position to avoid zombie state.")
+                self.position = None
+                self.clear_position_file()
+                return
+
 
         # FIRST: Check for expired positions
         if self.is_position_expired():
@@ -852,12 +875,21 @@ class PaperTrader:
             
         #Forced logging : 
         if self.has_active_position():
+            ce_sym = self.position.get("ce_symbol")
+            pe_sym = self.position.get("pe_symbol")
             ce_price = self.position['current_prices'].get('CE', 0)
             pe_price = self.position['current_prices'].get('PE', 0)
-            self.logger.info(f"CURRENT PRICES - CE: Rs{ce_price}, PE: Rs{pe_price}")
+            net_pnl = self.calculate_current_profit()
             
+            self.logger.info(
+                f"[CYCLE SUMMARY] Net P&L: {net_pnl:.2f} | "
+                f"CE: {ce_sym} @ {ce_price} ({'closed' if self.position.get('ce_closed') else 'open'}) | "
+                f"PE: {pe_sym} @ {pe_price} ({'closed' if self.position.get('pe_closed') else 'open'})"
+            )
             # Force adjustment check
             self.check_positon_adjustment()
+        else:
+            self.logger.info("[CYCLE SUMMARY] No active position currently available")
                 
     def execute_paper_trade(self, signal: Dict) -> bool:
         """
@@ -877,13 +909,13 @@ class PaperTrader:
             if not ce_opt or not pe_opt:
                 self.logger.error("Signal missing CE/PE option dicts.")
                 return False
-            ce_sym = ce_opt.get("symbol")
-            pe_sym = pe_opt.get("symbol")
+            ce_sym = ce_opt.get("tradingsymbol")
+            pe_sym = pe_opt.get("tradingsymbol")
             ce_price = ce_opt.get("last_price")
             pe_price = pe_opt.get("last_price")
 
             if not ce_sym or not pe_sym or ce_price is None or pe_price is None:
-                self.logger.error("Signal CE/PE missing 'symbol' or 'last_price' fields.")
+                self.logger.error("Signal CE/PE missing 'tradingsymbol' or 'last_price' fields.")
                 return False
 
             now_iso = datetime.now().isoformat(sep=" ")
@@ -893,8 +925,8 @@ class PaperTrader:
                 "id": str(uuid.uuid4()),
                 "ce_symbol": ce_sym,
                 "pe_symbol": pe_sym,
-                "entry_prices": {"ce": float(ce_price), "pe": float(pe_price)},
-                "current_prices": {"ce": float(ce_price), "pe": float(pe_price)},
+                "entry_prices": {"ce": float(ce_price), "CE": float(ce_price), "pe": float(pe_price), "PE": float(pe_price)},
+                "current_prices": {"ce": float(ce_price), "CE": float(ce_price), "pe": float(pe_price), "PE": float(pe_price)},
                 "entry_time": now_iso,
                 "ce_closed": False,
                 "pe_closed": False,
@@ -914,6 +946,15 @@ class PaperTrader:
             self.logger.info(f"Total entry points: {float(ce_price) + float(pe_price)}")
             self.logger.info(f"Position opened at: {now_iso}")
             self.logger.info("TRADE EXECUTION SUCCESSFUL")
+
+            self.trade_logger.info("NEW POSITION OPENED:")
+            self.trade_logger.info(f"CE: {ce_sym} at {ce_price}")
+            self.trade_logger.info(f"PE: {pe_sym} at {pe_price}")
+            self.trade_logger.info(f"Total entry points: {float(ce_price) + float(pe_price)}")
+            self.trade_logger.info(f"Position opened at: {now_iso}")
+            self.trade_logger.info("TRADE EXECUTION SUCCESSFUL")
+
+
             return True
 
         except Exception as e:

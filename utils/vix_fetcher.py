@@ -222,7 +222,7 @@ def calculate_live_vix(spot_price=None, strike_window=300):
         from strategies.indicators import  calculate_vix,calculate_enhanced_vix,calculate_vix2
         
         current_day = datetime.now().weekday()
-        if current_day == 3:
+        if current_day == 1:
             vix_value = calculate_enhanced_vix(option_data, spot_price, strike_window)
         
         else:

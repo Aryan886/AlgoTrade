@@ -4,9 +4,11 @@ import pandas as pd
 from datetime import datetime, timedelta
 from utils.utility import get_data_path
 from broker.zerodha_client import kite_from_saved_token
-from utils.db_func import store_market_data, store_signal
+from utils.db_func import store_market_data, store_signal, store_sma_from_df
 from strategies.indicators import compute_indicators, generate_signals
-from utils.vix_fetcher import calculate_and_store_vix
+
+
+DB_PATH = 'db/trading_bot.db'
 
 class Nifty50DataFetcher:
     def __init__(self):
@@ -109,7 +111,6 @@ class Nifty50DataFetcher:
         
         #Fetch live data for NIFTY 50 for the current day
 
-        
         if not self.kite:
             print("Not connected to Kite API. Please connect first.")
             return None
@@ -219,6 +220,12 @@ def fetch_and_save_data(intervals=["1m", "5m", "15m"], return_interval=None, sym
             # Compute indicators
             df = compute_indicators(df)
             
+            #Add sma
+            try:
+                store_sma_from_df(df, symbol=symbol, interval=intervals, db_path=DB_PATH)
+            except Exception as e:
+                print(f"Store sma from df failed: {e}")
+
             # Generate signals
             signals = generate_signals(df, symbol)
             
@@ -300,3 +307,5 @@ if __name__ == "__main__":
         #print(df_15m.head())
 
 
+if __name__ == "__main__":
+    fetch_and_save_data()

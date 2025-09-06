@@ -39,24 +39,6 @@ def add_donchian_channel(df, period=28, suffix=""):
     return df
 
 
-def sma(df, column='Close', period=20, label=None):
-    """
-    Adds SMA to the df.
-    
-    Parameters:
-        df : OHLCV df with datetime index.
-        column (str): The column to calculate the SMA on (usually 'Close').
-        window= period (int): The number of periods for the SMA.
-        label (str): Optional. If provided, sets a custom column name.
-
-    Returns:
-        df: The same df with a new SMA column added.
-    """
-    col_name = label if label else f"SMA_{period}"
-    df[col_name] = df[column].rolling(window=period).mean()
-    return df
-
-
 def compute_indicators(
     df: pd.DataFrame,
     ao_fast: int = 5,

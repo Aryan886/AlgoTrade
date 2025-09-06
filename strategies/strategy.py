@@ -24,11 +24,11 @@ def get_delta_limit_by_day():
     current_day = datetime.now().weekday() #Monday = 0 Sunday = 6
 
     delta_config = {
-        0: 40, #Monday
-        1: 45, #Tuesday
-        2: 50, #Wednesday
+        0: 50, #Monday
+        1: 40, #Tuesday
+        2: 40, #Wednesday
         3: 50, #Thursday (temp)
-        4: 40, #Friday
+        4: 50, #Friday
         5: 40, #Saturday (just using)
         6: 40, #Sunday
     }
