@@ -72,6 +72,16 @@ def setup_paper_trading_logger():
     )
     position_handler.setFormatter(detailed_formatter)
     position_handler.setLevel(logging.DEBUG)
+
+    # 4. Logger for sma strategy specific logs
+    sma_strategy_handler = RotatingFileHandler(
+        'logs/strat_sma.log',
+        maxBytes=5*1024*1024,
+        backupCount=3
+    )
+    sma_strategy_handler.setFormatter(detailed_formatter)
+    sma_strategy_handler.setLevel(logging.DEBUG)
+    
     
     # Add handlers to logger
     paper_logger.addHandler(main_handler)
@@ -89,7 +99,14 @@ def setup_paper_trading_logger():
     position_logger.addHandler(position_handler)
     position_logger.propagate = False
     
-    return paper_logger, trade_logger, position_logger
+    sma_logger = logging.getLogger('paper_trading.strat_sma')
+    sma_logger.setLevel(logging.DEBUG)
+    sma_logger.handlers.clear()
+    sma_logger.addHandler(sma_strategy_handler)
+    sma_logger.propagate = False  # Don't propagate to parent logger
+
+
+    return paper_logger, trade_logger, position_logger, sma_logger
 
 def standardize_column_names(df):
     """

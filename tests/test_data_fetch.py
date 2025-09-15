@@ -41,7 +41,7 @@ def test_data_fetch():
         print(f"✅ Successfully fetched {len(df)} rows of 1m data")
         print(f"Sample data before indicators:\n{df.head()}")
         # Compute indicators
-        from strategies.indicators import compute_indicators
+        from core.indicators import compute_indicators
         df_ind = compute_indicators(df)
         print(f"\n✅ Indicators computed. Columns after indicators: {df_ind.columns.tolist()}")
         # Print first 30 rows of indicator columns

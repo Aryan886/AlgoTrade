@@ -11,7 +11,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.db_setup import create_tables
 from utils.db_func import store_signal, fetch_market_data
-from strategies.indicators import compute_indicators, generate_signals
+from core.indicators import compute_indicators, generate_signals
 import pandas as pd
 from datetime import datetime, timedelta
 

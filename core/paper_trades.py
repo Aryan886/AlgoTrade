@@ -8,7 +8,7 @@ from utils.db_func import (
 )
 import os
 import json
-from strategies.strategy import donchian_ao_strategy
+from core.strat_donchian import donchian_ao_strategy
 import uuid
 import re
 from typing import Dict, List, Optional
@@ -19,7 +19,7 @@ os.makedirs('logs', exist_ok=True)
 # Initialize loggers
 paper_logger, trade_logger, position_logger = setup_paper_trading_logger()
 
-class PaperTrader:
+class PaperTraderDonchian:
     def __init__(self, symbol="NIFTY50"):
         self.symbol = symbol
         self.position = None
@@ -269,7 +269,7 @@ class PaperTrader:
         except Exception as e:
             self.logger.error(f"Data refresh failed: {e}")
             return False
-
+        
     @property
     def total_adjustment_costs(self):
         """Property to get total adjustment costs"""
@@ -346,102 +346,126 @@ class PaperTrader:
     
     def close_position(self, leg: str, close_price: Optional[float] = None, auto_clear: bool = True) -> bool:
         """
-        Mark a single leg ('ce' or 'pe') as closed and persist the change.
-        - leg must be 'ce' or 'pe'
-        - close_price: if None, uses the position's current price for that leg
-        - auto_clear: if True and both legs closed, clears the active position (keeps a record in adjustment_history)
-        Returns True on success.
+        FIXED VERSION - Mark a single leg as closed with proper adjustment cost tracking
         """
         if not self.has_active_position():
             self.logger.warning("close_position called but no active position.")
             return False
 
         if leg.lower() == "all":
-                self.logger.info("Closing ALL legs due to rule trigger")
-                success_ce = self.close_position("ce", auto_clear=False)
-                success_pe = self.close_position("pe", auto_clear=False)
-                if success_ce or success_pe:
-                    try:
-                        final_pnl = self.calculate_current_profit()
-                        self.logger.info(f"Final Net P&L on closure : {final_pnl}")
-                    except Exception as e:
-                        self.logger.error(f"Could not calculate final P&L due to : {e}")
+            self.logger.info("Closing ALL legs due to rule trigger")
+            success_ce = self.close_position("ce", auto_clear=False)
+            success_pe = self.close_position("pe", auto_clear=False)
+            if success_ce or success_pe:
+                try:
+                    final_pnl = self.calculate_current_profit()
+                    self.logger.info(f"Final Net P&L on closure: {final_pnl}")
+                    self.trade_logger.info(f"Final Net P&L on closure: {final_pnl}")
+                except Exception as e:
+                    self.logger.error(f"Could not calculate final P&L due to: {e}")
 
-                    if auto_clear:
-                        self.logger.info("Both legs closed. Clearing in-memory active position.")
-                        self.position = None
-                        self.clear_position_file()
-                    return True
-                return False
+                if auto_clear:
+                    self.logger.info("Both legs closed. Clearing in-memory active position.")
+                    self.position = None
+                    self.clear_position_file()
+                return True
+            return False
 
         if leg not in ("ce", "pe"):
             self.logger.error("close_position called with invalid leg: %s", leg)
             return False
 
-
         try:
-            entry_price = self.position.get("entry_prices", {}).get(leg)
+            # Get entry price (try both cases)
+            entry_price = (self.position.get("entry_prices", {}).get(leg) or 
+                        self.position.get("entry_prices", {}).get(leg.upper()))
+            
             if entry_price is None:
-                self.logger.warning("No entry price found for %s; continuing.", leg)
+                self.logger.warning("No entry price found for %s; continuing with 0.", leg)
+                entry_price = 0.0
 
-            # determine close price
+            # Determine close price
             if close_price is None:
-                close_price = self.position.get("current_prices", {}).get(leg, 0.0)
+                close_price = (self.position.get("current_prices", {}).get(leg) or 
+                            self.position.get("current_prices", {}).get(leg.upper(), 0.0))
 
-            # normalize numeric
+            # Normalize numeric
             try:
                 close_price = float(close_price)
+                entry_price = float(entry_price)
             except Exception:
                 close_price = 0.0
+                entry_price = 0.0
 
-            # log details
+            # Calculate adjustment cost (loss/gain from this leg)
+            adjustment_cost = close_price - entry_price
+
+            # Update total adjustment impact
+            self.adjustment_impact += adjustment_cost
+
+            # Log details
             self.logger.info("CLOSING %s OPTION:", leg.upper())
             self.logger.info("  Entry Price: %s", entry_price)
             self.logger.info("  Close Price: %s", close_price)
+            self.logger.info("  Adjustment Cost: %s", adjustment_cost)
+            self.logger.info("  Total Adjustment Cost: %s", self.adjustment_impact)
 
             self.trade_logger.info("CLOSING %s OPTION:", leg.upper())
             self.trade_logger.info("  Entry Price: %s", entry_price)
             self.trade_logger.info("  Close Price: %s", close_price)
+            self.trade_logger.info("  Adjustment Cost: %s", adjustment_cost)
 
-            # mark closed safely
-            self.position.setdefault("current_prices", {})[leg] = close_price
+            # Mark as closed
             self.position[f"{leg}_closed"] = True
 
-            # record adjustment history (keep cost field for compatibility)
+            # IMPORTANT: Remove closed leg from current_prices to avoid double counting
+            if "current_prices" in self.position:
+                self.position["current_prices"].pop(leg, None)
+                self.position["current_prices"].pop(leg.upper(), None)
+
+            # Record in adjustment history with actual cost
             ts = datetime.now().isoformat(sep=" ")
-            # keep old behaviour: cost default 0 (downstream code appears to expect 'cost' key)
-            record = {"timestamp": ts, "action": f"closed {leg.upper()}", "price": close_price, "cost": 0}
-            # ensure adjustment_history exists
+            record = {
+                "timestamp": ts, 
+                "action": f"closed {leg.upper()}", 
+                "entry_price": entry_price,
+                "close_price": close_price, 
+                "cost": adjustment_cost  # FIXED: actual cost instead of 0
+            }
+            
             if not hasattr(self, "adjustment_history") or self.adjustment_history is None:
                 self.adjustment_history = []
             self.adjustment_history.append(record)
 
-            # persist
+            # Persist changes
             self.save_position()
-            self.logger.info(" %s option closed successfully", leg.upper())
+            self.logger.info("%s option closed successfully", leg.upper())
 
-            # if both legs closed, optionally clear the active position (but keep saved history elsewhere if desired)
+            # Auto-clear logic
             if auto_clear and self.position.get("ce_closed") and self.position.get("pe_closed"):
-                # keep a final snapshot in file (we already saved). Optionally clear runtime position
-                # Do not delete adjustment_history; leave it in memory for reporting
                 try:
                     final_pnl = self.calculate_current_profit()
-                    self.logger.info(f"Final Net P&L on closure : {final_pnl}")
-                    self.trade_logger.info(f"Final Net P&L on closure : {final_pnl}")
+                    self.logger.info(f"Final Net P&L on closure: {final_pnl}")
+                    self.trade_logger.info(f"Final Net P&L on closure: {final_pnl}")
                 except Exception as e:
-                    self.logger.error(f"Could Not calculate final profit due to : {e}")
+                    self.logger.error(f"Could not calculate final profit due to: {e}")
+                    
+                # Clear adjustment tracking after trade completion
+                self.logger.info(f"Trade completed. Total adjustment impact for this trade: {self.adjustment_impact}")
+                self.logger.info(f"Number of adjustments made: {len(self.adjustment_history)}")
+                self.adjustment_impact = 0
+                self.adjustment_history = []
+                self.logger.info("Adjustment costs cleared after trade completion")
+                    
                 self.logger.info("Both legs closed. Clearing in-memory active position.")
                 self.trade_logger.info("Both legs closed. Clearing in-memory active position.")
                 self.position = None
-                # persist cleared file (clear_position_file should be implemented in your file)
+                
                 try:
-                    if hasattr(self, "clear_position_file"):
-                        self.clear_position_file()
-                    else:
-                        # fallback: overwrite with empty JSON
-                        open(getattr(self, "active_position_file", "active_position.json"), "w").close()
+                    self.clear_position_file()
                 except Exception:
                     self.logger.exception("Failed to clear position file after closing both legs.")
+
             return True
 
         except Exception as e:
@@ -451,7 +475,7 @@ class PaperTrader:
     def check_entry_criteria_violation(self):
         """Rule 4: Check if entry criteria is still valid"""
         try:
-            from strategies.strategy import get_current_entry_criteria
+            from core.strat_donchian import get_current_entry_criteria
             current_criteria = get_current_entry_criteria(self.symbol)
 
             #compare with stored entry criteria
@@ -475,7 +499,7 @@ class PaperTrader:
             if vix_data.empty:
                 return False
             
-            from strategies.strategy import emergency_column_fix
+            from core.strat_donchian import emergency_column_fix
             vix_data = emergency_column_fix(vix_data, "VIX")
             
             latest_vix = vix_data.iloc[-1]
@@ -583,39 +607,127 @@ class PaperTrader:
         except Exception as e:
             self.logger.error(f"Error finding replacement option: {e}")
 
-    def close_option(self, option_type):
-        """close specific option (CE/PE) and add adjustment costs"""
-        key = 'ce' if option_type.upper() == 'CE' else 'pe'
-        if key in self.position['current_prices']:
-            close_price = self.position['current_prices'][key]
-            entry_price = self.position['entry_prices'][key]
+    def close_position(self, leg: str, close_price: Optional[float] = None, auto_clear: bool = True) -> bool:
+        """
+        Mark a single leg as closed with proper adjustment cost tracking
+        """
+        if not self.has_active_position():
+            self.logger.warning("close_position called but no active position.")
+            return False
 
-            self.logger.info(f"CLOSING {option_type} OPTION:")
-            self.logger.info(f"  Entry Price: {entry_price}")
-            self.logger.info(f"  Close Price: {close_price}")
+        if leg.lower() == "all":
+            self.logger.info("Closing ALL legs due to rule trigger")
+            success_ce = self.close_position("ce", auto_clear=False)
+            success_pe = self.close_position("pe", auto_clear=False)
+            if success_ce or success_pe:
+                try:
+                    final_pnl = self.calculate_current_profit()
+                    self.logger.info(f"Final Net P&L on closure: {final_pnl}")
+                    self.trade_logger.info(f"Final Net P&L on closure: {final_pnl}")
+                except Exception as e:
+                    self.logger.error(f"Could not calculate final P&L due to: {e}")
 
-            adjustment_impact = close_price - entry_price
-            self.adjustment_impact += adjustment_impact
+                if auto_clear:
+                    self.logger.info("Both legs closed. Clearing in-memory active position.")
+                    self.position = None
+                    self.clear_position_file()
+                return True
+            return False
 
-            self.logger.info(f"  Adjustment Cost: {adjustment_impact}(positive = loss, negative = profit)")
-            self.logger.info(f"  Total Adjustment Cost: {self.adjustment_impact}")
+        if leg not in ("ce", "pe"):
+            self.logger.error("close_position called with invalid leg: %s", leg)
+            return False
 
-            # mark as closed instead of deleting symbol
-            self.position[f"{key}_closed"] = True
-            self.logger.info(f"Marked {option_type} leg was CLOSED. Will be ignored untill replacement is found")
+        try:
+            # Get entry price (try both cases)
+            entry_price = (self.position.get("entry_prices", {}).get(leg) or 
+                        self.position.get("entry_prices", {}).get(leg.upper()))
+            
+            if entry_price is None:
+                self.logger.warning("No entry price found for %s; continuing with 0.", leg)
+                entry_price = 0.0
 
-            self.adjustment_history.append({
-                'timestamp': datetime.now().isoformat(sep=" "),
-                'action': f'closed {option_type}',
-                'price': close_price,
-                'cost': adjustment_impact
-            })
+            # Determine close price
+            if close_price is None:
+                close_price = (self.position.get("current_prices", {}).get(leg) or 
+                            self.position.get("current_prices", {}).get(leg.upper(), 0.0))
 
+            # Normalize numeric
+            try:
+                close_price = float(close_price)
+                entry_price = float(entry_price)
+            except Exception:
+                close_price = 0.0
+                entry_price = 0.0
+
+            # Calculate adjustment cost (loss/gain from this leg)
+            adjustment_cost = close_price - entry_price
+
+            # Update total adjustment impact
+            self.adjustment_impact += adjustment_cost
+
+            # Log details
+            self.logger.info("CLOSING %s OPTION:", leg.upper())
+            self.logger.info("  Entry Price: %s", entry_price)
+            self.logger.info("  Close Price: %s", close_price)
+            self.logger.info("  Adjustment Cost: %s", adjustment_cost)
+            self.logger.info("  Total Adjustment Cost: %s", self.adjustment_impact)
+
+            self.trade_logger.info("CLOSING %s OPTION:", leg.upper())
+            self.trade_logger.info("  Entry Price: %s", entry_price)
+            self.trade_logger.info("  Close Price: %s", close_price)
+            self.trade_logger.info("  Adjustment Cost: %s", adjustment_cost)
+
+            # Mark as closed
+            self.position[f"{leg}_closed"] = True
+
+            # IMPORTANT: Remove closed leg from current_prices to avoid double counting
+            if "current_prices" in self.position:
+                self.position["current_prices"].pop(leg, None)
+                self.position["current_prices"].pop(leg.upper(), None)
+
+            # Record in adjustment history with actual cost
+            ts = datetime.now().isoformat(sep=" ")
+            record = {
+                "timestamp": ts, 
+                "action": f"closed {leg.upper()}", 
+                "entry_price": entry_price,
+                "close_price": close_price, 
+                "cost": adjustment_cost  # FIXED: actual cost instead of 0
+            }
+            
+            if not hasattr(self, "adjustment_history") or self.adjustment_history is None:
+                self.adjustment_history = []
+            self.adjustment_history.append(record)
+
+            # Persist changes
             self.save_position()
-            self.logger.info(f" {option_type} option closed successfully")
-        else:
-            self.logger.warning(f"Cannot close {option_type} - not found in current positions")
+            self.logger.info("%s option closed successfully", leg.upper())
 
+            # Auto-clear logic
+            if auto_clear and self.position.get("ce_closed") and self.position.get("pe_closed"):
+                try:
+                    final_pnl = self.calculate_current_profit()
+                    self.logger.info(f"Final Net P&L on closure: {final_pnl}")
+                    self.trade_logger.info(f"Final Net P&L on closure: {final_pnl}")
+                except Exception as e:
+                    self.logger.error(f"Could not calculate final profit due to: {e}")
+                    
+                self.logger.info("Both legs closed. Clearing in-memory active position.")
+                self.trade_logger.info("Both legs closed. Clearing in-memory active position.")
+                self.position = None
+                
+                try:
+                    self.clear_position_file()
+                except Exception:
+                    self.logger.exception("Failed to clear position file after closing both legs.")
+
+            return True
+
+        except Exception as e:
+            self.logger.exception("Error closing position leg: %s", e)
+            return False
+    
     def check_positon_adjustment(self):
         """Rule 2: Check if position adjustment is needed"""
         self.logger.debug("Position checker called successfully!!!")
@@ -623,6 +735,18 @@ class PaperTrader:
             return
         
         try:
+            #collect only active leg prices
+            active_legs = {}
+            if not self.position.get("ce_closed", False):
+                active_legs['CE'] = self.position['current_prices'].get('CE', 0)
+            if not self.position.get("pe_closed", False):
+                active_legs['PE'] = self.position['current_prices'].get('PE', 0)
+
+            #Adjustment logic requires both legs to be active
+            if len(active_legs) < 2:
+                self.logger.debug("Adjustment check skipped - one or both legs already closed")
+                return
+            
             ce_price = self.position['current_prices'].get('CE', 0)
             pe_price = self.position['current_prices'].get('PE', 0)
             
@@ -668,35 +792,58 @@ class PaperTrader:
             self.logger.error(f"Error in position adjustment : {e}")
 
     def calculate_current_profit(self):
-        """Calculate current profit considering all adjustments"""
-        self.logger.debug("Calculate Profit function sucessfully Called!!")
+        """Calculate current profit considering all adjustments - FIXED VERSION"""
+        self.logger.debug("Calculate Profit function successfully Called!!")
         if not self.has_active_position():
             return 0 
         
         try:
-            self.logger.debug(f"Entry prices: {self.position['entry_prices']}")
-            self.logger.debug(f"Current prices: {self.position['current_prices']}")
+            # Calculate profit only for OPEN legs
+            entry_total = 0
+            current_total = 0
             
-            #Base profit calculation
-            entry_total = sum(self.position['entry_prices'].values())
-            current_total = sum(self.position['current_prices'].values())
+            # Only include CE if it's not closed
+            if not self.position.get("ce_closed", False):
+                ce_entry = self.position['entry_prices'].get('ce') or self.position['entry_prices'].get('CE', 0)
+                ce_current = self.position['current_prices'].get('ce') or self.position['current_prices'].get('CE', 0)
+                entry_total += ce_entry
+                current_total += ce_current
+                self.logger.debug(f"CE (open): entry={ce_entry}, current={ce_current}")
+            else:
+                self.logger.debug("CE leg is closed - excluded from profit calculation")
+                
+            # Only include PE if it's not closed
+            if not self.position.get("pe_closed", False):
+                pe_entry = self.position['entry_prices'].get('pe') or self.position['entry_prices'].get('PE', 0)
+                pe_current = self.position['current_prices'].get('pe') or self.position['current_prices'].get('PE', 0)
+                entry_total += pe_entry
+                current_total += pe_current
+                self.logger.debug(f"PE (open): entry={pe_entry}, current={pe_current}")
+            else:
+                self.logger.debug("PE leg is closed - excluded from profit calculation")
+
+            # Base profit from open positions only
             current_profit = entry_total - current_total
 
-            #Subtract adjustment costs
-            net_profit = current_profit + self.adjustment_impact
+            # Subtract adjustment costs (losses from closed positions)
+            net_profit = current_profit - self.adjustment_impact
 
-            self.logger.debug(f"Entry total: {entry_total}, Current total: {current_total}")
-            self.logger.debug(f"Gross profit: {current_profit}, Adjustment impact: {self.total_adjustment_costs}")
+            self.logger.debug(f"Open legs - Entry total: {entry_total}, Current total: {current_total}")
+            self.logger.debug(f"Gross profit (open legs): {current_profit}")
+            self.logger.debug(f"Total adjustment impact: {self.adjustment_impact}")
             self.logger.debug(f"Net profit: {net_profit}")
 
             return net_profit
             
         except Exception as e:
             self.logger.error(f"Error in calculate_current_profit: {e}")
-            return 0  
+            return 0
+
+    """
+    Disabling for now as we are not using profit target rule
     
     def check_profit_target(self):
-        """Rule 1: Check if profit target(16pts) is reached """
+        #Rule 1: Check if profit target(16pts) is reached
         if not self.has_active_position():
             return False
         
@@ -712,101 +859,85 @@ class PaperTrader:
         except Exception as e:
             self.logger.error(f"Error checking profit target : {e}")
             return False
+    """
         
     def update_current_prices(self, options_data: Optional[List[Dict]] = None) -> bool:
         """
-        Efficiently update current_prices for the active position from fresh options_data.
-        Returns True if at least one price updated, False otherwise.
+        FIXED VERSION - Only update prices for OPEN legs
         """
         try:
             if not self.has_active_position():
                 return False
             
-            # ADD THIS DEBUG BLOCK
             ce_sym = self.position.get("ce_symbol")
             pe_sym = self.position.get("pe_symbol")
-            self.logger.info(f"[PRICE UPDATE DEBUG] Looking for CE: {ce_sym}, PE: {pe_sym}")
             
-
-            # fast lookup by symbol
             if options_data is None:
                 options_data = fetch_latest_delta_data(self.symbol)
             if not options_data:
                 self.logger.warning("update_current_prices has no options_data available.")
                 return False
             
-            self.logger.info(f"[SYMBOL LOOKUP DEBUG] First 3 options symbols: {[opt.get('tradingsymbol') for opt in options_data[:3]]}")
             symbol_map = {o.get("tradingsymbol"): o for o in options_data if o.get("tradingsymbol")}
-
-            self.logger.info(f"[SYMBOL MAP DEBUG] Total symbols in map: {len(symbol_map)}")
-            ce_sym = self.position.get("ce_symbol")
-            pe_sym = self.position.get("pe_symbol")
-            self.logger.info(f"[SYMBOL MAP DEBUG] CE found: {ce_sym in symbol_map}, PE found: {pe_sym in symbol_map}")
             
             if not ce_sym or not pe_sym:
                 self.logger.warning("Position missing ce_symbol/pe_symbol; cannot update.")
                 return False
 
             updated = False
-            any_price_seen = False
 
-            # update CE if open
+            # Update CE ONLY if it's not closed
             if not self.position.get("ce_closed", False):
                 ce_data = symbol_map.get(ce_sym)
                 if ce_data:
-                    raw_price = ce_data.get("last_price")
-                    if raw_price is None:
-                        raw_price = ce_data.get("ltp")
+                    raw_price = ce_data.get("last_price") or ce_data.get("ltp")
                     try:
                         new_price = float(raw_price) if raw_price is not None else None
                     except Exception:
                         new_price = None
                     if new_price is not None:
-                        any_price_seen = True
-                        # track if the numeric value changed
-                        if self.position.get("current_prices", {}).get("ce") != new_price or self.position.get("current_prices", {}).get("CE") != new_price:
+                        old_price = self.position.get("current_prices", {}).get("ce")
+                        if old_price != new_price:
                             updated = True
-                        # always mirror to both lowercase and uppercase keys for downstream consumers
                         self.position.setdefault("current_prices", {})["ce"] = new_price
                         self.position["current_prices"]["CE"] = new_price
-                else:
-                    self.logger.debug("CE %s not found or missing price in options_data", ce_sym)
+            else:
+                # Ensure closed CE is not in current_prices
+                if "current_prices" in self.position:
+                    self.position["current_prices"].pop("ce", None)
+                    self.position["current_prices"].pop("CE", None)
 
-            # update PE if open
+            # Update PE ONLY if it's not closed  
             if not self.position.get("pe_closed", False):
                 pe_data = symbol_map.get(pe_sym)
                 if pe_data:
-                    raw_price = pe_data.get("last_price")
-                    if raw_price is None:
-                        raw_price = pe_data.get("ltp")
+                    raw_price = pe_data.get("last_price") or pe_data.get("ltp")
                     try:
                         new_price = float(raw_price) if raw_price is not None else None
                     except Exception:
                         new_price = None
                     if new_price is not None:
-                        any_price_seen = True
-                        # track if the numeric value changed
-                        if self.position.get("current_prices", {}).get("pe") != new_price or self.position.get("current_prices", {}).get("PE") != new_price:
+                        old_price = self.position.get("current_prices", {}).get("pe")
+                        if old_price != new_price:
                             updated = True
-                        # always mirror to both lowercase and uppercase keys for downstream consumers
                         self.position.setdefault("current_prices", {})["pe"] = new_price
                         self.position["current_prices"]["PE"] = new_price
-                        
-                else:
-                    self.logger.debug("PE %s not found or missing price in options_data", pe_sym)
+            else:
+                # Ensure closed PE is not in current_prices
+                if "current_prices" in self.position:
+                    self.position["current_prices"].pop("pe", None)
+                    self.position["current_prices"].pop("PE", None)
 
-            if updated or any_price_seen:
+            if updated:
                 self.save_position()
-                self.logger.debug("Position prices updated.")
-                return True
-
-            # nothing updated; keep silent
-            return False
+                self.logger.debug("Position prices updated (open legs only).")
+                
+            return updated
 
         except Exception as e:
             self.logger.exception("Error updating current prices: %s", e)
             return False
-
+        
     def manage_existing_positions(self):
         """Manage existing positions with data freshness checks and expiry handling"""
         current_time = datetime.now()
@@ -920,6 +1051,19 @@ class PaperTrader:
 
             now_iso = datetime.now().isoformat(sep=" ")
 
+            # Capture entry essentials and entry_time for persistence and later validation
+            try:
+                from core.strat_donchian import get_current_entry_criteria
+                self.entry_criteria = get_current_entry_criteria(self.symbol)
+            except Exception:
+                # If essentials cannot be captured, leave as None but proceed with trade
+                self.entry_criteria = None
+            # Maintain attribute entry_time alongside position's stored string
+            try:
+                self.entry_time = datetime.fromisoformat(now_iso)
+            except Exception:
+                self.entry_time = datetime.now()
+
             # compact position representation (stable across saves)
             self.position = {
                 "id": str(uuid.uuid4()),
@@ -983,6 +1127,6 @@ class PaperTrader:
             return f"Error getting status: {e}"
 
 if __name__ == "__main__":
-    trader = PaperTrader("NIFTY50")
+    trader = PaperTraderDonchian("NIFTY50")
     print("Paper trader initialized....")
     trader.main_trading_loop() # this runs continuously

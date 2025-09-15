@@ -1,6 +1,6 @@
 #Making sure this thing works
 from utils.data_fetcher import fetch_and_save_data
-from strategies.indicators import compute_indicators
+from core.indicators import compute_indicators
 from utils.db_func import store_market_data, fetch_market_data
 from utils.db_setup import create_tables
 from utils.vix_fetcher import calculate_and_store_vix

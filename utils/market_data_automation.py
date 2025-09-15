@@ -7,12 +7,12 @@ from utils.data_fetcher import fetch_and_save_data
 from utils.vix_fetcher import calculate_and_store_vix
 from utils.db_func import store_market_data, store_signal
 from utils.db_func import  calculate_and_store_high_accuracy_delta
-from strategies.indicators import compute_indicators, generate_signals
+from core.indicators import compute_indicators, generate_signals
 import os
 from typing import Optional, Dict
 from broker.zerodha_client import kite_from_saved_token
-from strategies.strategy import donchian_ao_strategy
-from strategies.paper_trades import PaperTrader
+from core.strat_donchian import donchian_ao_strategy
+from core.paper_trades import PaperTraderDonchian
 import argparse
 import json
 
@@ -131,7 +131,7 @@ class MarketDataAutomation:
             'end': '15:30'
         }
 
-        self.paper_trader = PaperTrader("NIFTY50")
+        self.paper_trader = PaperTraderDonchian("NIFTY50")
         logger.info("Paper trader successfully initialised....")
         
         # Market holidays for 2025 (you can update this list)

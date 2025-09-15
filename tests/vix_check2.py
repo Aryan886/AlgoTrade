@@ -364,7 +364,7 @@ def debug_vix_calculation_simple():
                     opt['IV'] = opt['IV'] / 100
         
         # Now calculate VIX
-        from strategies.indicators import calculate_vix, calculate_vix2
+        from core.indicators import calculate_vix, calculate_vix2
         vix_result = calculate_vix(valid_options, spot_price, 300)
         print(f"6. Raw VIX result: {vix_result}")
 

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from utils.utility import get_data_path
 from broker.zerodha_client import kite_from_saved_token
 from utils.db_func import store_market_data, store_signal, store_sma_from_df
-from strategies.indicators import compute_indicators, generate_signals
+from core.indicators import compute_indicators, generate_signals
 
 
 DB_PATH = 'db/trading_bot.db'
@@ -219,11 +219,21 @@ def fetch_and_save_data(intervals=["1m", "5m", "15m"], return_interval=None, sym
         if df is not None and not df.empty:
             # Compute indicators
             df = compute_indicators(df)
-            
-            #Add sma
+
+            # Normalize interval for DB (same as you do for market_data)
+            db_interval_map = {
+                '1m': '1m',
+                '5m': '5m',
+                '15m': '15m'
+            }
+            db_interval = db_interval_map.get(interval, interval)
+
+            # Add sma
             try:
-                store_sma_from_df(df, symbol=symbol, interval=intervals, db_path=DB_PATH)
+                store_sma_from_df(df, symbol=symbol, interval=db_interval, db_path=DB_PATH)
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 print(f"Store sma from df failed: {e}")
 
             # Generate signals
@@ -305,7 +315,3 @@ if __name__ == "__main__":
         print(f"\nSuccessfully fetched {len(df_15m)} rows of 15m data for NIFTY 50")
        # print("Sample data:")
         #print(df_15m.head())
-
-
-if __name__ == "__main__":
-    fetch_and_save_data()

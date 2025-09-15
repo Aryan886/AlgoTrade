@@ -1,5 +1,5 @@
 import pandas as pd
-from strategies.indicators import add_donchian_channel, add_awesome_oscillator
+from core.indicators import add_donchian_channel, add_awesome_oscillator
 from utils.db_func import (
     fetch_market_data, 
     fetch_vix_data, 

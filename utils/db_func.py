@@ -11,6 +11,8 @@ from utils.black_scholes import (
 )
 from utils.iv import ProductionIVCalculator
 from utils.utility import standardize_column_names
+import re
+from core.indicators import compute_smas
 
 DB_PATH = 'db/trading_bot.db'
 
@@ -55,17 +57,14 @@ def store_market_data(df, symbol: str = 'NIFTY50', interval: str = '5m', vix_val
                     value = row[column_name]
                     return float(value) if pd.notna(value) else None
                 return None
-            except:
+            except Exception:
                 return None
-        
-        # Handle VIX value
-        vix_val = float(vix_value) if vix_value is not None else None
         
         cursor.execute(f"""
             INSERT INTO {table_name} (
-                timestamp, symbol, open, high, low, close,
-                ao_value, donchian_upper, donchian_lower, donchian_mid, vix_value
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                timestamp, symbol, open, high, low, close, volume,
+                ao_value, donchian_upper, donchian_lower, donchian_mid
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """, (
             timestamp_str,
             symbol,
@@ -73,11 +72,11 @@ def store_market_data(df, symbol: str = 'NIFTY50', interval: str = '5m', vix_val
             safe_get_value(row, 'high'),
             safe_get_value(row, 'low'),
             safe_get_value(row, 'close'),
+            safe_get_value(row, 'volume'),
             safe_get_value(row, 'ao_value'),
             safe_get_value(row, 'donchian_upper'),
             safe_get_value(row, 'donchian_lower'),
-            safe_get_value(row, 'donchian_mid'),
-            vix_val
+            safe_get_value(row, 'donchian_mid')
         ))
 
     conn.commit()
@@ -124,7 +123,6 @@ def fetch_market_data(symbol: str = 'NIFTY50', start=None, end=None, interval=No
     conn.close()
     return df
 
-
 #Stores VIX data into the vix_data table.
 def store_vix_data(timestamp, symbol, vix_value, db_path=DB_PATH):
     ensure_db_dir(db_path)
@@ -138,7 +136,6 @@ def store_vix_data(timestamp, symbol, vix_value, db_path=DB_PATH):
 
     conn.commit()
     conn.close()
-
 
 def store_vix_data_bulk(df, symbol: str, db_path=DB_PATH):
     """
@@ -169,7 +166,6 @@ def store_vix_data_bulk(df, symbol: str, db_path=DB_PATH):
     conn.commit()
     conn.close()
     print(f"Stored {len(df)} VIX data points for {symbol} successfully!!!")
-
 
 def fetch_vix_data(symbol: str = 'NIFTY50', start=None, end=None, db_path=DB_PATH):
     """
@@ -206,7 +202,6 @@ def fetch_vix_data(symbol: str = 'NIFTY50', start=None, end=None, db_path=DB_PAT
     conn.close()
     return df
 
-
 #Logs trading signals with reasons and confidence scores.
 def store_signal(timestamp, symbol, signal, reason=None, confidence_score=None, db_path=DB_PATH):
     ensure_db_dir(db_path)
@@ -227,7 +222,6 @@ def store_signal(timestamp, symbol, signal, reason=None, confidence_score=None, 
     conn.commit()
     conn.close()
 
-
 #Logs actual trade execution info.
 def store_trade(timestamp, symbol, action, price, qty, status='pending', db_path=DB_PATH):  
     ensure_db_dir(db_path)
@@ -242,9 +236,7 @@ def store_trade(timestamp, symbol, action, price, qty, status='pending', db_path
     conn.commit()
     conn.close()
 
-
 # High-accuracy options data storage
-
 def store_high_accuracy_options_data(options_list: List[Dict], symbol: str, spot_price: float, db_path=DB_PATH):
     """
     Store high-accuracy options data for Black-Scholes delta calculations.
@@ -278,7 +270,6 @@ def store_high_accuracy_options_data(options_list: List[Dict], symbol: str, spot
     conn.close()
     print("Options data stored successfully.")
 
-
 def fetch_cached_options_data(symbol: str = 'NIFTY50', db_path=DB_PATH) -> List[Dict]:
     """
     Fetch cached options data for delta calculations.
@@ -306,7 +297,6 @@ def fetch_cached_options_data(symbol: str = 'NIFTY50', db_path=DB_PATH) -> List[
             'open_interest': row[10]
         })
     return options_data
-
 
 def calculate_and_store_high_accuracy_delta(
     symbol: str = 'NIFTY50',
@@ -512,7 +502,6 @@ def calculate_and_store_high_accuracy_delta(
         print(f"Error in delta calculation: {e}")
         return None
 
-
 def get_current_delta_from_cache(
     option_type: str,
     strike: int,
@@ -571,7 +560,6 @@ def print_latest_market_data_timestamps(db_path=DB_PATH):
         finally:
             conn.close()
 
-
 def fetch_latest_delta_data(symbol: str = 'NIFTY50', db_path=DB_PATH) -> List[Dict]:
     """
     Fetches the most recent delta data for all strikes from the delta_cache table.
@@ -608,41 +596,28 @@ def fetch_latest_delta_data(symbol: str = 'NIFTY50', db_path=DB_PATH) -> List[Di
         })
     return options_data
 
-
 def sma_table_name(interval : str) -> str:
-    return f"market_sma{interval}"
+    # Replace any characters not letters/numbers with underscore
+    safe_interval = re.sub(r'[^0-9a-zA-Z]+', '_', str(interval))
+    return f"market_sma_{safe_interval}"
 
 def create_sma_table(conn: sqlite3.Connection, interval : str):
-    tbl = sma_table_name(interval)
+    safe_interval = re.sub(r'[^0-9a-zA-Z]+', '_', str(interval))
+    tbl = f"market_sma_{safe_interval}"
+
     conn.execute(f"""
         CREATE TABLE IF NOT EXISTS {tbl}(
             timestamp TEXT NOT NULL,
             symbol TEXT NOT NULL,
-            sma_5 REAL.
+            sma_5 REAL,
             sma_20 REAL,
             PRIMARY KEY (timestamp, symbol)
         );      
     """)
     conn.commit()
     
-def compute_smas(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Return a copy of df with 'sma_5' and 'sma_20' columns computed on 'close'
-    df may have DatetimeIndex or a simple index; index values are preserverd
-    """
-    df2 = df.copy()
-    #normalize column names to lowercase(make it usable for Close/close)
-    df2.columns = [c.lower() for c in df.columns]
-    if 'close' not in df2.columns:
-        raise ValueError("compute_smas: DataFrame must contain 'close' coumn")
-    
-    #rolling with min_period=1 so early rows get valid values
-    df2['sma_5'] = df2['close'].rolling(window=5, min_periods=1).mean()
-    df2['sma_20'] = df2['close'].rolling(window=20, min_periods=1).mean()
-    return df2
 
-
-def store_sma_from_df(df: pd.DateOffset, symbol : str, interval: str, db_path: DB_PATH):
+def store_sma_from_df(df: pd.DateOffset, symbol : str, interval: str, db_path= DB_PATH):
     """
     Compute SMA on df and store into market_sma_<interval>.
     - df: DataFrame indexed by timestamp (index can be DatetimeIndex or strings). Must contain 'close'.

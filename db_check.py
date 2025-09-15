@@ -3,7 +3,7 @@ import sqlite3
 import os
 from datetime import datetime
 from utils.db_func import fetch_market_data, fetch_vix_data
-from strategies.indicators import add_donchian_channel, add_awesome_oscillator
+from core.indicators import add_donchian_channel, add_awesome_oscillator
 from utils.utility import setup_paper_trading_logger
 
 paper_logger = setup_paper_trading_logger()
@@ -176,7 +176,7 @@ def create_minimal_test_strategy():
             # Test the actual strategy function
             print("\n5. TESTING ACTUAL STRATEGY:")
             try:
-                from strategies.strategy import donchian_ao_strategy
+                from core.strat_donchian import donchian_ao_strategy
                 result = donchian_ao_strategy(symbol="NIFTY50")
                 print(f"Strategy result: {result}")
                 if result is None:
@@ -201,7 +201,7 @@ def test_indicators():
     
     try:
         from utils.db_func import fetch_market_data
-        from strategies.indicators import add_donchian_channel, add_awesome_oscillator
+        from core.indicators import add_donchian_channel, add_awesome_oscillator
         
         # Get some data
         df_5min = fetch_market_data(symbol="NIFTY50", interval="5m")

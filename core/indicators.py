@@ -17,7 +17,6 @@ def add_awesome_oscillator(df, small=5, large=34):
     df["ao_value"] = ao_small - ao_large
     return df
 
-
 #This tells us when AO crosses the neutral line
 def add_ao_signal(df):
     df = df.copy()
@@ -38,7 +37,6 @@ def add_donchian_channel(df, period=28, suffix=""):
     df[f"donchian_mid{suffix}"] = (df[f"donchian_high{suffix}"] + df[f"donchian_low{suffix}"]) / 2
     return df
 
-
 def compute_indicators(
     df: pd.DataFrame,
     ao_fast: int = 5,
@@ -56,7 +54,8 @@ def compute_indicators(
     high_col = 'High' if 'High' in df.columns else 'high'
     low_col = 'Low' if 'Low' in df.columns else 'low'
     close_col = 'Close' if 'Close' in df.columns else 'close'
-    
+    volume_col = 'Volume' if 'Volume' in df.columns else 'volume' if 'volume' in df.columns else None
+
     print(f"[DEBUG] Using columns: high={high_col}, low={low_col}, close={close_col}")
     print(f"[DEBUG] Available columns: {df.columns.tolist()}")
 
@@ -68,6 +67,10 @@ def compute_indicators(
     df['donchian_upper'] = df[high_col].rolling(window=donchian_period).max()
     df['donchian_lower'] = df[low_col].rolling(window=donchian_period).min()
     df['donchian_mid'] = (df['donchian_upper'] + df['donchian_lower']) / 2
+
+    #----Preserver volume column if exists ----#
+    if volume_col in df.columns:
+        df['volume'] = df[volume_col]
 
     # Try to fetch VIX data, but don't fail if it doesn't exist
     try:
@@ -82,6 +85,7 @@ def compute_indicators(
             print("[DEBUG] No VIX data available, continuing without VIX indicators")
     except Exception as e:
         print(f"[DEBUG] Error fetching VIX data: {e}, continuing without VIX indicators")
+
 
     return df
 
@@ -637,3 +641,33 @@ def calculate_enhanced_vix(
 
     return vix
 
+""""
+def add_vwap(df):
+    cols = {c.lower(): c for c in df.columns}  # map lowercase → actual col
+    if 'close' not in cols or 'volume' not in cols:
+        print("[WARN] Skipping VWAP: missing close/volume")
+        df['vwap'] = None
+        return df
+
+    close_col, volume_col = cols['close'], cols['volume']
+    df["cum_vol_price"] = (df[close_col] * df[volume_col]).cumsum()
+    df["cum_volume"] = df[volume_col].cumsum()
+    df["vwap"] = df["cum_vol_price"] / df["cum_volume"]
+    return df
+"""
+
+def compute_smas(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return a copy of df with 'sma_5' and 'sma_20' columns computed on 'close'
+    df may have DatetimeIndex or a simple index; index values are preserverd
+    """
+    df2 = df.copy()
+    #normalize column names to lowercase(make it usable for Close/close)
+    df2.columns = [c.lower() for c in df.columns]
+    if 'close' not in df2.columns:
+        raise ValueError("compute_smas: DataFrame must contain 'close' coumn")
+    
+    #rolling with min_period=1 so early rows get valid values
+    df2['sma_5'] = df2['close'].rolling(window=5, min_periods=1).mean()
+    df2['sma_20'] = df2['close'].rolling(window=20, min_periods=1).mean()
+    return df2

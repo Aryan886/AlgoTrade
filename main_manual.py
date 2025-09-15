@@ -1,6 +1,6 @@
 #This is the point where we will take all actions execution basically connects everything
 from broker.zerodha_client import login_kite
-from strategies.indicators import compute_indicators
+from core.indicators import compute_indicators
 from database.load_data import load_latest_data
 from utils.utility import save_debug_csv
 from utils.nse_scrapper import fetch_option_chain
