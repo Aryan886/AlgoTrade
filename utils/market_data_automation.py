@@ -13,6 +13,7 @@ from typing import Optional, Dict
 from broker.zerodha_client import kite_from_saved_token
 from core.strat_donchian import donchian_ao_strategy
 from core.paper_trades import PaperTraderDonchian
+from core.paper_trder_sma import PaperTraderSMA
 import argparse
 import json
 
@@ -132,7 +133,8 @@ class MarketDataAutomation:
         }
 
         self.paper_trader = PaperTraderDonchian("NIFTY50")
-        logger.info("Paper trader successfully initialised....")
+        self.sma_trader = PaperTraderSMA("NIFTY50")
+        logger.info("Paper traders (Donchian & SMA) successfully initialised....")
         
         # Market holidays for 2025 (you can update this list)
         self.market_holidays_2025 = [
@@ -288,29 +290,102 @@ class MarketDataAutomation:
         except Exception as e:
             logger.error(f" Error in paper trading cycle: {e}")
 
-    def get_paper_trading_summary(self):
-        """Get detailed paper trading summary"""
+    def run_sma_paper_trading_cycle(self):
+        """Run one cycle of SMA paper trading logic"""
+        if not self.is_market_open():
+            return
+            
         try:
-            status = self.paper_trader.get_position_status()
+            logger.info("Running SMA paper trading cycle...")
+            
+            # Check for new signals if no active position
+            if not self.sma_trader.has_active_position():
+                signal = self.sma_trader.sma_strategy(self.sma_trader.symbol) if hasattr(self.sma_trader, 'sma_strategy') else None
+                if not signal:
+                    # Import and call the SMA strategy directly
+                    from core.sma_stra import sma_strategy
+                    signal = sma_strategy(self.sma_trader.symbol)
+                
+                if signal:
+                    logger.info("New SMA trading signal received, executing paper trade")
+                    try:
+                        success = self.sma_trader.execute_paper_trade(signal)
+                        if success:
+                            logger.info("SMA paper trade executed successfully")
+                        else:
+                            logger.error("SMA paper trade execution failed")
+                    except Exception as trade_error:
+                        logger.error(f"Exception during SMA paper trade execution: {trade_error}")
+                else:
+                    logger.debug("No new SMA trading signals")
+            else:
+                logger.debug("SMA trader has active position, skipping signal check")
 
-            if isinstance(status, dict) and status.get('position_active'):
-                return{
-                    'active_position':True,
-                    'entry_time': status['entry_time'].strftime('%Y-%m-%d %H:%M:%S') if status['entry_time'] else None,
-                    'current_profit': round(status['current_profit'], 2),
-                    'adjustment_costs' : round(status['adjustment_costs'], 2),
-                    'adjustments_count': status['adjustments_count'],
-                    'ce_price': status['ce_price'],
-                    'pe_price': status['pe_price'],
+            # Manage existing position
+            if self.sma_trader.has_active_position():
+                logger.info("Managing existing SMA positions")
+                try:
+                    self.sma_trader.manage_existing_positions()
+                    
+                    # Log current position status
+                    status = self.sma_trader.get_position_status()
+                    if isinstance(status, dict):
+                        logger.info(f"SMA Position Status - P&L: Rs{status.get('current_pnl', 0):.2f}")
+                except Exception as manage_error:
+                    logger.error(f"Error managing SMA positions: {manage_error}")
+            else:
+                logger.debug("No active SMA position to manage")
+                
+        except Exception as e:
+            logger.error(f"Error in SMA paper trading cycle: {e}")
+
+    def get_paper_trading_summary(self):
+        """Get detailed paper trading summary for both Donchian and SMA traders"""
+        try:
+            donchian_status = self.paper_trader.get_position_status()
+            sma_status = self.sma_trader.get_position_status()
+            
+            summary = {
+                'donchian': {
+                    'active_position': False,
+                    'message': 'No active position'
+                },
+                'sma': {
+                    'active_position': False,
+                    'message': 'No active position'
+                }
+            }
+            
+            # Donchian trader status
+            if isinstance(donchian_status, dict) and donchian_status.get('position_active'):
+                summary['donchian'] = {
+                    'active_position': True,
+                    'entry_time': donchian_status['entry_time'].strftime('%Y-%m-%d %H:%M:%S') if donchian_status['entry_time'] else None,
+                    'current_profit': round(donchian_status['current_profit'], 2),
+                    'adjustment_costs': round(donchian_status['adjustment_costs'], 2),
+                    'adjustments_count': donchian_status['adjustments_count'],
+                    'ce_price': donchian_status['ce_price'],
+                    'pe_price': donchian_status['pe_price'],
                     'total_adjustments': len(self.paper_trader.adjustment_history),
-                    'position_duration': str(datetime.now() - status['entry_time'])
+                    'position_duration': str(datetime.now() - donchian_status['entry_time']) if donchian_status['entry_time'] else None
                 }
             
-            else:
-                return {'active_position': False, 'message': 'No active position'}
+            # SMA trader status
+            if isinstance(sma_status, dict) and sma_status.get('position_active'):
+                summary['sma'] = {
+                    'active_position': True,
+                    'entry_time': sma_status['entry_time'].strftime('%Y-%m-%d %H:%M:%S') if sma_status['entry_time'] else None,
+                    'current_pnl': round(sma_status['current_pnl'], 2),
+                    'buy_ce_price': sma_status['buy_ce_price'],
+                    'sell_ce_price': sma_status['sell_ce_price'],
+                    'strategy_type': sma_status.get('strategy_type', 'sma_spread'),
+                    'position_duration': str(datetime.now() - sma_status['entry_time']) if sma_status['entry_time'] else None
+                }
+            
+            return summary
             
         except Exception as e:
-            return {'error': f'Error getting paper trading status : {e}'}
+            return {'error': f'Error getting paper trading status: {e}'}
         
 
     def setup_schedule(self):
@@ -334,6 +409,9 @@ class MarketDataAutomation:
 
         #PAPER TRADING - Run every minute during market hours
         schedule.every().minute.do(self.run_paper_trading_cycle)
+        
+        #SMA PAPER TRADING - Run every minute during market hours
+        schedule.every().minute.do(self.run_sma_paper_trading_cycle)
 
         logger.info("Schedule setup completed:")
         logger.info("- 1m data: Every minute (during market hours)")
@@ -342,6 +420,8 @@ class MarketDataAutomation:
         logger.info("- VIX calculation: Every 5 minutes (independent)")
         logger.info("- High-accuracy delta: Every minute (Black-Scholes)")
         logger.info("- Trading Strategy: Every minute")
+        logger.info("- Donchian Paper Trading: Every minute")
+        logger.info("- SMA Paper Trading: Every minute")
         logger.info("- Signal generation: Integrated with data fetching")
     
     def run_scheduler(self):
@@ -390,8 +470,12 @@ class MarketDataAutomation:
         self.is_running = False
 
         if self.paper_trader.has_active_position():
-            logger.info("Closing paper trading position due to system shutdown")
+            logger.info("Closing Donchian paper trading position due to system shutdown")
             self.paper_trader.close_position("all")
+            
+        if self.sma_trader.has_active_position():
+            logger.info("Closing SMA paper trading position due to system shutdown")
+            self.sma_trader.close_position("all")
 
         if self.scheduler_thread and self.scheduler_thread.is_alive():
             self.scheduler_thread.join(timeout=5)
@@ -399,12 +483,14 @@ class MarketDataAutomation:
     
     def get_status(self):
         """Get the current status of the automation"""
-        paper_status = self.paper_trader.get_position_status()
+        donchian_status = self.paper_trader.get_position_status()
+        sma_status = self.sma_trader.get_position_status()
         return {
             'is_running': self.is_running,
             'market_open': self.is_market_open(),
             'last_fetch_times': self.last_fetch_times,
-            'paper_trading_status': paper_status
+            'donchian_trading_status': donchian_status,
+            'sma_trading_status': sma_status
         }
     
     def test_connection(self):
@@ -451,17 +537,37 @@ class MarketDataAutomation:
         print(f"\n💼 PAPER TRADING STATUS:")
         paper_status = automation.get_paper_trading_summary()
         
-        if paper_status.get('active_position'):
+        # Donchian Trader Status
+        print(f"\n📈 DONCHIAN TRADER:")
+        donchian = paper_status.get('donchian', {})
+        if donchian.get('active_position'):
             print(f" Position:  ACTIVE")
-            print(f" Current P&L: Rs{paper_status['current_profit']}")
-            print(f"   Entry Time: {paper_status['entry_time']}")
-            print(f" Duration: {paper_status['position_duration']}")
-            print(f" Adjustments: {paper_status['adjustments_count']}")
-            print(f" Adjustment Costs: Rs{paper_status['adjustment_costs']}")
-            if paper_status['ce_price']:
-                print(f" CE Price: Rs{paper_status['ce_price']}")
-            if paper_status['pe_price']:
-                print(f" PE Price: Rs{paper_status['pe_price']}")
+            print(f" Current P&L: Rs{donchian['current_profit']}")
+            print(f"   Entry Time: {donchian['entry_time']}")
+            print(f" Duration: {donchian['position_duration']}")
+            print(f" Adjustments: {donchian['adjustments_count']}")
+            print(f" Adjustment Costs: Rs{donchian['adjustment_costs']}")
+            if donchian.get('ce_price'):
+                print(f" CE Price: Rs{donchian['ce_price']}")
+            if donchian.get('pe_price'):
+                print(f" PE Price: Rs{donchian['pe_price']}")
+        else:
+            print(f" Position:  NO ACTIVE POSITION")
+            print(f" Status: Waiting for trading signals...")
+        
+        # SMA Trader Status
+        print(f"\n📊 SMA TRADER:")
+        sma = paper_status.get('sma', {})
+        if sma.get('active_position'):
+            print(f" Position:  ACTIVE")
+            print(f" Current P&L: Rs{sma['current_pnl']}")
+            print(f"   Entry Time: {sma['entry_time']}")
+            print(f" Duration: {sma['position_duration']}")
+            print(f" Strategy: {sma.get('strategy_type', 'sma_spread')}")
+            if sma.get('buy_ce_price'):
+                print(f" BUY CE Price: Rs{sma['buy_ce_price']}")
+            if sma.get('sell_ce_price'):
+                print(f" SELL CE Price: Rs{sma['sell_ce_price']}")
         else:
             print(f" Position:  NO ACTIVE POSITION")
             print(f" Status: Waiting for trading signals...")

@@ -70,12 +70,33 @@ def sma_strategy(symbol="NIFTY50"):
         
             # 1. Essentials for Trade Condition 
             essentials = {
-            '5m_donchian': 1 if latest_5m['close'] > latest_5min['donchian_mid_5m'] else -1,
+            '5m_donchian': 1 if latest_5m['close'] > latest_5m['donchian_mid_5m'] else -1,
             '5m_ao': 1 if latest_5m['ao_value'] > 0 else -1,
-            '15m_donchian': 1 if latest_15m['close'] > latest_15min['donchian_mid_15m'] else -1,
+            '15m_donchian': 1 if latest_15m['close'] > latest_15m['donchian_mid_15m'] else -1,
             '15m_ao': 1 if latest_15m['ao_value'] > 0 else -1,
         }
         
+            positive_essentials = sum(1 for value in essentials.values() if value == 1)
+
+            # ---- Trade Decision Logic ---- #
+            if positive_essentials == 4 or positive_essentials == 0:
+                sma_logger.info(f"Trade conditions met for {symbol}.")      
+                if latest_5m['close'] > latest_5m['donchian_mid_5m'] and latest_5m['ao_value'] > 0 and \
+                    latest_15m['close'] > latest_15m['donchian_mid_15m'] and latest_15m['ao_value'] > 0:
+                    sma_logger.info("First two conditions met for position taking...")
+                    tol = 1.0000005 # Tolerance level to avoid floating point issues
+                    close = latest_1m['close']
+
+                    if abs(close - latest_1m['sma_20']) <= tol or abs(close - latest_1m['donchian_mid_1m']) <= tol:
+                        sma_logger.info(f"Price is near SMA 20 on 1m chart. Considering Further conditions: ")
+                        if (latest_1m['close'] > latest_1m['sma_5']) and (latest_1m['close'] > latest_1m['sma_20']):
+                            sma_logger.info(f"ALL condition met for position taking. Proceed further...")
+                        # Place Long Order Logic Here
+
+            else:
+                sma_logger.info(f"No trade conditions met for {symbol}. Exiting strategy.")
+                return None
+
         except Exception as e:
             sma_logger.error(f"Error fetching market data for {symbol}: {e}")
             return

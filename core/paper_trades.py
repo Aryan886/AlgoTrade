@@ -17,7 +17,7 @@ from typing import Dict, List, Optional
 os.makedirs('logs', exist_ok=True)
 
 # Initialize loggers
-paper_logger, trade_logger, position_logger = setup_paper_trading_logger()
+paper_logger, trade_logger, position_logger, sma_logger = setup_paper_trading_logger()
 
 class PaperTraderDonchian:
     def __init__(self, symbol="NIFTY50"):
@@ -36,7 +36,7 @@ class PaperTraderDonchian:
         self.signal_cooldown = 300  # 5 minutes in seconds
         
         #loggers
-        paper_logger, trade_logger, position_logger = setup_paper_trading_logger()
+        paper_logger, trade_logger, position_logger, sma_logger = setup_paper_trading_logger()
         self.logger = paper_logger
         self.trade_logger = trade_logger
         self.position_logger = position_logger
@@ -480,12 +480,15 @@ class PaperTraderDonchian:
 
             #compare with stored entry criteria
             if self.entry_criteria and current_criteria:
-                #If any essential condition has reversed, close position
-                for key in self.entry_criteria:
-                    if self.entry_criteria[key] != current_criteria.get(key):
-                        self.logger.info(f"ENTRY CRITERIA VIOLATION : {key} changed from {self.entry_criteria[key]} to {current_criteria.get(key)}")
-                        self.close_position("all")
-                        return True
+                # Check if all four essentials are now aligned in same direction
+                current_values = list(current_criteria.values())
+                
+                # Close only if all essentials are now +1 or all are -1
+                if len(set(current_values)) == 1:  # All values are the same
+                    self.logger.info(f"ENTRY CRITERIA VIOLATION: All essentials aligned in same direction {current_values[0]}")
+                    self.logger.info(f"Current criteria: {current_criteria}")
+                    self.close_position("all")
+                    return True
                     
             return False
         except Exception as e:
@@ -775,10 +778,10 @@ class PaperTraderDonchian:
                     # Close the higher priced option
                     if ce_price > pe_price:
                         self.logger.info(f"Closing CE option at {ce_price} (higher than PE {pe_price})")
-                        self.close_option('CE')
+                        self.close_position('ce')
                     else:
                         self.logger.info(f"Closing PE option at {pe_price} (higher than CE {ce_price})")
-                        self.close_option('PE')
+                        self.close_position('pe')
 
                     # Find replacement option
                     self.logger.info("Searching for replacement option...")
@@ -838,9 +841,6 @@ class PaperTraderDonchian:
         except Exception as e:
             self.logger.error(f"Error in calculate_current_profit: {e}")
             return 0
-
-    """
-    Disabling for now as we are not using profit target rule
     
     def check_profit_target(self):
         #Rule 1: Check if profit target(16pts) is reached
@@ -850,7 +850,7 @@ class PaperTraderDonchian:
         try:
             profit = self.calculate_current_profit()
 
-            if profit >= 16:
+            if profit >= 18:
                 self.logger.info(f"PROFIT TARGET REACHED : {profit} points")
                 self.close_position("all")
                 return True
@@ -859,7 +859,6 @@ class PaperTraderDonchian:
         except Exception as e:
             self.logger.error(f"Error checking profit target : {e}")
             return False
-    """
         
     def update_current_prices(self, options_data: Optional[List[Dict]] = None) -> bool:
         """

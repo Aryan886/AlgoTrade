@@ -2,7 +2,6 @@
 import math
 import pandas as pd
 from database.load_data import load_latest_data
-from utils.db_func import fetch_vix_data
 from utils.iv import ProductionIVCalculator
 from datetime import datetime, time
 
@@ -74,6 +73,7 @@ def compute_indicators(
 
     # Try to fetch VIX data, but don't fail if it doesn't exist
     try:
+        from utils.db_func import fetch_vix_data
         vix_df = fetch_vix_data(symbol="NIFTY50")
         if not vix_df.empty:
             vix_df['ao_value'] = vix_df['vix_value'].rolling(window=5).mean() - vix_df['vix_value'].rolling(window=34).mean()

@@ -84,13 +84,14 @@ def store_market_data(df, symbol: str = 'NIFTY50', interval: str = '5m', vix_val
     print(f"Market data stored successfully in {table_name}.")
 
 #Fetches historical market data for a given symbol and date range.
-def fetch_market_data(symbol: str = 'NIFTY50', start=None, end=None, interval=None, db_path=DB_PATH):
+def fetch_market_data(symbol: str = 'NIFTY50', start=None, end=None, interval=None, limit=200, db_path=DB_PATH):
     """
     Fetches historical market data from the database.
-    Now includes VIX data alongside other market data.
+    Default limit of 200 prevents memory issues with large datasets.
+    Set limit=None to fetch all data (use with caution).
     """
     conn = sqlite3.connect(db_path)
-    print(f"[DEBUG] fetch_market_data called with symbol={symbol}")
+    print(f"[DEBUG] fetch_market_data called with symbol={symbol}, limit={limit}")
     
     # Determine which table to query based on interval
     if interval:
@@ -112,14 +113,23 @@ def fetch_market_data(symbol: str = 'NIFTY50', start=None, end=None, interval=No
         query += " AND timestamp <= ?"
         params.append(end)
 
-    query += " ORDER BY timestamp"
+    query += " ORDER BY timestamp DESC"  # Recent data first
+    
+    # Add LIMIT clause unless explicitly set to None
+    if limit is not None:
+        query += f" LIMIT {int(limit)}"
 
     print(f"[DEBUG] Final query : {query}")
     print(f"[DEBUG] Params : {params}")
 
-    df = pd.read_sql_query(query, conn,params=params, parse_dates=["timestamp"])
+    df = pd.read_sql_query(query, conn, params=params, parse_dates=["timestamp"])
     df.set_index("timestamp", inplace=True)
     df = standardize_column_names(df)
+    
+    # If we used LIMIT with DESC, reverse to get chronological order
+    if limit is not None:
+        df = df.iloc[::-1]
+    
     conn.close()
     return df
 
@@ -650,3 +660,8 @@ def store_sma_from_df(df: pd.DateOffset, symbol : str, interval: str, db_path= D
         conn.commit()
     finally:
         conn.close()
+
+
+if __name__ == "__main__":
+    df = fetch_market_data('NIFTY50', interval='5m')
+    print(f"15m data shape: {df.shape}")
