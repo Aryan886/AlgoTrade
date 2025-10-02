@@ -12,7 +12,7 @@ from utils.black_scholes import (
 from utils.iv import ProductionIVCalculator
 from utils.utility import standardize_column_names
 import re
-from core.indicators import compute_smas
+from core.indicators import compute_smas, compute_intraday_vwap
 
 DB_PATH = 'db/trading_bot.db'
 
@@ -62,7 +62,7 @@ def store_market_data(df, symbol: str = 'NIFTY50', interval: str = '5m', vix_val
         
         cursor.execute(f"""
             INSERT INTO {table_name} (
-                timestamp, symbol, open, high, low, close, volume,
+                timestamp, symbol, open, high, low, close,
                 ao_value, donchian_upper, donchian_lower, donchian_mid
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """, (
@@ -72,7 +72,6 @@ def store_market_data(df, symbol: str = 'NIFTY50', interval: str = '5m', vix_val
             safe_get_value(row, 'high'),
             safe_get_value(row, 'low'),
             safe_get_value(row, 'close'),
-            safe_get_value(row, 'volume'),
             safe_get_value(row, 'ao_value'),
             safe_get_value(row, 'donchian_upper'),
             safe_get_value(row, 'donchian_lower'),
@@ -626,7 +625,6 @@ def create_sma_table(conn: sqlite3.Connection, interval : str):
     """)
     conn.commit()
     
-
 def store_sma_from_df(df: pd.DateOffset, symbol : str, interval: str, db_path= DB_PATH):
     """
     Compute SMA on df and store into market_sma_<interval>.
@@ -661,7 +659,152 @@ def store_sma_from_df(df: pd.DateOffset, symbol : str, interval: str, db_path= D
     finally:
         conn.close()
 
+def create_equity_table(conn: sqlite3.Connection, interval: str) -> None:
+    """Create an equity_data_<interval> table if it doesn't exist."""
+    tbl = f"equity_data_{interval}"
+    conn.execute(f"""
+        CREATE TABLE IF NOT EXISTS {tbl} (
+            timestamp TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            open REAL,
+            high REAL,
+            low REAL,
+            close REAL,
+            volume REAL,
+            vwap REAL,
+            PRIMARY KEY (timestamp, symbol)
+        );
+    """)
+    conn.commit()
+
+def store_equity_data(
+    df: pd.DataFrame,
+    symbol: str,
+    interval: str = '5m',
+    db_path: str = DB_PATH
+) -> int:
+    """
+    Store OHLCV + VWAP for equities into equity_data_<interval>.
+
+    - df: DataFrame indexed by timestamp (DatetimeIndex). Columns expected: open, high, low, close, volume (case-insensitive).
+    - symbol: equity symbol (e.g., 'INFY').
+    - interval: '1m','5m','15m' etc. used to name the table.
+    - Returns: number of rows inserted/updated.
+    """
+    ensure_db_dir(db_path)
+    conn = sqlite3.connect(db_path, timeout=20)
+    cur = conn.cursor()
+
+    try:
+        # Normalize column names to lowercase (consistent with store_market_data)
+        df = df.copy()
+        df.columns = [col.lower() for col in df.columns]
+
+        # Compute VWAP if not present or contains NaNs
+        if 'vwap' not in df.columns or df['vwap'].isna().any():
+            # Only compute VWAP if volume exists; otherwise fill with None
+            if 'volume' in df.columns:
+                try:
+                    df['vwap'] = compute_intraday_vwap(df)
+                except KeyError as e:
+                    # missing required column(s) for vwap; set vwap to NaN
+                    print(f"[WARN] VWAP computation failed: {e}")
+                    df['vwap'] = pd.NA
+            else:
+                print("[WARN] 'volume' column missing — VWAP will be empty")
+                df['vwap'] = pd.NA
+
+        # Ensure table exists
+        create_equity_table(conn, interval)
+        tbl = f"equity_data_{interval}"
+
+        insert_sql = f"""
+            INSERT OR REPLACE INTO {tbl}
+            (timestamp, symbol, open, high, low, close, volume, vwap)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+        """
+
+        rows = []
+        for ts, row in df.iterrows():
+            ts_str = ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, 'strftime') else str(ts)
+
+            def safe(x):
+                return float(x) if pd.notna(x) else None
+
+            rows.append((
+                ts_str,
+                symbol,
+                safe(row.get('open')),
+                safe(row.get('high')),
+                safe(row.get('low')),
+                safe(row.get('close')),
+                safe(row.get('volume')),
+                safe(row.get('vwap'))
+            ))
+
+        cur.executemany(insert_sql, rows)
+        conn.commit()
+        return len(rows)
+
+    finally:
+        conn.close()
+
+def migrate_create_equity_tables(db_path=DB_PATH):
+    """Ensure equity_data_1m/5m/15m tables exist."""
+    conn = sqlite3.connect(db_path)
+    try:
+        for interval in ["1m", "5m", "15m"]:
+            create_equity_table(conn, interval)
+        print("Equity tables created/verified successfully.")
+    finally:
+        conn.close()
+
+
+def fetch_equity_data(
+    symbol: str,
+    start: str = None,
+    end: str = None,
+    interval: str = '5m',
+    limit: int = 200,
+    db_path: str = DB_PATH
+) -> pd.DataFrame:
+    """
+    Fetch equity OHLCV + VWAP data from equity_data_<interval>.
+
+    - symbol: equity symbol (e.g., 'INFY').
+    - start: start datetime string (optional).
+    - end: end datetime string (optional).
+    - interval: '1m','5m','15m' etc. used to name the table.
+    - limit: max rows to fetch (default 200, None for no limit).
+    - Returns: DataFrame indexed by timestamp.
+    """
+    conn = sqlite3.connect(db_path)
+    tbl = f"equity_data_{interval}"
+    query = f"SELECT * FROM {tbl} WHERE symbol = ?"
+    params = [symbol]
+
+    if start:
+        query += " AND timestamp >= ?"
+        params.append(start)
+    if end:
+        query += " AND timestamp <= ?"
+        params.append(end)
+
+    query += " ORDER BY timestamp DESC"
+    if limit is not None:
+        query += f" LIMIT {int(limit)}"
+
+    df = pd.read_sql_query(query, conn, params=params, parse_dates=["timestamp"])
+    df.set_index("timestamp", inplace=True)
+    df = standardize_column_names(df)
+
+    # Reverse if limited to get chronological order
+    if limit is not None:
+        df = df.iloc[::-1]
+
+    conn.close()
+    return df
 
 if __name__ == "__main__":
-    df = fetch_market_data('NIFTY50', interval='5m')
-    print(f"15m data shape: {df.shape}")
+    migrate_create_equity_tables()
+    print("Equity tables ensured.")

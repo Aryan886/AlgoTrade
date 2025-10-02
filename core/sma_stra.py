@@ -153,9 +153,9 @@ def get_current_entry_criteria(symbol):
 
         # Entry criteria based on SMA strategy
         entry_criteria = {
-            '5m_donchian': 1 if latest_5m['close'] > latest_5m['donchian_mid_5m'] else -1,
+            '5m_donchian': 1 if latest_5m['close'] > latest_5m['donchian_mid'] else -1,
             '5m_ao': 1 if latest_5m['ao_value'] > 0 else -1,
-            '15m_donchian': 1 if latest_15m['close'] > latest_15m['donchian_mid_15m'] else -1,
+            '15m_donchian': 1 if latest_15m['close'] > latest_15m['donchian_mid'] else -1,
             '15m_ao': 1 if latest_15m['ao_value'] > 0 else -1,
             '1m_sma_5': 1 if latest_1m['close'] > latest_1m['sma_5'] else -1,
             '1m_sma_20': 1 if latest_1m['close'] > latest_1m['sma_20'] else -1,
@@ -166,6 +166,55 @@ def get_current_entry_criteria(symbol):
     except Exception as e:
         sma_logger.error(f"Error in get_current_entry_criteria: {e}")
         return None
+
+def select_fallback_options(options_data, spot_price):
+    """
+    Fallback logic: Sell ATM CE at spot price and buy ITM CE at spot-140 ±20
+    """
+    ce_options = [opt for opt in options_data if opt.get("option_type") == "CE" or opt.get("option_type") == "ce"]
+    
+    if not ce_options:
+        sma_logger.error("No CE options available for fallback")
+        return None, None
+    
+    # Find ATM option (closest to spot price for selling)
+    atm_candidates = []
+    for opt in ce_options:
+        try:
+            strike = float(opt.get('strike', 0))
+            atm_candidates.append((opt, abs(strike - spot_price)))
+        except (ValueError, TypeError):
+            continue
+    
+    if not atm_candidates:
+        sma_logger.error("No ATM CE found for fallback at spot price")
+        return None, None
+    
+    # Select closest to spot price for selling
+    sell_ce = min(atm_candidates, key=lambda x: x[1])[0]
+    
+    # Find ITM option (closest to spot-140, within ±20 range)
+    itm_target = spot_price - 140
+    itm_candidates = []
+    for opt in ce_options:
+        try:
+            strike = float(opt.get('strike', 0))
+            if abs(strike - itm_target) <= 20:  # Within ±20 range
+                itm_candidates.append((opt, abs(strike - itm_target)))
+        except (ValueError, TypeError):
+            continue
+    
+    if not itm_candidates:
+        sma_logger.error(f"No ITM CE found within range for fallback target {itm_target}")
+        return None, None
+    
+    # Select closest ITM option
+    buy_ce = min(itm_candidates, key=lambda x: x[1])[0]
+    
+    sma_logger.info(f"FALLBACK - Selected ITM CE (BUY): {buy_ce['tradingsymbol']} @ {buy_ce.get('last_price', 0)}")
+    sma_logger.info(f"FALLBACK - Selected ATM CE (SELL): {sell_ce['tradingsymbol']} @ {sell_ce.get('last_price', 0)}")
+    
+    return buy_ce, sell_ce
 
 def sma_strategy(symbol="NIFTY50"):
     """
@@ -257,7 +306,7 @@ def sma_strategy(symbol="NIFTY50"):
                     tol = 1.0000005  # Tolerance level to avoid floating point issues
                     close = latest_1m['close']
 
-                    if abs(close - latest_1m['sma_20']) <= tol or abs(close - latest_1m['donchian_mid_1m']) <= tol:
+                    if abs(close - latest_1m['sma_20']) <= tol or abs(close - latest_1m['donchian_mid']) <= tol:
                         sma_logger.info("Flag 2 conditions met (1m price touching SMA 20 or mid donchian)")
                         
                         # Final condition: price above both 5 SMA and 20 SMA on 1m
@@ -272,28 +321,38 @@ def sma_strategy(symbol="NIFTY50"):
                                 sma_logger.error("No options data available")
                                 return None
                             
-                            # Select ITM (buy) and ATM (sell) CE options
                             buy_ce, sell_ce = select_itm_atm_options(options_data, spot_price)
-                            
-                            if buy_ce and sell_ce:
-                                # Check for duplicate signal
-                                if is_duplicate_signal(buy_ce, sell_ce):
-                                    sma_logger.info(f"Duplicate signal detected, skipping")
+
+                            # If primary selection fails, try fallback logic
+                            if not buy_ce or not sell_ce:
+                                sma_logger.info("Primary option selection failed, trying fallback logic...")
+                                buy_ce, sell_ce = select_fallback_options(options_data, spot_price)
+
+                            try:
+                                if buy_ce and sell_ce:
+                                    # Check for duplicate signal
+                                    if is_duplicate_signal(buy_ce, sell_ce):
+                                        sma_logger.info(f"Duplicate signal detected, skipping")
+                                        return None
+                                    
+                                    # Standardize option data for paper trader
+                                    buy_ce['last_price'] = buy_ce.get('ltp', buy_ce.get('last_price', 0))
+                                    sell_ce['last_price'] = sell_ce.get('ltp', sell_ce.get('last_price', 0))
+                                    
+                                    # Update signal tracking
+                                    update_signal_tracking(buy_ce, sell_ce)
+                                    
+                                    # Return signal in format expected by paper trader
+                                    return {"ce_option": buy_ce, "pe_option": sell_ce, "strategy_type": "sma_spread"}
+                                else:
+                                    sma_logger.error("Both primary and fallback option selection failed")
                                     return None
-                                
-                                # Standardize option data for paper trader
-                                buy_ce['last_price'] = buy_ce.get('ltp', buy_ce.get('last_price', 0))
-                                sell_ce['last_price'] = sell_ce.get('ltp', sell_ce.get('last_price', 0))
-                                
-                                # Update signal tracking
-                                update_signal_tracking(buy_ce, sell_ce)
-                                
-                                # Return signal in format expected by paper trader
-                                # Using ce_option for buy (ITM) and pe_option for sell (ATM) to reuse existing logic
-                                return {"ce_option": buy_ce, "pe_option": sell_ce, "strategy_type": "sma_spread"}
-                            else:
-                                sma_logger.error("Failed to select appropriate options")
+
+                            
+                            except Exception as e:
+                                sma_logger.error(f"Error during option selection or signal generation: {e}")
                                 return None
+                            
                         else:
                             sma_logger.info("Final SMA conditions not met on 1m chart")
                             return None

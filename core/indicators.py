@@ -192,58 +192,6 @@ def generate_signals(df: pd.DataFrame, symbol: str = "NIFTY50") -> list:
     return signals
 
 
-def calculate_vix(option_data, spot_price, strike_window=300):
-    """
-    Calculates a simplified VIX estimate using weighted IVs.
-
-    Parameters:
-        option_data (list of dict): Option chain rows
-        spot_price (float): Current index value (e.g., NIFTY)
-        strike_window (int): Consider strikes within ±window of ATM
-
-    Returns:
-        float: Estimated India VIX
-    """
-    total_weight = 0
-    weighted_iv_sum = 0
-
-    # Check if any IV is > 1.0 (likely percent)
-    ivs = [row.get("IV") for row in option_data if row.get("IV") is not None]
-    treat_as_percent = any(iv is not None and iv > 1.0 for iv in ivs)
-    if treat_as_percent:
-        print("[WARN] At least one IV > 1.0 detected in VIX calculation. Treating all IVs as percent and converting to decimal.")
-
-    for row in option_data:
-        strike = row.get("strikePrice")
-        iv = row.get("IV")
-        oi = row.get("openInterest")
-        option_type = row.get("optionType")
-
-        if iv is None or oi is None or option_type is None:
-            continue
-
-        # Only use strikes close to ATM
-        if abs(strike - spot_price) > strike_window:
-            continue
-
-        if option_type == "CE" and strike < spot_price:
-            continue
-        if option_type == "PE" and strike > spot_price:
-            continue
-
-        weight = oi
-        iv_decimal = (iv / 100.0) if treat_as_percent else iv
-        weighted_iv_sum += weight * (iv_decimal ** 2)
-        total_weight += weight
-
-    if total_weight == 0:
-        print("[WARN] No valid OI data for VIX calculation.")
-        return None
-
-    vix = 100 * math.sqrt(weighted_iv_sum / total_weight)
-    print(f"Calculated vix: {vix}")
-    return vix
-
 def calculate_vix2(option_data, spot_price, strike_window=300):
     """
     Calculates a simplified VIX estimate using IVs from ProductionIVCalculator.
@@ -641,20 +589,38 @@ def calculate_enhanced_vix(
 
     return vix
 
-""""
-def add_vwap(df):
-    cols = {c.lower(): c for c in df.columns}  # map lowercase → actual col
-    if 'close' not in cols or 'volume' not in cols:
-        print("[WARN] Skipping VWAP: missing close/volume")
-        df['vwap'] = None
-        return df
+def compute_intraday_vwap(df: pd.DataFrame) -> pd.Series:
+    """
+    Compute intraday VWAP (resets at each calendar day).
+    Expects df indexed by timestamp and containing 'high','low','close','volume' (lowercase).
+    Returns a pd.Series aligned with df.index.
+    """
+    if df.empty:
+        return pd.Series(dtype='float64')
 
-    close_col, volume_col = cols['close'], cols['volume']
-    df["cum_vol_price"] = (df[close_col] * df[volume_col]).cumsum()
-    df["cum_volume"] = df[volume_col].cumsum()
-    df["vwap"] = df["cum_vol_price"] / df["cum_volume"]
-    return df
-"""
+    # Ensure needed columns exist
+    for col in ('high', 'low', 'close', 'volume'):
+        if col not in df.columns:
+            raise KeyError(f"Missing required column for VWAP: {col}")
+
+    # Prepare output
+    vwap_series = pd.Series(index=df.index, dtype='float64')
+
+    # Compute per-day VWAP (reset each day)
+    # Group by calendar date (works for multi-day DataFrames)
+    for _, group in df.groupby(df.index.date):
+        g = df.loc[group.index]
+        tp_g = (g['high'] + g['low'] + g['close']) / 3.0
+        vol_g = g['volume'].fillna(0.0)
+
+        cum_pv = (tp_g * vol_g).cumsum()
+        cum_vol = vol_g.cumsum().replace({0: pd.NA})  # avoid div-by-zero
+
+        v = cum_pv / cum_vol
+        vwap_series.loc[g.index] = v.values
+
+    return vwap_series
+
 
 def compute_smas(df: pd.DataFrame) -> pd.DataFrame:
     """

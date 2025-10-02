@@ -219,7 +219,7 @@ def calculate_live_vix(spot_price=None, strike_window=300):
         print(f"Calculating VIX with {len(option_data)} options around spot price {spot_price}")
 
         # Calculate VIX using the existing function
-        from core.indicators import  calculate_vix,calculate_enhanced_vix,calculate_vix2
+        from core.indicators import calculate_enhanced_vix,calculate_vix2
         
         current_day = datetime.now().weekday()
         if current_day == 1:

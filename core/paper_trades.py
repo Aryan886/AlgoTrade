@@ -346,7 +346,8 @@ class PaperTraderDonchian:
     
     def close_position(self, leg: str, close_price: Optional[float] = None, auto_clear: bool = True) -> bool:
         """
-        FIXED VERSION - Mark a single leg as closed with proper adjustment cost tracking
+        FIXED VERSION - Mark a single leg as closed with proper adjustment cost tracking.
+        Always fetches fresh prices before closing unless close_price is explicitly provided.
         """
         if not self.has_active_position():
             self.logger.warning("close_position called but no active position.")
@@ -354,6 +355,13 @@ class PaperTraderDonchian:
 
         if leg.lower() == "all":
             self.logger.info("Closing ALL legs due to rule trigger")
+            # Update prices before closing all legs
+            try:
+                self.update_current_prices()
+            except Exception as e:
+                self.logger.error(f"Failed to update prices before closing all legs: {e}")
+                self.logger.error("Proceeding with last known prices")
+            
             success_ce = self.close_position("ce", auto_clear=False)
             success_pe = self.close_position("pe", auto_clear=False)
             if success_ce or success_pe:
@@ -381,19 +389,34 @@ class PaperTraderDonchian:
                         self.position.get("entry_prices", {}).get(leg.upper()))
             
             if entry_price is None:
-                self.logger.warning("No entry price found for %s; continuing with 0.", leg)
+                self.logger.error(f"No entry price found for {leg} leg - this should not happen!")
+                self.logger.error("Available entry_prices keys: %s", list(self.position.get("entry_prices", {}).keys()))
                 entry_price = 0.0
 
-            # Determine close price
+            # Determine close price - fetch fresh if not provided
             if close_price is None:
+                # Try to get fresh price first
+                try:
+                    self.update_current_prices()
+                except Exception as e:
+                    self.logger.error(f"Failed to update prices before closing {leg}: {e}")
+                    self.logger.error("Using last known price from position data")
+                
                 close_price = (self.position.get("current_prices", {}).get(leg) or 
-                            self.position.get("current_prices", {}).get(leg.upper(), 0.0))
+                            self.position.get("current_prices", {}).get(leg.upper()))
+                
+                if close_price is None:
+                    self.logger.error(f"No current price found for {leg} leg after update attempt")
+                    self.logger.error("Available current_prices keys: %s", list(self.position.get("current_prices", {}).keys()))
+                    close_price = entry_price  # Fallback to entry price
 
-            # Normalize numeric
+            # Normalize numeric values
             try:
                 close_price = float(close_price)
                 entry_price = float(entry_price)
-            except Exception:
+            except (ValueError, TypeError) as e:
+                self.logger.error(f"Failed to convert prices to float: entry_price={entry_price}, close_price={close_price}")
+                self.logger.error(f"Conversion error: {e}")
                 close_price = 0.0
                 entry_price = 0.0
 
@@ -403,7 +426,7 @@ class PaperTraderDonchian:
             # Update total adjustment impact
             self.adjustment_impact += adjustment_cost
 
-            # Log details
+            # Log details with more context
             self.logger.info("CLOSING %s OPTION:", leg.upper())
             self.logger.info("  Entry Price: %s", entry_price)
             self.logger.info("  Close Price: %s", close_price)
@@ -430,7 +453,7 @@ class PaperTraderDonchian:
                 "action": f"closed {leg.upper()}", 
                 "entry_price": entry_price,
                 "close_price": close_price, 
-                "cost": adjustment_cost  # FIXED: actual cost instead of 0
+                "cost": adjustment_cost
             }
             
             if not hasattr(self, "adjustment_history") or self.adjustment_history is None:
@@ -610,10 +633,9 @@ class PaperTraderDonchian:
         except Exception as e:
             self.logger.error(f"Error finding replacement option: {e}")
 
+    """
     def close_position(self, leg: str, close_price: Optional[float] = None, auto_clear: bool = True) -> bool:
-        """
-        Mark a single leg as closed with proper adjustment cost tracking
-        """
+        
         if not self.has_active_position():
             self.logger.warning("close_position called but no active position.")
             return False
@@ -730,6 +752,7 @@ class PaperTraderDonchian:
         except Exception as e:
             self.logger.exception("Error closing position leg: %s", e)
             return False
+    """
     
     def check_positon_adjustment(self):
         """Rule 2: Check if position adjustment is needed"""
@@ -841,7 +864,8 @@ class PaperTraderDonchian:
         except Exception as e:
             self.logger.error(f"Error in calculate_current_profit: {e}")
             return 0
-    
+        
+    """
     def check_profit_target(self):
         #Rule 1: Check if profit target(16pts) is reached
         if not self.has_active_position():
@@ -859,7 +883,8 @@ class PaperTraderDonchian:
         except Exception as e:
             self.logger.error(f"Error checking profit target : {e}")
             return False
-        
+        """
+    
     def update_current_prices(self, options_data: Optional[List[Dict]] = None) -> bool:
         """
         FIXED VERSION - Only update prices for OPEN legs
@@ -989,10 +1014,12 @@ class PaperTraderDonchian:
             return  # Skip this iteration if data is stale
 
         # Rule 1: Check profit target every 5min (only with fresh data)
+        """
         if self.should_check_profit(current_time):
             if self.check_profit_target():
                 return #Position closed
             self.last_profit_check = current_time
+        """
             
         #Rule 2: Dynamic position adjustment (only with fresh data)
         self.check_positon_adjustment()
@@ -1027,6 +1054,7 @@ class PaperTraderDonchian:
         Stores only symbols and numeric prices (no raw option dicts).
         Returns True on success, False otherwise.
         """
+        
         if self.has_active_position():
             self.logger.warning("execute_paper_trade called but an active position already exists. Ignoring new signal.")
             return False

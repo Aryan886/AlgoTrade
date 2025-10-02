@@ -4,7 +4,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from utils.utility import get_data_path
 from broker.zerodha_client import kite_from_saved_token
-from utils.db_func import store_market_data, store_signal, store_sma_from_df
+from utils.db_func import store_market_data, store_signal, store_sma_from_df, store_equity_data
 from core.indicators import compute_indicators, generate_signals
 
 
@@ -293,25 +293,101 @@ def fetch_and_save_data(intervals=["1m", "5m", "15m"], return_interval=None, sym
         return results, return_df
     return results
 
+
+class EquityDataFetcher:
+    def __init__(self):
+        self.kite = None
+    
+    def connect(self):
+        try:
+            self.kite = kite_from_saved_token()
+            if self.kite:
+                print("Connected to Kite API successfully!")
+                return True
+            else:
+                print("Failed to connect to Kite API. Please run login_kite() first.")
+                return False
+        except Exception as e:
+            print(f"Failed to connect to Kite API: {e}")
+            return False
+        
+    def fetch_equity_historical(self, symbol: str, interval: str, from_date, to_date):
+        """Fetch historical OHLCV for a stock (equity symbol like INFY)."""
+        interval_map = {
+            '1m': 'minute',
+            '5m': '5minute',
+            '15m': '15minute'
+        }
+        kite_interval = interval_map.get(interval, interval)
+
+        if self.kite is None:
+            print("Kite connection not established for equities")
+            return None
+
+        try:
+            #Find instrument token
+            instruments = self.kite.instruments("NSE")
+            token = None
+            for inst in instruments:
+                if inst['tradingsymbol'] == symbol:
+                    token = inst['instrument_token']
+                    break
+
+            if not token:
+                print(f"Instrument token not found for symbol: {symbol}")
+                return None
+            
+            print(f"Fetching {interval} data for {symbol} from {from_date} to {to_date}")
+            data = self.kite.historical_data(
+                instrument_token=token,
+                from_date=from_date,
+                to_date=to_date,
+                interval=kite_interval
+            )
+
+            if not data:
+                print(f"No data received for {symbol} at interval {interval}")
+                return None
+            
+            df = pd.DataFrame(data)
+            df['date'] = pd.to_datetime(df['date'])
+            df.set_index('date', inplace=True)
+            df.rename(columns={
+                'open': 'open', "high": 'high', 'low': 'low', 'close': 'close', 'volume': 'volume'
+            }, inplace=True)
+
+            #Compute VWAP before storing
+            typical_price = (df['high'] + df['low'] + df['close']) / 3
+            df['vwap'] = (typical_price * df['volume']).cumsum() / df['volume'].cumsum()
+
+            return df
+        
+        except Exception as e:
+            print(f"Error fetching historical data for {symbol}: {e}")
+            return None
+
+
+def fetch_and_save_equity(symbol: str, intervals = ["1m","5m", "15m"], db_path=DB_PATH):
+    """
+    Fetch and store equity OHLCV+VWAP for given stock symbol into equity_data_<interval> tables.
+    """
+    fetcher = EquityDataFetcher()
+    if not fetcher.connect():
+        return
+
+    results = []
+    now = datetime.now()
+    from_date = now - timedelta(days=5)  # adjust as needed
+    to_date = now
+
+    for interval in intervals:
+        df = fetcher.fetch_equity_historical(symbol, interval, from_date, to_date)
+        if df is not None and not df.empty:
+            store_equity_data(df, symbol, interval=interval, db_path=db_path)
+            print(f"[EQUITY STORED] {symbol} ({interval}) with {len(df)} rows")
+            results.append((interval, df))
+    return results
+
 if __name__ == "__main__":
     print("Testing NIFTY 50 data fetcher...")
-    results, df_1m = fetch_and_save_data(intervals=["1m", "5m", "15m"], return_interval="1m")
-    _, df_5m = fetch_and_save_data(intervals=["5m"], return_interval="5m")
-    _, df_15m = fetch_and_save_data(intervals=["15m"], return_interval="15m")
     
-    if df_1m is not None:
-        print(f"\nSuccessfully fetched {len(df_1m)} rows of 1m data for NIFTY 50")
-       # print("Sample data:")
-       # print(df_1m.head())
-    else:
-        print("Failed to fetch data for NIFTY 50. Please ensure you're logged into Kite API.")
-    
-    if df_5m is not None:
-        print(f"\nSuccessfully fetched {len(df_5m)} rows of 5m data for NIFTY 50")
-       # print("Sample data:")
-       # print(df_5m.head())
-    
-    if df_15m is not None:
-        print(f"\nSuccessfully fetched {len(df_15m)} rows of 15m data for NIFTY 50")
-       # print("Sample data:")
-        #print(df_15m.head())

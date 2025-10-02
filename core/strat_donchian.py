@@ -201,8 +201,8 @@ def donchian_ao_strategy(symbol="NIFTY50"):
     try:
         # 1. Fetch Data from database
         print(f"[DEBUG] Fetching market data for symbol: {symbol}")
-        df_5min = fetch_market_data(symbol=symbol, interval="5m")
-        df_15min = fetch_market_data(symbol=symbol, interval="15m")
+        df_5min = fetch_market_data(symbol=symbol, interval="5m", limit=None)
+        df_15min = fetch_market_data(symbol=symbol, interval="15m", limit= None)
         vix_data = fetch_vix_data(symbol=symbol)
 
         # Calculate indicators for 15m only
@@ -450,8 +450,8 @@ def select_options_for_trade(options_data):
 def get_current_entry_criteria(symbol):
     """Get current entry criteria for position validation"""
     try:
-        df_5min = fetch_market_data(symbol=symbol, interval="5m")
-        df_15min = fetch_market_data(symbol=symbol, interval="15m")
+        df_5min = fetch_market_data(symbol=symbol, interval="5m", limit=None)
+        df_15min = fetch_market_data(symbol=symbol, interval="15m", limit=None)
         df_vix = fetch_vix_data(symbol=symbol)
 
         # Fix 5m and vix as usual

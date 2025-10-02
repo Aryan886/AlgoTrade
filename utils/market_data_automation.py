@@ -3,7 +3,7 @@ import time
 import threading
 import logging
 from datetime import datetime, timedelta
-from utils.data_fetcher import fetch_and_save_data
+from utils.data_fetcher import fetch_and_save_data, fetch_and_save_equity 
 from utils.vix_fetcher import calculate_and_store_vix
 from utils.db_func import store_market_data, store_signal
 from utils.db_func import  calculate_and_store_high_accuracy_delta
@@ -82,8 +82,10 @@ def calculate_high_accuracy_delta():
     except Exception as e:
         logger.error(f"Error in high-accuracy delta calculation: {e}")
 
+"""
+
 def generate_and_store_signals(df, symbol="NIFTY50"):
-    """Generate and store trading signals"""
+    # Generate trading signals and store them in the database
     try:
         logger.info("Generating trading signals...")
         signals = generate_signals(df, symbol)
@@ -108,6 +110,7 @@ def generate_and_store_signals(df, symbol="NIFTY50"):
             
     except Exception as e:
         logger.error(f"Error in signal generation: {e}")
+"""
 
 def run_trading_strategy():
     """Execute the main trading strategy and log the outcome."""
@@ -245,6 +248,22 @@ class MarketDataAutomation:
     def fetch_15m_data(self):
         """Fetch 15-minute data"""
         return self.fetch_data_with_retry('15m')
+    
+    def fetch_1m_equity_data(self):
+        """Fetch 1minute equity data"""
+        df = fetch_and_save_equity("INFY", interval='1m', return_df=True)
+        return df if df is not None and not df.empty else None
+    
+    def fetch_5m_equity_data(self):
+        """Fetch 5minute equity data"""
+        df = fetch_and_save_equity("INFY", interval='5m', return_df=True)
+        return df if df is not None and not df.empty else None
+    
+    def fetch_15m_equity_data(self):
+        """Fetch 15minute equity data"""
+        df = fetch_and_save_equity("INFY", interval='15m', return_df=True)
+        return df if df is not None and not df.empty else None
+    
     
     def run_paper_trading_cycle(self):
         """Run one cycle of paper trading logic"""
@@ -393,10 +412,15 @@ class MarketDataAutomation:
         # Clear any existing schedules
         schedule.clear()
         
-        # Market data fetching (every minute/5min/15min)
+        # Market option data fetching (every minute/5min/15min)
         schedule.every().minute.do(self.fetch_1m_data)
         schedule.every(5).minutes.do(self.fetch_5m_data)
         schedule.every(15).minutes.do(self.fetch_15m_data)
+        
+        # Equity data fetching (every minute/5min/15min)
+        schedule.every().minute.do(self.fetch_1m_equity_data)   
+        schedule.every(5).minutes.do(self.fetch_5m_equity_data)
+        schedule.every(15).minutes.do(self.fetch_15m_equity_data)
         
         # VIX calculation (every 5 minutes, independent of market data)
         schedule.every(5).minutes.do(calculate_vix_separately)
