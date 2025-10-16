@@ -61,6 +61,10 @@ def compute_indicators(
     # 1. Awesome Oscillator
     median_price = (df[high_col] + df[low_col]) / 2
     df['ao_value'] = median_price.rolling(window=ao_fast).mean() - median_price.rolling(window=ao_slow).mean()
+    # Add this line after computing ao_value in compute_indicators()
+    df['ao_color'] = 0
+    df.loc[df['ao_value'] > df['ao_value'].shift(1), 'ao_color'] = 1
+    df.loc[df['ao_value'] < df['ao_value'].shift(1), 'ao_color'] = -1
 
     # 2. Donchian Channel
     df['donchian_upper'] = df[high_col].rolling(window=donchian_period).max()
@@ -83,6 +87,7 @@ def compute_indicators(
             print("[DEBUG] VIX data processed successfully")
         else:
             print("[DEBUG] No VIX data available, continuing without VIX indicators")
+
     except Exception as e:
         print(f"[DEBUG] Error fetching VIX data: {e}, continuing without VIX indicators")
 
@@ -637,3 +642,61 @@ def compute_smas(df: pd.DataFrame) -> pd.DataFrame:
     df2['sma_5'] = df2['close'].rolling(window=5, min_periods=1).mean()
     df2['sma_20'] = df2['close'].rolling(window=20, min_periods=1).mean()
     return df2
+
+def compute_smas_with_high_low(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return a copy of df with 'sma_5', 'sma_20' and their corresponding high/low values.
+    For each SMA calculation window, tracks the highest and lowest prices in that window.
+    
+    Parameters:
+        df: DataFrame with OHLC data, must contain 'close', 'high', 'low' columns
+    
+    Returns:
+        DataFrame with additional columns: sma_5, sma_20, sma_5_high, sma_5_low, sma_20_high, sma_20_low
+    """
+    df2 = df.copy()
+    # Normalize column names to lowercase
+    df2.columns = [c.lower() for c in df.columns]
+    
+    required_cols = ['close', 'high', 'low']
+    missing_cols = [col for col in required_cols if col not in df2.columns]
+    if missing_cols:
+        raise ValueError(f"compute_smas_with_high_low: DataFrame must contain columns: {missing_cols}")
+    
+    # Compute SMAs
+    df2['sma_5'] = df2['close'].rolling(window=5, min_periods=1).mean()
+    df2['sma_20'] = df2['close'].rolling(window=20, min_periods=1).mean()
+    
+    # Compute high/low for SMA windows
+    # For SMA_5: track highest and lowest prices in 5-candle window
+    df2['sma_5_high'] = df2['high'].rolling(window=5, min_periods=1).max()
+    df2['sma_5_low'] = df2['low'].rolling(window=5, min_periods=1).min()
+    
+    # For SMA_20: track highest and lowest prices in 20-candle window
+    df2['sma_20_high'] = df2['high'].rolling(window=20, min_periods=1).max()
+    df2['sma_20_low'] = df2['low'].rolling(window=20, min_periods=1).min()
+    
+    return df2
+
+def add_ao_color(df):
+    """
+    Add AO color column to indicate whether current AO bar is higher or lower than previous.
+    Green (1) = current AO > previous AO (momentum increasing)
+    Red (-1) = current AO < previous AO (momentum decreasing)
+    Neutral (0) = no change or first bar
+    """
+    df = df.copy()
+    
+    # Ensure ao_value column exists
+    if 'ao_value' not in df.columns:
+        raise ValueError("DataFrame must contain 'ao_value' column. Run add_awesome_oscillator first.")
+    
+    # Initialize ao_color column
+    df['ao_color'] = 0
+    
+    # Calculate color based on comparison with previous bar
+    # Green if current > previous, Red if current < previous
+    df.loc[df['ao_value'] > df['ao_value'].shift(1), 'ao_color'] = 1   # Green
+    df.loc[df['ao_value'] < df['ao_value'].shift(1), 'ao_color'] = -1  # Red
+    
+    return df

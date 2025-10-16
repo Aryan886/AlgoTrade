@@ -12,7 +12,7 @@ from utils.black_scholes import (
 from utils.iv import ProductionIVCalculator
 from utils.utility import standardize_column_names
 import re
-from core.indicators import compute_smas, compute_intraday_vwap
+from core.indicators import compute_smas, compute_intraday_vwap, add_ao_color
 
 DB_PATH = 'db/trading_bot.db'
 
@@ -64,7 +64,7 @@ def store_market_data(df, symbol: str = 'NIFTY50', interval: str = '5m', vix_val
             INSERT INTO {table_name} (
                 timestamp, symbol, open, high, low, close,
                 ao_value, donchian_upper, donchian_lower, donchian_mid
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """, (
             timestamp_str,
             symbol,
@@ -672,9 +672,32 @@ def create_equity_table(conn: sqlite3.Connection, interval: str) -> None:
             close REAL,
             volume REAL,
             vwap REAL,
+            ao_value REAL,
+            ao_color INTEGER,
+            donchian_upper REAL,
+            donchian_lower REAL,
+            donchian_mid REAL,
             PRIMARY KEY (timestamp, symbol)
         );
-    """)
+""")
+    conn.commit()
+
+def create_equity_sma_table(conn: sqlite3.Connection, interval: str) -> None:
+    """Create an equity_sma_<interval> table if it doesn't exist."""
+    tbl = f"equity_sma_{interval}"
+    conn.execute(f"""
+        CREATE TABLE IF NOT EXISTS {tbl} (
+            timestamp TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            sma_5 REAL,
+            sma_20 REAL,
+            sma_5_high REAL,
+            sma_5_low REAL,
+            sma_20_high REAL,
+            sma_20_low REAL,
+            PRIMARY KEY (timestamp, symbol)
+        );
+""")
     conn.commit()
 
 def store_equity_data(
@@ -714,14 +737,17 @@ def store_equity_data(
                 print("[WARN] 'volume' column missing — VWAP will be empty")
                 df['vwap'] = pd.NA
 
+        # Compute Awesome Oscillator (AO) values and colors
+        if 'ao_value' in df.columns:
+            df = add_ao_color(df)
         # Ensure table exists
         create_equity_table(conn, interval)
         tbl = f"equity_data_{interval}"
 
         insert_sql = f"""
             INSERT OR REPLACE INTO {tbl}
-            (timestamp, symbol, open, high, low, close, volume, vwap)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            (timestamp, symbol, open, high, low, close, volume, vwap, ao_value,ao_color, donchian_upper, donchian_lower, donchian_mid)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
 
         rows = []
@@ -739,7 +765,12 @@ def store_equity_data(
                 safe(row.get('low')),
                 safe(row.get('close')),
                 safe(row.get('volume')),
-                safe(row.get('vwap'))
+                safe(row.get('vwap')), 
+                safe(row.get('ao_value')),
+                safe(row.get('ao_color')),
+                safe(row.get('donchian_upper')),
+                safe(row.get('donchian_lower')),
+                safe(row.get('donchian_mid')),
             ))
 
         cur.executemany(insert_sql, rows)
@@ -749,16 +780,122 @@ def store_equity_data(
     finally:
         conn.close()
 
+def store_equity_sma_from_df(df: pd.DataFrame, symbol: str, interval: str, db_path: str = DB_PATH) -> int:
+    """
+    Compute SMA with high/low tracking on df and store into equity_sma_<interval>.
+    
+    Parameters:
+        df: DataFrame indexed by timestamp (DatetimeIndex). Must contain 'close', 'high', 'low'.
+        symbol: equity symbol (e.g., 'INFY').
+        interval: '1m','5m','15m' etc. used to name the table.
+        db_path: path to sqlite DB file
+        
+    Returns:
+        Number of rows inserted/updated
+    """
+    ensure_db_dir(db_path)
+    conn = sqlite3.connect(db_path, timeout=20)
+    
+    try:
+        # Import the new SMA function
+        from core.indicators import compute_smas_with_high_low
+        
+        # Compute SMAs with high/low tracking
+        df_smas = compute_smas_with_high_low(df)
+        
+        # Prepare rows for insertion
+        rows = []
+        for ts, row in df_smas.iterrows():
+            ts_str = ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, 'strftime') else str(ts)
+            
+            def safe(x):
+                return float(x) if pd.notna(x) else None
+            
+            rows.append((
+                ts_str,
+                symbol,
+                safe(row.get('sma_5')),
+                safe(row.get('sma_20')),
+                safe(row.get('sma_5_high')),
+                safe(row.get('sma_5_low')),
+                safe(row.get('sma_20_high')),
+                safe(row.get('sma_20_low'))
+            ))
+        
+        # Ensure table exists and insert data
+        create_equity_sma_table(conn, interval)
+        tbl = f"equity_sma_{interval}"
+        cur = conn.cursor()
+        
+        cur.executemany(
+            f"INSERT OR REPLACE INTO {tbl}(timestamp, symbol, sma_5, sma_20, sma_5_high, sma_5_low, sma_20_high, sma_20_low) VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+            rows
+        )
+        
+        conn.commit()
+        return len(rows)
+        
+    finally:
+        conn.close()
+
+def fetch_equity_sma_data(
+    symbol: str,
+    start: str = None,
+    end: str = None,
+    interval: str = '5m',
+    limit: int = 200,
+    db_path: str = DB_PATH
+) -> pd.DataFrame:
+    """
+    Fetch equity SMA data from equity_sma_<interval>.
+    
+    Parameters:
+        symbol: equity symbol (e.g., 'INFY').
+        start: start datetime string (optional).
+        end: end datetime string (optional).
+        interval: '1m','5m','15m' etc. used to name the table.
+        limit: max rows to fetch (default 200, None for no limit).
+        
+    Returns:
+        DataFrame indexed by timestamp with SMA and high/low data.
+    """
+    conn = sqlite3.connect(db_path)
+    tbl = f"equity_sma_{interval}"
+    query = f"SELECT * FROM {tbl} WHERE symbol = ?"
+    params = [symbol]
+
+    if start:
+        query += " AND timestamp >= ?"
+        params.append(start)
+    if end:
+        query += " AND timestamp <= ?"
+        params.append(end)
+
+    query += " ORDER BY timestamp DESC"
+    if limit is not None:
+        query += f" LIMIT {int(limit)}"
+
+    df = pd.read_sql_query(query, conn, params=params, parse_dates=["timestamp"])
+    df.set_index("timestamp", inplace=True)
+    df = standardize_column_names(df)
+
+    # Reverse if limited to get chronological order
+    if limit is not None:
+        df = df.iloc[::-1]
+
+    conn.close()
+    return df
+
 def migrate_create_equity_tables(db_path=DB_PATH):
-    """Ensure equity_data_1m/5m/15m tables exist."""
+    """Ensure equity_data_1m/5m/15m and equity_sma_1m/5m/15m tables exist."""
     conn = sqlite3.connect(db_path)
     try:
         for interval in ["1m", "5m", "15m"]:
             create_equity_table(conn, interval)
-        print("Equity tables created/verified successfully.")
+            create_equity_sma_table(conn, interval)
+        print("Equity tables and SMA tables created/verified successfully.")
     finally:
         conn.close()
-
 
 def fetch_equity_data(
     symbol: str,

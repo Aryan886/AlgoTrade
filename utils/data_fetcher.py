@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from utils.utility import get_data_path
 from broker.zerodha_client import kite_from_saved_token
 from utils.db_func import store_market_data, store_signal, store_sma_from_df, store_equity_data
-from core.indicators import compute_indicators, generate_signals
+from core.indicators import compute_indicators, generate_signals, compute_smas
 
 
 DB_PATH = 'db/trading_bot.db'
@@ -360,6 +360,13 @@ class EquityDataFetcher:
             typical_price = (df['high'] + df['low'] + df['close']) / 3
             df['vwap'] = (typical_price * df['volume']).cumsum() / df['volume'].cumsum()
 
+            #Compute additional indicators
+            df = compute_indicators(df)
+
+            #Compute SMAs
+            df = compute_smas(df)
+
+
             return df
         
         except Exception as e:
@@ -367,7 +374,7 @@ class EquityDataFetcher:
             return None
 
 
-def fetch_and_save_equity(symbol: str, intervals = ["1m","5m", "15m"], db_path=DB_PATH):
+def fetch_and_save_equity(symbol: str, intervals = ["1m","5m", "15m"],return_interval=None, db_path=DB_PATH):
     """
     Fetch and store equity OHLCV+VWAP for given stock symbol into equity_data_<interval> tables.
     """
@@ -376,6 +383,7 @@ def fetch_and_save_equity(symbol: str, intervals = ["1m","5m", "15m"], db_path=D
         return
 
     results = []
+    return_df = None
     now = datetime.now()
     from_date = now - timedelta(days=5)  # adjust as needed
     to_date = now
@@ -385,7 +393,23 @@ def fetch_and_save_equity(symbol: str, intervals = ["1m","5m", "15m"], db_path=D
         if df is not None and not df.empty:
             store_equity_data(df, symbol, interval=interval, db_path=db_path)
             print(f"[EQUITY STORED] {symbol} ({interval}) with {len(df)} rows")
+            
+            # Store equity SMA data with high/low tracking
+            from utils.db_func import store_equity_sma_from_df
+            try:
+                sma_rows = store_equity_sma_from_df(df, symbol, interval=interval, db_path=db_path)
+                print(f"[EQUITY SMA STORED] {symbol} ({interval}) SMA with {sma_rows} rows")
+            except Exception as e:
+                print(f"[EQUITY SMA ERROR] Failed to store SMA data for {symbol} ({interval}): {e}")
+            
             results.append((interval, df))
+
+        if return_interval and interval == return_interval:
+            df.dropna(inplace=True)
+            return_df = df.copy()
+            
+    if return_interval:
+        return results, return_df
     return results
 
 if __name__ == "__main__":

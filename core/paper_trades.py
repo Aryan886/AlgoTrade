@@ -44,7 +44,6 @@ class PaperTraderDonchian:
         #json file
         self.active_position_file = "active_position.json"
 
-
         #Load up position if available...
         self.load_position()
 
@@ -91,6 +90,15 @@ class PaperTraderDonchian:
                 self.adjustment_history = data.get('adjustment_history', [])
                 self.adjustment_impact = data.get('adjustment_cost', 0)
                 self.entry_criteria = data.get('entry_criteria')
+                
+                # Initialize new replacement tracking fields if they don't exist
+                if self.position:
+                    if 'replacement_cycles' not in self.position:
+                        self.position['replacement_cycles'] = 0
+                    if 'last_replacement_attempt' not in self.position:
+                        self.position['last_replacement_attempt'] = None
+                    if 'waiting_for_replacement' not in self.position:
+                        self.position['waiting_for_replacement'] = False
                 
                 # Restore datetime objects
                 if data.get('entry_time'):
@@ -610,6 +618,9 @@ class PaperTraderDonchian:
 
             if not candidates:
                 self.logger.warning("No suitable replacement options found")
+                # Increment cycle counter for timeout tracking
+                self.position["replacement_cycles"] = self.position.get("replacement_cycles", 0) + 1
+                self.save_position()
                 return
 
             # best candidate
@@ -628,6 +639,11 @@ class PaperTraderDonchian:
                 self.position["entry_prices"]["pe"] = best_price
                 self.position["current_prices"]["pe"] = best_price
 
+            # Reset waiting state when replacement is successful
+            self.position["waiting_for_replacement"] = False
+            self.position["replacement_cycles"] = 0
+            self.position["last_replacement_attempt"] = None
+            
             self.save_position()
             self.logger.info(f"Replacement successful: added {target_type} {best_sym} at {best_price}")
         except Exception as e:
@@ -768,9 +784,29 @@ class PaperTraderDonchian:
             if not self.position.get("pe_closed", False):
                 active_legs['PE'] = self.position['current_prices'].get('PE', 0)
 
+            ce_closed = self.position.get("ce_closed", False)
+            pe_closed = self.position.get("pe_closed", False)
+            waiting_for_replacement = self.position.get("waiting_for_replacement", False)
+
+            # Check if we're waiting for replacement and handle timeout
+            if waiting_for_replacement:
+                replacement_cycles = self.position.get("replacement_cycles", 0)
+                if replacement_cycles >= 2:
+                    self.logger.info(f"REPLACEMENT TIMEOUT - No replacement found after {replacement_cycles} cycles, squaring off trade")
+                    self.close_position("all")
+                    return
+                else:
+                    self.logger.info(f"WAITING FOR REPLACEMENT - Cycle {replacement_cycles}/2, skipping price check")
+                    return
+
             #Adjustment logic requires both legs to be active
             if len(active_legs) < 2:
                 self.logger.debug("Adjustment check skipped - one or both legs already closed")
+                # Reset waiting state if both legs are closed
+                if waiting_for_replacement:
+                    self.position["waiting_for_replacement"] = False
+                    self.position["replacement_cycles"] = 0
+                    self.save_position()
                 return
             
             ce_price = self.position['current_prices'].get('CE', 0)
@@ -781,7 +817,6 @@ class PaperTraderDonchian:
                 ce_price = float('inf')
             if self.position.get("pe_closed", False):
                 pe_price = float('inf')
-
 
             # ADD DETAILED LOGGING
             self.logger.debug(f"ADJUSTMENT CHECK - CE: {ce_price}, PE: {pe_price}")
@@ -805,6 +840,12 @@ class PaperTraderDonchian:
                     else:
                         self.logger.info(f"Closing PE option at {pe_price} (higher than CE {ce_price})")
                         self.close_position('pe')
+
+                    # Set waiting state and increment cycles
+                    self.position["waiting_for_replacement"] = True
+                    self.position["replacement_cycles"] = self.position.get("replacement_cycles", 0) + 1
+                    self.position["last_replacement_attempt"] = datetime.now().isoformat()
+                    self.save_position()
 
                     # Find replacement option
                     self.logger.info("Searching for replacement option...")
@@ -1101,6 +1142,9 @@ class PaperTraderDonchian:
                 "entry_time": now_iso,
                 "ce_closed": False,
                 "pe_closed": False,
+                "replacement_cycles": 0,
+                "last_replacement_attempt": None,
+                "waiting_for_replacement": False,
             }
 
             # initialize adjustment containers if missing in object model

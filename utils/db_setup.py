@@ -149,6 +149,41 @@ def create_tables(db_path='db/trading_bot.db'):
         );
     """)
 
+    #10. Equity Data Tables for 1m, 5m, 15m
+    for interval in ['1m', '5m', '15m']:
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS equity_data_{interval} (
+                timestamp TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                open REAL,
+                high REAL,
+                low REAL,
+                close REAL,
+                volume REAL,
+                vwap REAL,
+                ao_value REAL,
+                donchian_upper REAL,
+                donchian_lower REAL,
+                donchian_mid REAL,
+                PRIMARY KEY (timestamp, symbol)
+            );
+        """)
+        
+        #11. Equity SMA Tables for 1m, 5m, 15m
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS equity_sma_{interval} (
+                timestamp TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                sma_5 REAL,
+                sma_20 REAL,
+                sma_5_high REAL,
+                sma_5_low REAL,
+                sma_20_high REAL,
+                sma_20_low REAL,
+                PRIMARY KEY (timestamp, symbol)
+            );
+        """)
+
     conn.commit()
     conn.close()
     print("Database schema created successfully.")

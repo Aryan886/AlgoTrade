@@ -237,6 +237,31 @@ class MarketDataAutomation:
         logger.error(f"Failed to fetch {interval} data after {max_retries} attempts")
         return None
     
+    def fetch_equity_with_retry(self, interval, max_retries=3):
+        """Fetch equity data with retry logic"""
+        if not self.is_market_open():
+            logger.info(f"Market is closed, skipping {interval} equity data fetch")
+            return None
+            
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Fetching {interval} equity data (attempt {attempt + 1}/{max_retries})...")
+                _, df = fetch_and_save_equity("INFY", intervals=[interval], return_interval=interval) 
+                
+                if df is not None and not df.empty:
+                    logger.info(f"Successfully fetched {len(df)} rows of {interval} equity data")
+                    return df
+                else:
+                    logger.warning(f"Failed to fetch {interval} equity data - empty result")
+                    
+            except Exception as e:
+                logger.error(f"Error fetching {interval} equity data (attempt {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(5 * (attempt + 1))  # Exponential backoff
+                    
+        logger.error(f"Failed to fetch {interval} equity data after {max_retries} attempts")
+        return None
+
     def fetch_1m_data(self):
         """Fetch 1-minute data"""
         return self.fetch_data_with_retry('1m')
@@ -251,19 +276,15 @@ class MarketDataAutomation:
     
     def fetch_1m_equity_data(self):
         """Fetch 1minute equity data"""
-        df = fetch_and_save_equity("INFY", interval='1m', return_df=True)
-        return df if df is not None and not df.empty else None
+        return self.fetch_equity_with_retry('1m')
     
     def fetch_5m_equity_data(self):
         """Fetch 5minute equity data"""
-        df = fetch_and_save_equity("INFY", interval='5m', return_df=True)
-        return df if df is not None and not df.empty else None
+        return self.fetch_equity_with_retry('5m')
     
     def fetch_15m_equity_data(self):
         """Fetch 15minute equity data"""
-        df = fetch_and_save_equity("INFY", interval='15m', return_df=True)
-        return df if df is not None and not df.empty else None
-    
+        return self.fetch_equity_with_retry('15m')
     
     def run_paper_trading_cycle(self):
         """Run one cycle of paper trading logic"""
