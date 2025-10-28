@@ -14,6 +14,7 @@ from broker.zerodha_client import kite_from_saved_token
 from core.strat_donchian import donchian_ao_strategy
 from core.paper_trades import PaperTraderDonchian
 from core.paper_trder_sma import PaperTraderSMA
+from core.equity_trader import EquityPaperTrader
 import argparse
 import json
 
@@ -137,7 +138,8 @@ class MarketDataAutomation:
 
         self.paper_trader = PaperTraderDonchian("NIFTY50")
         self.sma_trader = PaperTraderSMA("NIFTY50")
-        logger.info("Paper traders (Donchian & SMA) successfully initialised....")
+        self.equity_trader = EquityPaperTrader("INFY")
+        logger.info("Paper traders (Donchian, SMA & Equity) successfully initialised....")
         
         # Market holidays for 2025 (you can update this list)
         self.market_holidays_2025 = [
@@ -379,6 +381,55 @@ class MarketDataAutomation:
         except Exception as e:
             logger.error(f"Error in SMA paper trading cycle: {e}")
 
+    def run_equity_paper_trading_cycle(self):
+        """Run one cycle of Equity paper trading logic"""
+        if not self.is_market_open():
+            return
+            
+        try:
+            logger.info("Running Equity paper trading cycle...")
+            
+            # Check for new signals if no active position
+            if not self.equity_trader.has_active_position():
+                signal = self.equity_trader.equity_strategy(self.equity_trader.symbol) if hasattr(self.equity_trader, 'equity_strategy') else None
+                if not signal:
+                    # Import and call the Equity strategy directly
+                    from core.equity_strat import equity_strategy
+                    signal = equity_strategy(self.equity_trader.symbol)
+                
+                if signal:
+                    logger.info("New Equity trading signal received, executing paper trade")
+                    try:
+                        success = self.equity_trader.execute_paper_trade(signal)
+                        if success:
+                            logger.info("Equity paper trade executed successfully")
+                        else:
+                            logger.error("Equity paper trade execution failed")
+                    except Exception as trade_error:
+                        logger.error(f"Exception during Equity paper trade execution: {trade_error}")
+                else:
+                    logger.debug("No new Equity trading signals")
+            else:
+                logger.debug("Equity trader has active position, skipping signal check")
+
+            # Manage existing position
+            if self.equity_trader.has_active_position():
+                logger.info("Managing existing Equity positions")
+                try:
+                    self.equity_trader.manage_existing_position()
+                    
+                    # Log current position status
+                    status = self.equity_trader.get_position_status()
+                    if isinstance(status, dict):
+                        logger.info(f"Equity Position Status - P&L: Rs{status.get('current_pnl', 0):.2f}")
+                except Exception as manage_error:
+                    logger.error(f"Error managing Equity positions: {manage_error}")
+            else:
+                logger.debug("No active Equity position to manage")
+                
+        except Exception as e:
+            logger.error(f"Error in Equity paper trading cycle: {e}")
+
     def get_paper_trading_summary(self):
         """Get detailed paper trading summary for both Donchian and SMA traders"""
         try:
@@ -457,6 +508,9 @@ class MarketDataAutomation:
         
         #SMA PAPER TRADING - Run every minute during market hours
         schedule.every().minute.do(self.run_sma_paper_trading_cycle)
+
+        #Equity PAPER TRADING - Run every minute during market hours
+        schedule.every().minute.do(self.run_equity_paper_trading_cycle)
 
         logger.info("Schedule setup completed:")
         logger.info("- 1m data: Every minute (during market hours)")

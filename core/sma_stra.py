@@ -6,7 +6,7 @@ from core.strat_donchian import emergency_column_fix
 from datetime import datetime
 
 # Initialize logger
-paper_logger, trade_logger, position_logger, sma_logger = setup_paper_trading_logger()
+paper_logger, trade_logger, position_logger, sma_logger, equity_logger = setup_paper_trading_logger()
 
 START_TIME = pd.to_datetime("09:15:00").time()
 

@@ -82,7 +82,15 @@ def setup_paper_trading_logger():
     sma_strategy_handler.setFormatter(detailed_formatter)
     sma_strategy_handler.setLevel(logging.DEBUG)
     
-    
+    #5. Logger for equity donchian strategy specific logs
+    equity_handler = RotatingFileHandler(
+        'logs/strat_equity.log',
+        maxBytes=5*1024*1024,
+        backupCount=3
+    )
+    equity_handler.setFormatter(detailed_formatter)
+    equity_handler.setLevel(logging.DEBUG)
+
     # Add handlers to logger
     paper_logger.addHandler(main_handler)
     
@@ -105,8 +113,12 @@ def setup_paper_trading_logger():
     sma_logger.addHandler(sma_strategy_handler)
     sma_logger.propagate = False  # Don't propagate to parent logger
 
+    equity_logger = logging.getLogger('paper_trading.strat_equity_donchian')
+    equity_logger.setLevel(logging.DEBUG)
+    equity_logger.handlers.clear()
+    equity_logger.addHandler(equity_handler)
 
-    return paper_logger, trade_logger, position_logger, sma_logger
+    return paper_logger, trade_logger, position_logger, sma_logger, equity_logger
 
 def standardize_column_names(df):
     """

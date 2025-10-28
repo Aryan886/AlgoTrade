@@ -10,7 +10,7 @@ from utils.utility import setup_paper_trading_logger
 from datetime import datetime
 
 # Initialize loggers
-paper_logger, trade_logger, position_logger, sma_logger = setup_paper_trading_logger()
+paper_logger, trade_logger, position_logger, sma_logger, equity_logger = setup_paper_trading_logger()
 
 CUTOFF_TIME = pd.to_datetime("13:00").time()
 

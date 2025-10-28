@@ -13,7 +13,7 @@ from typing import Dict, List, Optional
 os.makedirs('logs', exist_ok=True)
 
 # Initialize loggers
-paper_logger, trade_logger, position_logger, sma_logger = setup_paper_trading_logger()
+paper_logger, trade_logger, position_logger, sma_logger, equity_logger = setup_paper_trading_logger()
 
 class PaperTraderSMA:
     def __init__(self, symbol="NIFTY50"):
@@ -32,7 +32,7 @@ class PaperTraderSMA:
         self.signal_cooldown = 300  # 5 minutes in seconds
         
         # Loggers
-        paper_logger, trade_logger, position_logger, sma_logger = setup_paper_trading_logger()
+        paper_logger, trade_logger, position_logger, sma_logger, equity_logger = setup_paper_trading_logger()
         self.logger = paper_logger
         self.trade_logger = trade_logger
         self.position_logger = position_logger

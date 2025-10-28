@@ -12,7 +12,7 @@ from utils.black_scholes import (
 from utils.iv import ProductionIVCalculator
 from utils.utility import standardize_column_names
 import re
-from core.indicators import compute_smas, compute_intraday_vwap, add_ao_color
+from core.indicators import compute_smas, compute_intraday_vwap, add_ao_color, nifty_skipping_low, nifty_skipping_high
 
 DB_PATH = 'db/trading_bot.db'
 
@@ -41,10 +41,28 @@ def store_market_data(df, symbol: str = 'NIFTY50', interval: str = '5m', vix_val
     # Standardize columns to lowercase for Kite API compatibility
     df.columns = [col.lower() for col in df.columns]
 
+    #Add skipping low value for NIFTY50
+    try:
+        if symbol == 'NIFTY50' and 'low' in df.columns:
+            df = nifty_skipping_low(df)
+
+    except Exception as e:
+        print(f"[WARN] Error computing skipping low for NIFTY50: {e}")
+
+    #Add skipping high value for NIFTY50
+    try:
+        if symbol == 'NIFTY50' and 'high' in df.columns:
+            df = nifty_skipping_high(df)
+    except Exception as e:
+        print(f"[WARN] Error computing skipping high for NIFTY50: {e}")
+
+
     # Warn if any expected columns are missing
     missing_cols = [col for col in EXPECTED_COLUMNS if col not in df.columns]
     if missing_cols:
         print(f"[WARN] DataFrame is missing columns: {missing_cols}")
+
+    
 
     for ts, row in df.iterrows():
         # Convert timestamp to string and handle NaN values
@@ -59,12 +77,12 @@ def store_market_data(df, symbol: str = 'NIFTY50', interval: str = '5m', vix_val
                 return None
             except Exception:
                 return None
-        
+
         cursor.execute(f"""
             INSERT INTO {table_name} (
                 timestamp, symbol, open, high, low, close,
-                ao_value, donchian_upper, donchian_lower, donchian_mid
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                ao_value, donchian_upper, donchian_lower, donchian_mid, SL,SH
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """, (
             timestamp_str,
             symbol,
@@ -75,7 +93,9 @@ def store_market_data(df, symbol: str = 'NIFTY50', interval: str = '5m', vix_val
             safe_get_value(row, 'ao_value'),
             safe_get_value(row, 'donchian_upper'),
             safe_get_value(row, 'donchian_lower'),
-            safe_get_value(row, 'donchian_mid')
+            safe_get_value(row, 'donchian_mid'),
+            safe_get_value(row, 'SL'),
+            safe_get_value(row, 'SH')
         ))
 
     conn.commit()

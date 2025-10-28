@@ -287,7 +287,7 @@ def calculate_live_vix(spot_price=None, strike_window=300):
                 vix_donchian_lower=float(latest['vix_donchian_lower']) if pd.notna(latest['vix_donchian_lower']) else 0.0,
                 vix_donchian_mid=float(latest['vix_donchian_mid']) if pd.notna(latest['vix_donchian_mid']) else 0.0
             )
-            print(f"Live VIX calculated and stored: {vix_value:.2f} (with indicators)")
+            #print(f"Live VIX calculated and stored: {vix_value:.2f} (with indicators)")
             return vix_value
         else:
             print("Live VIX calculation failed")
@@ -314,7 +314,7 @@ def calculate_and_store_vix(symbol: str = "NIFTY50", spot_price: float = None, s
         symbol = "NIFTY50"
     if symbol == "NIFTY50" or symbol == "^NIFTY50":
         vix_check = calculate_live_vix(spot_price, strike_window)
-        print(f"Calculated vix is : {vix_check}")
+        #print(f"Calculated vix is : {vix_check}")
         return calculate_live_vix(spot_price, strike_window)
     else:
         print(f"Live VIX calculation not supported for symbol: {symbol}")

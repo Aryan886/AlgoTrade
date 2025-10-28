@@ -700,3 +700,68 @@ def add_ao_color(df):
     df.loc[df['ao_value'] < df['ao_value'].shift(1), 'ao_color'] = -1  # Red
     
     return df
+
+def nifty_skipping_low(df: pd.DataFrame, filter_pct: float = 0.0025) -> float:
+    """
+    Calculate stop-loss level by finding the lowest low in the last 7 candles
+    and applying a filter percentage below it.
+    
+    Parameters:
+        df: DataFrame with OHLC data, must contain 'low' column
+        filter_pct: percentage below lowest low to set stop-loss
+    
+    Returns:
+        stop-loss price level (float)
+    """
+    if 'low' not in df.columns:
+        raise ValueError("DataFrame must contain 'low' column")
+    
+    df = df.copy()
+    
+    # Get the last 7 candles
+    recent_df = df.iloc[-7:]
+    
+    # Find the lowest low in these candles
+    lowest_low = recent_df['low'].min()
+
+    # Apply filter
+    #stop_loss = lowest_low - (lowest_low * filter_pct)
+
+    stop_loss = lowest_low
+
+    df['SL'] = stop_loss
+
+    return df
+
+def nifty_skipping_high(df: pd.DataFrame, filter_pct: float = 0.0025) -> float:
+    """
+    Calculate stop-loss level by finding the highest high in the last 7 candles
+    and applying a filter percentage above it.
+    
+    Parameters:
+        df: DataFrame with OHLC data, must contain 'high' column
+        filter_pct: percentage above highest high to set stop-loss
+    
+    Returns:
+        stop-loss price level (float)
+    """
+    if 'high' not in df.columns:
+        raise ValueError("DataFrame must contain 'high' column")
+    
+    df = df.copy()
+    
+    # Get the last 7 candles
+    recent_df = df.iloc[-7:]
+    
+    # Find the highest high in these candles
+    highest_high = recent_df['high'].max()
+
+    # Apply filter
+    #stop_loss = highest_high + (highest_high * filter_pct)
+
+    skipping_high = highest_high
+
+    df['SH'] = skipping_high
+
+    return df
+    
