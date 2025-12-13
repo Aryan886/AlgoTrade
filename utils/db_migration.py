@@ -48,6 +48,55 @@ def migrate_add_vix_column(db_path='db/trading_bot.db'):
     conn.close()
     print("\nMigration completed!")
 
+def migrate_add_sl_sh_columns(db_path='db/trading_bot.db'):
+    """
+    Adds SL and SH columns to existing market data tables.
+    This preserves existing data while adding the new columns.
+    """
+    if not os.path.exists(db_path):
+        print(f"Database {db_path} does not exist. Creating new database with SL/SH columns...")
+        from utils.db_setup import create_tables
+        create_tables(db_path)
+        return
+    
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    # Tables that need SL and SH columns
+    tables = ['market_data_1m', 'market_data_5m', 'market_data_15m']
+    
+    for table in tables:
+        try:
+            # Check if table exists
+            cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'")
+            if cursor.fetchone():
+                # Check which columns already exist
+                cursor.execute(f"PRAGMA table_info({table})")
+                columns = [column[1] for column in cursor.fetchall()]
+                
+                # Add SL column if missing
+                if 'SL' not in columns:
+                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN SL REAL")
+                    print(f"✓ Added SL column to {table}")
+                else:
+                    print(f"✓ {table} already has SL column")
+                
+                # Add SH column if missing
+                if 'SH' not in columns:
+                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN SH REAL")
+                    print(f"✓ Added SH column to {table}")
+                else:
+                    print(f"✓ {table} already has SH column")
+            else:
+                print(f"⚠ Table {table} does not exist yet")
+                
+        except Exception as e:
+            print(f"✗ Error migrating {table}: {e}")
+    
+    conn.commit()
+    conn.close()
+    print("\nMigration completed!")
+
 def verify_migration(db_path='db/trading_bot.db'):
     """
     Verifies that all market data tables have the vix_value column.
@@ -73,7 +122,41 @@ def verify_migration(db_path='db/trading_bot.db'):
     
     conn.close()
 
+def verify_sl_sh_migration(db_path='db/trading_bot.db'):
+    """
+    Verifies that all market data tables have the SL and SH columns.
+    """
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    tables = ['market_data_1m', 'market_data_5m', 'market_data_15m']
+    
+    print("\nVerifying SL/SH migration:")
+    for table in tables:
+        try:
+            cursor.execute(f"PRAGMA table_info({table})")
+            columns = [column[1] for column in cursor.fetchall()]
+            
+            if 'SL' in columns and 'SH' in columns:
+                print(f"✓ {table}: SL and SH columns present")
+            else:
+                missing = []
+                if 'SL' not in columns:
+                    missing.append('SL')
+                if 'SH' not in columns:
+                    missing.append('SH')
+                print(f"✗ {table}: Missing columns: {missing}")
+                
+        except Exception as e:
+            print(f"✗ {table}: Error checking table - {e}")
+    
+    conn.close()
+
 if __name__ == "__main__":
     print("Running database migration to add VIX columns...")
     migrate_add_vix_column()
-    verify_migration() 
+    verify_migration()
+    
+    print("\nRunning database migration to add SL/SH columns...")
+    migrate_add_sl_sh_columns()
+    verify_sl_sh_migration() 

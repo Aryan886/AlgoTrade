@@ -59,7 +59,9 @@ def create_tables(db_path='db/trading_bot.db'):
             donchian_upper REAL,
             donchian_lower REAL,
             donchian_mid REAL,
-            vix_value REAL
+            vix_value REAL,
+            SL REAL,
+            SH REAL
         );
     """)
 
@@ -77,7 +79,9 @@ def create_tables(db_path='db/trading_bot.db'):
             donchian_upper REAL,
             donchian_lower REAL,
             donchian_mid REAL,
-            vix_value REAL
+            vix_value REAL,
+            SL REAL,
+            SH REAL
         );
     """)
 
@@ -95,7 +99,9 @@ def create_tables(db_path='db/trading_bot.db'):
             donchian_upper REAL,
             donchian_lower REAL,
             donchian_mid REAL,
-            vix_value REAL
+            vix_value REAL,
+            SL REAL,
+            SH REAL
         );
     """)
 

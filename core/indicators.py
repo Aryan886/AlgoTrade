@@ -641,6 +641,9 @@ def compute_smas(df: pd.DataFrame) -> pd.DataFrame:
     #rolling with min_period=1 so early rows get valid values
     df2['sma_5'] = df2['close'].rolling(window=5, min_periods=1).mean()
     df2['sma_20'] = df2['close'].rolling(window=20, min_periods=1).mean()
+
+    df2['sma_50'] = df['close'].rolling(window=50).mean()
+    df2['sma_200'] = df['close'].rolling(window=200).mean()
     return df2
 
 def compute_smas_with_high_low(df: pd.DataFrame) -> pd.DataFrame:
@@ -701,67 +704,56 @@ def add_ao_color(df):
     
     return df
 
-def nifty_skipping_low(df: pd.DataFrame, filter_pct: float = 0.0025) -> float:
+def nifty_skipping_low(df: pd.DataFrame, filter_pct: float = 0.0025) -> pd.DataFrame:
     """
-    Calculate stop-loss level by finding the lowest low in the last 7 candles
-    and applying a filter percentage below it.
-    
+    Compute 'skipping low' (stop-loss support) as the rolling minimum of the last 7 lows.
+
     Parameters:
-        df: DataFrame with OHLC data, must contain 'low' column
-        filter_pct: percentage below lowest low to set stop-loss
-    
+        df: DataFrame with a DatetimeIndex and column 'low'
+        filter_pct: Optional filter percentage below the lowest low
+
     Returns:
-        stop-loss price level (float)
+        DataFrame with new column 'sl' (skipping low)
     """
     if 'low' not in df.columns:
         raise ValueError("DataFrame must contain 'low' column")
-    
+
     df = df.copy()
-    
-    # Get the last 7 candles
-    recent_df = df.iloc[-7:]
-    
-    # Find the lowest low in these candles
-    lowest_low = recent_df['low'].min()
 
-    # Apply filter
-    #stop_loss = lowest_low - (lowest_low * filter_pct)
+    #  Ensure timestamp index is unique and sorted
+    df = df[~df.index.duplicated(keep='last')].sort_index()
 
-    stop_loss = lowest_low
+    #  Rolling minimum for last 7 candles
+    rolling_low = df['low'].rolling(window=7, min_periods=1).min()
 
-    df['SL'] = stop_loss
+    #  Optionally apply filter (if you want it slightly below)
+    df['SL'] = rolling_low * (1 - filter_pct)
 
     return df
 
-def nifty_skipping_high(df: pd.DataFrame, filter_pct: float = 0.0025) -> float:
+def nifty_skipping_high(df: pd.DataFrame, filter_pct: float = 0.0025) -> pd.DataFrame:
     """
-    Calculate stop-loss level by finding the highest high in the last 7 candles
-    and applying a filter percentage above it.
-    
+    Compute 'skipping high' (resistance) as the rolling maximum of the last 7 highs.
+
     Parameters:
-        df: DataFrame with OHLC data, must contain 'high' column
-        filter_pct: percentage above highest high to set stop-loss
-    
+        df: DataFrame with a DatetimeIndex and column 'high'
+        filter_pct: Optional filter percentage above the highest high
+
     Returns:
-        stop-loss price level (float)
+        DataFrame with new column 'sh' (skipping high)
     """
     if 'high' not in df.columns:
         raise ValueError("DataFrame must contain 'high' column")
-    
+
     df = df.copy()
-    
-    # Get the last 7 candles
-    recent_df = df.iloc[-7:]
-    
-    # Find the highest high in these candles
-    highest_high = recent_df['high'].max()
 
-    # Apply filter
-    #stop_loss = highest_high + (highest_high * filter_pct)
+    #  Ensure timestamp index is unique and sorted
+    df = df[~df.index.duplicated(keep='last')].sort_index()
 
-    skipping_high = highest_high
+    #  Rolling maximum for last 7 candles
+    rolling_high = df['high'].rolling(window=7, min_periods=1).max()
 
-    df['SH'] = skipping_high
+    #  Optionally apply filter (if you want it slightly above)
+    df['SH'] = rolling_high * (1 + filter_pct)
 
     return df
-    

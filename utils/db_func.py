@@ -28,60 +28,180 @@ EXPECTED_COLUMNS = ['open', 'high', 'low', 'close', 'ao_value', 'donchian_upper'
 def ensure_db_dir(path=DB_PATH):
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
-#Stores OHLCV + AO + Donchian channel data into the market_data table.
+
 def store_market_data(df, symbol: str = 'NIFTY50', interval: str = '5m', vix_value: Optional[float] = None, db_path='db/trading_bot.db'):
+#Stores OHLCV + AO + Donchian channel data into the market_data table.
     """
     Stores processed DataFrame into respective interval-based market_data table.
     Now includes VIX data alongside other market data.
+    This version is robust to index duplicates, column-case differences, and
+    merges last-N DB rows to compute rolling SL/SH correctly.
     """
     table_name = f"market_data_{interval}"
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
-    # Standardize columns to lowercase for Kite API compatibility
+    # Normalize incoming column names to lowercase for consistency
+    df = df.copy()
     df.columns = [col.lower() for col in df.columns]
 
-    #Add skipping low value for NIFTY50
+    # --- Robust DB-aware merging + timezone normalization + SL/SH compute ---
     try:
-        if symbol == 'NIFTY50' and 'low' in df.columns:
-            df = nifty_skipping_low(df)
+        if symbol == "NIFTY50":
+            # Fetch last 6 candles for SL/SH window context
+            prev_df = fetch_market_data(symbol=symbol, limit=6, interval=interval, db_path=db_path)
+            print(f"[DEBUG] prev_df fetched: rows={len(prev_df) if prev_df is not None and not prev_df.empty else 0}")
+
+            if prev_df is None or prev_df.empty:
+                prev_df = pd.DataFrame()
+
+            incoming = df.copy()
+            incoming.columns = [c.lower() for c in incoming.columns]
+           
+
+            # -----------------------------
+            # STEP 1: Normalize timestamps as columns (not index)
+            # -----------------------------
+            if not prev_df.empty:
+                prev_df = prev_df.reset_index()
+                if 'timestamp' not in prev_df.columns:
+                    prev_df = prev_df.rename(columns={prev_df.columns[0]: 'timestamp'})
+            else:
+                prev_df = pd.DataFrame(columns=['timestamp'])
+
+            incoming = incoming.reset_index()
+            if 'timestamp' not in incoming.columns:
+                incoming = incoming.rename(columns={incoming.columns[0]: 'timestamp'})
+
+            # Convert to datetime
+            prev_df['timestamp'] = pd.to_datetime(prev_df['timestamp'], errors='coerce')
+            incoming['timestamp'] = pd.to_datetime(incoming['timestamp'], errors='coerce')
+
+            # -----------------------------
+            # STEP 2: Timezone normalization
+            # -----------------------------
+            def normalize_timezone(df1, df2):
+                """Normalize timezones between two dataframes."""
+                if df1.empty or df2.empty:
+                    return df1, df2
+                
+                tz1 = df1['timestamp'].dt.tz if hasattr(df1['timestamp'].dt, 'tz') else None
+                tz2 = df2['timestamp'].dt.tz if hasattr(df2['timestamp'].dt, 'tz') else None
+                
+                # Both naive - no action needed
+                if tz1 is None and tz2 is None:
+                    return df1, df2
+                
+                # One is aware, one is naive - localize the naive one
+                if tz1 is not None and tz2 is None:
+                    df2['timestamp'] = df2['timestamp'].dt.tz_localize(tz1)
+                elif tz1 is None and tz2 is not None:
+                    df1['timestamp'] = df1['timestamp'].dt.tz_localize(tz2)
+                # Both aware but different - convert to UTC
+                elif str(tz1) != str(tz2):
+                    df1['timestamp'] = df1['timestamp'].dt.tz_convert('UTC')
+                    df2['timestamp'] = df2['timestamp'].dt.tz_convert('UTC')
+                
+                return df1, df2
+
+            prev_df, incoming = normalize_timezone(prev_df, incoming)
+
+            # -----------------------------
+            # STEP 3: Deduplicate using string representation
+            # -----------------------------
+            prev_df['ts_str'] = prev_df['timestamp'].astype(str)
+            incoming['ts_str'] = incoming['timestamp'].astype(str)
+
+            prev_df = prev_df.drop_duplicates(subset=['ts_str'], keep='last').copy()
+            incoming = incoming.drop_duplicates(subset=['ts_str'], keep='last').copy()
+            # Remove duplicate columns (keep first occurrence)
+            incoming = incoming.loc[:, ~incoming.columns.duplicated(keep='first')]
+            prev_df = prev_df.loc[:, ~prev_df.columns.duplicated(keep='first')]
+
+            # -----------------------------
+            # STEP 4: Combine DataFrames (keep as columns, not index yet)
+            # -----------------------------
+            print(f"[DEBUG] prev_df.index type: {type(prev_df.index)}, is unique: {prev_df.index.is_unique}")
+            print(f"[DEBUG] incoming.index type: {type(incoming.index)}, is unique: {incoming.index.is_unique}")
+            print(f"[DEBUG] prev_df.index: {prev_df.index.tolist()[:10] if len(prev_df) > 0 else 'empty'}")
+            print(f"[DEBUG] incoming.index: {incoming.index.tolist()[:10] if len(incoming) > 0 else 'empty'}")
+            print(f"[DEBUG] prev_df.columns: {prev_df.columns.tolist()}")
+            print(f"[DEBUG] prev_df duplicate columns: {prev_df.columns[prev_df.columns.duplicated()].tolist()}")
+            print(f"[DEBUG] incoming.columns: {incoming.columns.tolist()}")
+            print(f"[DEBUG] incoming duplicate columns: {incoming.columns[incoming.columns.duplicated()].tolist()}")
+
+            combined = pd.concat([prev_df, incoming], axis=0, ignore_index=True)
+            
+            # Final deduplication on combined data
+            combined = combined.drop_duplicates(subset=['ts_str'], keep='last').copy()
+            combined = combined.drop(columns=['ts_str'])
+            
+            # Sort by timestamp
+            combined = combined.sort_values('timestamp').reset_index(drop=True)
+            
+            print(f"[DEBUG] Combined rows after dedup: {len(combined)}")
+
+            # -----------------------------
+            # STEP 5: Compute SL/SH using positional rolling (NO INDEX NEEDED)
+            # -----------------------------
+            # Ensure numeric columns
+            combined['low'] = pd.to_numeric(combined['low'], errors='coerce')
+            combined['high'] = pd.to_numeric(combined['high'], errors='coerce')
+
+            # Positional rolling window (works on integer positions)
+            window = 7
+            combined['SL'] = combined['low'].rolling(window=window, min_periods=1).min() * (1 - 0.0025)
+            combined['SH'] = combined['high'].rolling(window=window, min_periods=1).max() * (1 + 0.0025)
+
+            # -----------------------------
+            # STEP 6: Extract only the incoming batch rows
+            # -----------------------------
+            # Take the last N rows where N = len(incoming)
+            tail_len = len(incoming)
+            result = combined.tail(tail_len).copy()
+            
+            # Reset index for final dataframe
+            result = result.reset_index(drop=True)
+            
+            print(f"[DEBUG] Final result rows: {len(result)}, SL/SH computed successfully")
+            
+            df = result.copy()
 
     except Exception as e:
-        print(f"[WARN] Error computing skipping low for NIFTY50: {e}")
-
-    #Add skipping high value for NIFTY50
-    try:
-        if symbol == 'NIFTY50' and 'high' in df.columns:
-            df = nifty_skipping_high(df)
-    except Exception as e:
-        print(f"[WARN] Error computing skipping high for NIFTY50: {e}")
-
+        print(f"[ERROR] Error computing skipping low/high for {symbol}: {e}")
+        import traceback
+        traceback.print_exc()
 
     # Warn if any expected columns are missing
     missing_cols = [col for col in EXPECTED_COLUMNS if col not in df.columns]
     if missing_cols:
         print(f"[WARN] DataFrame is missing columns: {missing_cols}")
 
-    
-
-    for ts, row in df.iterrows():
-        # Convert timestamp to string and handle NaN values
-        timestamp_str = ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, 'strftime') else str(ts)
-        
-        # Safe value extraction function
-        def safe_get_value(row, column_name):
-            try:
-                if column_name in df.columns:
-                    value = row[column_name]
+    # Case-insensitive safe_get_value
+    def safe_get_value(row, column_name):
+        try:
+            for col in row.index:
+                if str(col).lower() == str(column_name).lower():
+                    value = row[col]
                     return float(value) if pd.notna(value) else None
-                return None
-            except Exception:
-                return None
+            return None
+        except Exception:
+            return None
+
+    # Insert rows into database
+    for idx, row in df.iterrows():
+        # Get timestamp from row (it's now a column, not index)
+        timestamp_val = row.get('timestamp', idx)
+        
+        if hasattr(timestamp_val, 'strftime'):
+            timestamp_str = timestamp_val.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            timestamp_str = str(timestamp_val)
 
         cursor.execute(f"""
             INSERT INTO {table_name} (
                 timestamp, symbol, open, high, low, close,
-                ao_value, donchian_upper, donchian_lower, donchian_mid, SL,SH
+                ao_value, donchian_upper, donchian_lower, donchian_mid, SL, SH
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """, (
             timestamp_str,
@@ -640,6 +760,8 @@ def create_sma_table(conn: sqlite3.Connection, interval : str):
             symbol TEXT NOT NULL,
             sma_5 REAL,
             sma_20 REAL,
+            sma_50 REAL,
+            sma_200 REAL,
             PRIMARY KEY (timestamp, symbol)
         );      
     """)
@@ -653,16 +775,22 @@ def store_sma_from_df(df: pd.DateOffset, symbol : str, interval: str, db_path= D
     - interval: '1m','5m','15m'
     - db_path: path to sqlite DB file
     """
+    df = df.copy()
+    df.columns = [col.lower() for col in df.columns]
     df_smas = compute_smas(df)
 
     #prepare rows for insertoin
     rows = []
     for ts, row in df_smas.iterrows():
-        #keep timestamp format consistent 
         ts_str = ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, "strftime") else str(ts)
-        sma5 = float(row['sma_5'] if pd.notna(row['sma_5']) else None)
-        sma20 = float(row['sma_20'] if pd.notna(row['sma_20']) else None)
-        rows.append((ts_str, symbol, sma5, sma20))
+        def safe(x): return float(x) if pd.notna(x) else None
+        rows.append((
+            ts_str, symbol,
+            safe(row.get('sma_5')),
+            safe(row.get('sma_20')),
+            safe(row.get('sma_50')),
+            safe(row.get('sma_200')),
+        ))
 
     conn = sqlite3.connect(db_path, timeout=20)
     try:
@@ -671,7 +799,7 @@ def store_sma_from_df(df: pd.DateOffset, symbol : str, interval: str, db_path= D
         cur = conn.cursor()
         #Insert or Replace so same code wont create duplicate
         cur.executemany(
-            f"INSERT OR REPLACE INTO {tbl}(timestamp,symbol, sma_5, sma_20) Values (?, ?, ?, ?);",
+            f"INSERT OR REPLACE INTO {tbl}(timestamp,symbol, sma_5, sma_20, sma_50, sma_200) Values (?, ?, ?, ?, ?, ?);",
             rows
         )
 
@@ -906,6 +1034,15 @@ def fetch_equity_sma_data(
     conn.close()
     return df
 
+def migrate_create_sma_tables(db_path=DB_PATH):
+    conn = sqlite3.connect(db_path)
+    try:
+        for interval in ["5m", "15m", "1h"]:
+            create_sma_table(conn, interval)
+        print("SMA tables (5m, 15m, 1h) verified or created.")
+    finally:
+        conn.close()
+
 def migrate_create_equity_tables(db_path=DB_PATH):
     """Ensure equity_data_1m/5m/15m and equity_sma_1m/5m/15m tables exist."""
     conn = sqlite3.connect(db_path)
@@ -963,5 +1100,5 @@ def fetch_equity_data(
     return df
 
 if __name__ == "__main__":
-    migrate_create_equity_tables()
+    migrate_create_sma_tables()
     print("Equity tables ensured.")
