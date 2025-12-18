@@ -10,6 +10,9 @@ db/trading_bot.db
 database/datas
 *.log
 *.json
+*.yaml
+*.yml
+*access_token.txt
 
 # Ignore virtual environments
 venv/
