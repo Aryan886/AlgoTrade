@@ -27,9 +27,11 @@ class TradingEngine:
         Used by /status endpoint and WebSocket.
         """
         return EngineStatus(
-            state=self.state,
-            active_position=self.active_position,
+            engine_state=self.state,
+            mode="manual-only",
+            position=self.active_position,
             last_update_ts=self.last_update_ts,
+            net_pnl= self.active_position.net_pnl if self.active_position else 0
         )
 
     # MANUAL TRADE FLOW

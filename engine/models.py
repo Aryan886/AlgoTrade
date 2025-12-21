@@ -53,7 +53,7 @@ class Position:
 
     monitoring: bool = False # True when bot is managing this position
 
-    adjustment_history: List[Adjustment] = field(default_factory=list)
+    #adjustment_history: List[Adjustment] = field(default_factory=list)
 
     notes : Optional[str] = None  # any additional notes about the position
 
@@ -66,5 +66,5 @@ class EngineStatus:
     engine_state: EngineState
     mode : str
     position: Optional[Position] = None
-    last_update_ts: str 
+    last_update_ts: Optional[datetime] = None 
     net_pnl: float = 0.0

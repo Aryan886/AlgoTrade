@@ -38715,3 +38715,18 @@
 2025-12-18 16:06:10,355 - INFO - Market is closed, skipping 5m data fetch
 2025-12-18 16:06:10,356 - INFO - Market is closed, skipping 5m equity data fetch
 2025-12-18 16:06:28,517 - INFO - Starting high-accuracy delta calculation...
+2025-12-20 08:11:00,567 - INFO - POSITION RESTORED FROM FILE:
+2025-12-20 08:11:00,576 - INFO -   CE: NIFTY25D1626200CE at 26.5
+2025-12-20 08:11:00,576 - INFO -   PE: NIFTY25D1625850PE at 18.275
+2025-12-20 08:11:00,582 - INFO -   Entry Time: 2025-12-12 11:45:31.005993
+2025-12-20 08:11:00,584 - INFO -   Adjustment Cost: 1.8750000000000142
+2025-12-20 08:11:00,584 - INFO -   Adjustments Count: 4
+2025-12-20 08:11:00,597 - INFO - POSITION RESTORED FROM FILE:
+2025-12-20 08:11:00,598 - INFO -   Symbol: INFY
+2025-12-20 08:11:00,599 - INFO -   Entry Price: 1626.1
+2025-12-20 08:11:00,601 - INFO -   Stop Loss: 1626.3
+2025-12-20 08:11:00,603 - INFO -   Quantity: 0.000244140625
+2025-12-20 08:11:00,603 - INFO -   Entry Time: 2025-12-18 15:07:59.194492
+2025-12-20 08:11:00,603 - INFO - Paper traders (Donchian, SMA & Equity) successfully initialised....
+2025-12-20 08:11:00,603 - INFO - Testing Kite API connection...
+2025-12-20 08:11:00,630 - ERROR - Connection test failed: HTTPSConnectionPool(host='api.kite.trade', port=443): Max retries exceeded with url: /instruments/NSE (Caused by NameResolutionError("<urllib3.connection.HTTPSConnection object at 0x0000021E904DADD0>: Failed to resolve 'api.kite.trade' ([Errno 11001] getaddrinfo failed)"))

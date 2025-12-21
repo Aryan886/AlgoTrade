@@ -59,9 +59,7 @@ def store_market_data(df, symbol: str = 'NIFTY50', interval: str = '5m', vix_val
             incoming.columns = [c.lower() for c in incoming.columns]
            
 
-            # -----------------------------
             # STEP 1: Normalize timestamps as columns (not index)
-            # -----------------------------
             if not prev_df.empty:
                 prev_df = prev_df.reset_index()
                 if 'timestamp' not in prev_df.columns:
@@ -77,9 +75,8 @@ def store_market_data(df, symbol: str = 'NIFTY50', interval: str = '5m', vix_val
             prev_df['timestamp'] = pd.to_datetime(prev_df['timestamp'], errors='coerce')
             incoming['timestamp'] = pd.to_datetime(incoming['timestamp'], errors='coerce')
 
-            # -----------------------------
             # STEP 2: Timezone normalization
-            # -----------------------------
+           
             def normalize_timezone(df1, df2):
                 """Normalize timezones between two dataframes."""
                 if df1.empty or df2.empty:
@@ -106,9 +103,8 @@ def store_market_data(df, symbol: str = 'NIFTY50', interval: str = '5m', vix_val
 
             prev_df, incoming = normalize_timezone(prev_df, incoming)
 
-            # -----------------------------
+           
             # STEP 3: Deduplicate using string representation
-            # -----------------------------
             prev_df['ts_str'] = prev_df['timestamp'].astype(str)
             incoming['ts_str'] = incoming['timestamp'].astype(str)
 
@@ -118,17 +114,16 @@ def store_market_data(df, symbol: str = 'NIFTY50', interval: str = '5m', vix_val
             incoming = incoming.loc[:, ~incoming.columns.duplicated(keep='first')]
             prev_df = prev_df.loc[:, ~prev_df.columns.duplicated(keep='first')]
 
-            # -----------------------------
             # STEP 4: Combine DataFrames (keep as columns, not index yet)
-            # -----------------------------
-            print(f"[DEBUG] prev_df.index type: {type(prev_df.index)}, is unique: {prev_df.index.is_unique}")
-            print(f"[DEBUG] incoming.index type: {type(incoming.index)}, is unique: {incoming.index.is_unique}")
-            print(f"[DEBUG] prev_df.index: {prev_df.index.tolist()[:10] if len(prev_df) > 0 else 'empty'}")
-            print(f"[DEBUG] incoming.index: {incoming.index.tolist()[:10] if len(incoming) > 0 else 'empty'}")
-            print(f"[DEBUG] prev_df.columns: {prev_df.columns.tolist()}")
-            print(f"[DEBUG] prev_df duplicate columns: {prev_df.columns[prev_df.columns.duplicated()].tolist()}")
-            print(f"[DEBUG] incoming.columns: {incoming.columns.tolist()}")
-            print(f"[DEBUG] incoming duplicate columns: {incoming.columns[incoming.columns.duplicated()].tolist()}")
+
+            #print(f"[DEBUG] prev_df.index type: {type(prev_df.index)}, is unique: {prev_df.index.is_unique}")
+            #print(f"[DEBUG] incoming.index type: {type(incoming.index)}, is unique: {incoming.index.is_unique}")
+            #print(f"[DEBUG] prev_df.index: {prev_df.index.tolist()[:10] if len(prev_df) > 0 else 'empty'}")
+            #print(f"[DEBUG] incoming.index: {incoming.index.tolist()[:10] if len(incoming) > 0 else 'empty'}")
+            #print(f"[DEBUG] prev_df.columns: {prev_df.columns.tolist()}")
+            #print(f"[DEBUG] prev_df duplicate columns: {prev_df.columns[prev_df.columns.duplicated()].tolist()}")
+            #print(f"[DEBUG] incoming.columns: {incoming.columns.tolist()}")
+            #print(f"[DEBUG] incoming duplicate columns: {incoming.columns[incoming.columns.duplicated()].tolist()}")
 
             combined = pd.concat([prev_df, incoming], axis=0, ignore_index=True)
             
@@ -141,21 +136,19 @@ def store_market_data(df, symbol: str = 'NIFTY50', interval: str = '5m', vix_val
             
             print(f"[DEBUG] Combined rows after dedup: {len(combined)}")
 
-            # -----------------------------
-            # STEP 5: Compute SL/SH using positional rolling (NO INDEX NEEDED)
-            # -----------------------------
             # Ensure numeric columns
-            combined['low'] = pd.to_numeric(combined['low'], errors='coerce')
-            combined['high'] = pd.to_numeric(combined['high'], errors='coerce')
+            # STEP 5: Compute SL/SH using dedicated indicator functions
+            # Set timestamp as index for the indicator functions
+            combined_indexed = combined.set_index('timestamp')
 
-            # Positional rolling window (works on integer positions)
-            window = 7
-            combined['SL'] = combined['low'].rolling(window=window, min_periods=1).min() * (1 - 0.0025)
-            combined['SH'] = combined['high'].rolling(window=window, min_periods=1).max() * (1 + 0.0025)
+            # Apply the indicator functions (they handle deduplication, sorting, and rolling properly)
+            combined_indexed = nifty_skipping_low(combined_indexed, filter_pct=0.0000)
+            combined_indexed = nifty_skipping_high(combined_indexed, filter_pct=0.0000)
 
-            # -----------------------------
+            # Reset index back to column
+            combined = combined_indexed.reset_index()
+
             # STEP 6: Extract only the incoming batch rows
-            # -----------------------------
             # Take the last N rows where N = len(incoming)
             tail_len = len(incoming)
             result = combined.tail(tail_len).copy()

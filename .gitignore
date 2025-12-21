@@ -12,7 +12,7 @@ database/datas
 *.json
 *.yaml
 *.yml
-*access_token.txt
+access_token.txt
 
 # Ignore virtual environments
 venv/
