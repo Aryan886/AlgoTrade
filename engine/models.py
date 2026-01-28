@@ -5,6 +5,8 @@ from datetime import datetime
 import uuid
 
 
+
+
 class EngineState(str, Enum):
     """
     Represents the current state of the trading engine.
@@ -16,6 +18,7 @@ class EngineState(str, Enum):
     OPEN = "OPEN" # position is live and open
     CLOSING = "CLOSING" # position is in the process of closing
     ERROR = "ERROR" # engine is in an error state   
+
 
 #Leg model (single option leg)
 @dataclass
@@ -68,3 +71,4 @@ class EngineStatus:
     position: Optional[Position] = None
     last_update_ts: Optional[datetime] = None 
     net_pnl: float = 0.0
+    error_message : Optional[str] = None

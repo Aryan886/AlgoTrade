@@ -23,14 +23,20 @@ class ManualTradePreviewRequest(BaseModel):
     legs: List[LegRequest]
 
 class ManualTradePreviewResponse(BaseModel):
-    ok: bool
+    allowed : bool
     reason: Optional[str] = None
     estimated_margin: Optional[float] = None
     max_loss: Optional[float] = None
+    expires_at: Optional[datetime] = None
+    ttl_seconds: Optional[int] = None
 
 class ManualTradeExecuteRequest(BaseModel):
+    """
+    Docstring for ManualTradeExecuteRequest
     legs: List[LegRequest]
     preview_id: Optional[str] = None  # future-proofing
+    """
+    pass
 
 class ManualTradeExecuteResponse(BaseModel):
     message: str

@@ -13,6 +13,7 @@ database/datas
 *.yaml
 *.yml
 access_token.txt
+*.md
 
 # Ignore virtual environments
 venv/
