@@ -3,6 +3,5 @@ pyyaml
 schedule
 pandas
 yfinance
-sqlite3
 scipy
 
