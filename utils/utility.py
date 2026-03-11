@@ -135,7 +135,9 @@ def standardize_column_names(df):
         'High': 'high',   
         'Low': 'low',     
         'Close': 'close', 
-        'Volume': 'volume' 
+        'Volume': 'volume',
+        'SL': 'sl',
+        'SH': 'sh'
     }
     
     # Rename columns if they exist

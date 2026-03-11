@@ -1,5 +1,6 @@
 #calculation of req stuff for strategies
 import math
+from typing import Optional
 import pandas as pd
 from database.load_data import load_latest_data
 from utils.iv import ProductionIVCalculator
@@ -629,7 +630,7 @@ def compute_intraday_vwap(df: pd.DataFrame) -> pd.Series:
 
 def compute_smas(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Return a copy of df with 'sma_5' and 'sma_20' columns computed on 'close'
+    Return a copy of df with 'sma_5','sma_20','sma_50','sma_200' columns computed on 'close'
     df may have DatetimeIndex or a simple index; index values are preserverd
     """
     df2 = df.copy()
@@ -642,8 +643,8 @@ def compute_smas(df: pd.DataFrame) -> pd.DataFrame:
     df2['sma_5'] = df2['close'].rolling(window=5, min_periods=1).mean()
     df2['sma_20'] = df2['close'].rolling(window=20, min_periods=1).mean()
 
-    df2['sma_50'] = df['close'].rolling(window=50).mean()
-    df2['sma_200'] = df['close'].rolling(window=200).mean()
+    df2['sma_50'] = df2['close'].rolling(window=50, min_periods=1).mean()
+    df2['sma_200'] = df2['close'].rolling(window=200, min_periods=1).mean()
     return df2
 
 def compute_smas_with_high_low(df: pd.DataFrame) -> pd.DataFrame:
@@ -672,12 +673,12 @@ def compute_smas_with_high_low(df: pd.DataFrame) -> pd.DataFrame:
     
     # Compute high/low for SMA windows
     # For SMA_5: track highest and lowest prices in 5-candle window
-    df2['sma_5_high'] = df2['high'].rolling(window=5, min_periods=1).max()
-    df2['sma_5_low'] = df2['low'].rolling(window=5, min_periods=1).min()
+    df2['sma_5_high'] = df2['high'].rolling(window=5, min_periods=1).mean()
+    df2['sma_5_low'] = df2['low'].rolling(window=5, min_periods=1).mean()
     
     # For SMA_20: track highest and lowest prices in 20-candle window
-    df2['sma_20_high'] = df2['high'].rolling(window=20, min_periods=1).max()
-    df2['sma_20_low'] = df2['low'].rolling(window=20, min_periods=1).min()
+    df2['sma_20_high'] = df2['high'].rolling(window=20, min_periods=1).mean()
+    df2['sma_20_low'] = df2['low'].rolling(window=20, min_periods=1).mean()
     
     return df2
 
@@ -704,56 +705,111 @@ def add_ao_color(df):
     
     return df
 
-def nifty_skipping_low(df: pd.DataFrame, filter_pct: float = 0.0025) -> pd.DataFrame:
+def _resolve_initial_skip_level(
+    df: pd.DataFrame,
+    explicit_value: Optional[float],
+    *column_names: str
+) -> Optional[float]:
+    if explicit_value is not None and pd.notna(explicit_value):
+        return float(explicit_value)
+
+    for column_name in column_names:
+        if column_name in df.columns:
+            existing = pd.to_numeric(df[column_name], errors='coerce').dropna()
+            if not existing.empty:
+                return float(existing.iloc[-1])
+
+    return None
+
+
+def nifty_skipping_low(
+    df: pd.DataFrame,
+    filter_pct: float = 0.0005,
+    initial_sl: Optional[float] = None
+) -> pd.DataFrame:
     """
-    Compute 'skipping low' (stop-loss support) as the rolling minimum of the last 7 lows.
+    Compute 'skipping low' (stop-loss support) that only updates when close
+    is above the 5-bar rolling mean of highs.
+    When triggered, SL = rolling minimum of the last 7 lows.
+    Otherwise, SL holds its previous value.
 
     Parameters:
-        df: DataFrame with a DatetimeIndex and column 'low'
+        df: DataFrame with a DatetimeIndex and columns 'high', 'low', 'close'
         filter_pct: Optional filter percentage below the lowest low
+        initial_sl: Optional seed value for incremental recomputation
 
     Returns:
-        DataFrame with new column 'sl' (skipping low)
+        DataFrame with new columns 'sma_5_high' and 'SL' (skipping low)
     """
-    if 'low' not in df.columns:
-        raise ValueError("DataFrame must contain 'low' column")
+    required_cols = {'high', 'low', 'close'}
+    missing_cols = sorted(required_cols.difference(df.columns))
+    if missing_cols:
+        raise ValueError(f"DataFrame must contain columns: {missing_cols}")
 
     df = df.copy()
 
-    #  Ensure timestamp index is unique and sorted
+    # Ensure timestamp index is unique and sorted
     df = df[~df.index.duplicated(keep='last')].sort_index()
 
-    #  Rolling minimum for last 7 candles
-    rolling_low = df['low'].rolling(window=7, min_periods=1).min()
+    if 'sma_5_high' not in df.columns:
+        df['sma_5_high'] = df['high'].rolling(window=5, min_periods=1).mean()
 
-    #  Optionally apply filter (if you want it slightly below)
-    df['SL'] = rolling_low * (1 - filter_pct)
+    last_sl = _resolve_initial_skip_level(df, initial_sl, 'SL', 'sl')
+    sl_values = []
+    for i in range(len(df)):
+        if df['close'].iloc[i] > df['sma_5_high'].iloc[i]:
+            start_idx = max(0, i - 6)
+            rolling_low = df['low'].iloc[start_idx:i+1].min()
+            last_sl = float(rolling_low * (1 - filter_pct))
+
+        sl_values.append(last_sl)
+
+    df['SL'] = pd.Series(sl_values, index=df.index, dtype='float64')
 
     return df
 
-def nifty_skipping_high(df: pd.DataFrame, filter_pct: float = 0.0025) -> pd.DataFrame:
+def nifty_skipping_high(
+    df: pd.DataFrame,
+    filter_pct: float = 0.0005,
+    initial_sh: Optional[float] = None
+) -> pd.DataFrame:
     """
-    Compute 'skipping high' (resistance) as the rolling maximum of the last 7 highs.
+    Compute 'skipping high' (resistance) that only updates when close
+    is below the 5-bar rolling mean of lows.
+    When triggered, SH = rolling maximum of the last 7 highs.
+    Otherwise, SH holds its previous value.
 
     Parameters:
-        df: DataFrame with a DatetimeIndex and column 'high'
+        df: DataFrame with a DatetimeIndex and columns 'high', 'close'
         filter_pct: Optional filter percentage above the highest high
+        initial_sh: Optional seed value for incremental recomputation
 
     Returns:
-        DataFrame with new column 'sh' (skipping high)
+        DataFrame with new columns 'sma_5_low' and 'SH' (skipping high)
     """
-    if 'high' not in df.columns:
-        raise ValueError("DataFrame must contain 'high' column")
+    required_cols = {'high', 'low', 'close'}
+    missing_cols = sorted(required_cols.difference(df.columns))
+    if missing_cols:
+        raise ValueError(f"DataFrame must contain columns: {missing_cols}")
 
     df = df.copy()
 
-    #  Ensure timestamp index is unique and sorted
+    # Ensure timestamp index is unique and sorted
     df = df[~df.index.duplicated(keep='last')].sort_index()
 
-    #  Rolling maximum for last 7 candles
-    rolling_high = df['high'].rolling(window=7, min_periods=1).max()
+    if 'sma_5_low' not in df.columns:
+        df['sma_5_low'] = df['low'].rolling(window=5, min_periods=1).mean()
 
-    #  Optionally apply filter (if you want it slightly above)
-    df['SH'] = rolling_high * (1 + filter_pct)
+    last_sh = _resolve_initial_skip_level(df, initial_sh, 'SH', 'sh')
+    sh_values = []
+    for i in range(len(df)):
+        if df['close'].iloc[i] < df['sma_5_low'].iloc[i]:
+            start_idx = max(0, i - 6)
+            rolling_high = df['high'].iloc[start_idx:i+1].max()
+            last_sh = float(rolling_high * (1 + filter_pct))
+
+        sh_values.append(last_sh)
+
+    df['SH'] = pd.Series(sh_values, index=df.index, dtype='float64')
 
     return df

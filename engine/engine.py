@@ -6,6 +6,7 @@ from engine.models import (
     Position,
     Leg,
     EngineStatus,
+    Preview,
 )
 
 VALID_TRANSITIONS = {
@@ -47,6 +48,14 @@ class TradingEngine:
         self.last_update_ts: Optional[datetime] = None
         self.preview_legs : Optional[List[Leg]] = None
         self._preview_created_at: Optional[datetime] = None
+        self.status = EngineStatus(
+            engine_state=self.state,
+            mode="manual-only",
+            position=self.active_position,
+            preview=None,
+            last_update_ts=self.last_update_ts,
+            net_pnl=0.0,
+        )
 
     def _transition(self, new_state: EngineState):
         allowed = VALID_TRANSITIONS[self.state]
@@ -87,15 +96,23 @@ class TradingEngine:
         Dry-run a manual trade.
         Stores preview and transitions to PREVIEWING state.
         """
-        if self.state != EngineState.IDLE:
+        if self.status.engine_state != EngineState.IDLE:
             raise RuntimeError(f"Cannot preview: engine in {self.state.value} state")
+
+        preview = Preview(
+            legs=legs,
+            max_loss=risk_report.get("max_loss"),
+            estimated_margin=risk_report.get("estimated_margin"),
+            expires_at=datetime.utcnow() + timedelta(seconds=self.PREVIEW_TTL)
+        )
 
         self._ensure_no_open_position()
 
         risk_report = self._run_risk_checks(legs)
 
         # Store the preview
-        self.preview_legs = legs
+        self.status.preview = preview
+        self.status.engine_state = EngineState.PREVIEWING
         self._preview_created_at = datetime.utcnow()
         self._transition(EngineState.PREVIEWING)
 
@@ -107,8 +124,7 @@ class TradingEngine:
             "expires_at": self._preview_created_at + timedelta(seconds=self.PREVIEW_TTL) if self._preview_created_at else None,
             "ttl_seconds": self.PREVIEW_TTL,
         }
-    
-    def execute_manual_trade(self) -> Position:  # ✅ NO LEGS PARAMETER
+    def execute_manual_trade(self) -> Position:  #  NO LEGS PARAMETER
         """
         Executes the previewed trade.
         Must be in PREVIEWING state with stored preview.
@@ -147,7 +163,8 @@ class TradingEngine:
         self.active_position = position
         
         # Clear the preview
-        self.preview_legs = None
+        self.status.preview = None
+        self.status.engine_state = EngineState.IDLE
         self._preview_created_at = None
         
         self._transition(EngineState.OPEN)
@@ -163,7 +180,8 @@ class TradingEngine:
         if self.state != EngineState.PREVIEWING:
             raise RuntimeError(f"No preview to cancel (state: {self.state.value})")
         
-        self.preview_legs = None
+        self.status.preview = None
+        self.status.engine_state = EngineState.IDLE
         self._transition(EngineState.IDLE)
         self.last_update_ts = datetime.utcnow()
         self._preview_created_at = None
@@ -283,8 +301,8 @@ class TradingEngine:
         for i, leg in enumerate(legs):
             if not leg.symbol:
                 raise RiskCheckFailedError(f"Leg {i}: missing symbol")
-            if leg.quantity == 0:
-                raise RiskCheckFailedError(f"Leg {i}: quantity cannot be zero")
+            if leg.lots <= 0:
+                raise RuntimeError(f"Leg {i}: lots must be > 0")
             # Add more validations as needed
             # - Strike > 0 for options
             # - Valid expiry date

@@ -1,8 +1,10 @@
 from fastapi import FastAPI, WebSocket, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List
+from typing import List, Optional
+from datetime import datetime, timedelta
 from engine.engine import TradingEngine, PreviewExpiredError, PositionAlreadyOpenError
 
+from engine.models import EngineState, Leg, Preview
 from server.schemas import (
     EngineStatusResponse,
     engine_status_to_response,
@@ -40,17 +42,52 @@ def create_app(engine: TradingEngine) -> FastAPI:
         return engine_status_to_response(status)
 
     # MANUAL TRADE – PREVIEW
-    @app.post("/manual_trade/preview", response_model=ManualTradePreviewResponse)
-    def manual_trade_preview(req: ManualTradePreviewRequest):
+    """
+    
+    @app.post("/manual_trade/preview")
+    def manual_trade_preview(req: Optional[ManualTradePreviewRequest]):
         try:
-            legs = [leg_request_to_model(l) for l in req.legs]
-            return engine.preview_manual_trade(legs)
+            legs = []
+
+            if req and req.legs:
+                legs = [leg_request_to_model(l) for l in req.legs]
+            engine.preview_manual_trade(legs)
+            return { "ok" : True}
         except PositionAlreadyOpenError as e:  
             raise HTTPException(status_code=409, detail=str(e))  # 409 Conflict
         except RuntimeError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
     
+    """
+    @app.post("/manual_trade/preview")
+    def preview_manual_trade(self, legs: list[Leg]) -> None:
+        if self.status.engine_state != EngineState.IDLE:
+            raise RuntimeError("Cannot preview unless engine is IDLE")
+
+        # ---- SAFE DEFAULTS (always defined) ----
+        estimated_margin = 0.0
+        max_loss = 0.0
+
+        # ---- ONLY run risk logic if legs exist ----
+        if legs:
+            risk_report = self._run_risk_checks(legs)
+
+            estimated_margin = risk_report.get("estimated_margin", 0.0)
+            max_loss = risk_report.get("max_loss", 0.0)
+
+        # ---- CREATE PREVIEW (always) ----
+        preview = Preview(
+            legs=legs,
+            estimated_margin=estimated_margin,
+            max_loss=max_loss,
+            expires_at=datetime.now() + timedelta(minutes=2),
+        )
+
+        # ---- ATOMIC STATE UPDATE ----
+        self.status.preview = preview
+        self.status.engine_state = EngineState.PREVIEWING
+
 
     # MANUAL TRADE – EXECUTE
     @app.post("/manual_trade/execute")

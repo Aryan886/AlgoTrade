@@ -64,6 +64,10 @@ def create_tables(db_path='db/trading_bot.db'):
             SH REAL
         );
     """)
+    cursor.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_market_data_1m_symbol_timestamp
+        ON market_data_1m (symbol, timestamp);
+    """)
 
     #5. Market Data Table for 5m
     cursor.execute("""
@@ -84,6 +88,10 @@ def create_tables(db_path='db/trading_bot.db'):
             SH REAL
         );
     """)
+    cursor.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_market_data_5m_symbol_timestamp
+        ON market_data_5m (symbol, timestamp);
+    """)
 
     #6. Market Data Table for 15m
     cursor.execute("""
@@ -103,6 +111,10 @@ def create_tables(db_path='db/trading_bot.db'):
             SL REAL,
             SH REAL
         );
+    """)
+    cursor.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_market_data_15m_symbol_timestamp
+        ON market_data_15m (symbol, timestamp);
     """)
 
     #7. Options Data Table for PE/CE storage

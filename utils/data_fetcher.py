@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from utils.utility import get_data_path
 from broker.zerodha_client import kite_from_saved_token
 from utils.db_func import store_market_data, store_signal, store_sma_from_df, store_equity_data
-from core.indicators import compute_indicators, generate_signals, compute_smas
+from core.indicators import compute_indicators, generate_signals, compute_smas, compute_smas_with_high_low
 
 
 DB_PATH = 'db/trading_bot.db'
@@ -224,7 +224,8 @@ def fetch_and_save_data(intervals=["1m", "5m", "15m"], return_interval=None, sym
             db_interval_map = {
                 '1m': '1m',
                 '5m': '5m',
-                '15m': '15m'
+                '15m': '15m',
+                '1h': '1h',
             }
             db_interval = db_interval_map.get(interval, interval)
 

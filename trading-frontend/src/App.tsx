@@ -17,12 +17,14 @@ export default function App() {
     return <Loader />;
   }
 
+  console.log("Engine State:", status.engine_state);
   return (
     <>
+      <div style={{ color:"red"}}>APP IS RENDERING</div>
       {networkError && <NetworkBanner />}
 
-      {status.engine_state === "IDLE" && <IdleTradeEntry />}
-      {status.engine_state === "PREVIEWING" && <TradePreview />}
+      {status.engine_state === "IDLE" && <IdleTradeEntry status={status}/>}
+      {status.engine_state === "PREVIEWING" && <TradePreview status={status} />}
       {status.engine_state === "OPEN" && <OpenPosition />}
       {status.engine_state === "CLOSING" && <ClosingOverlay />}
       {status.engine_state === "ERROR" && <ErrorView />}

@@ -214,14 +214,11 @@ class MarketDataAutomation:
         for attempt in range(max_retries):
             try:
                # logger.info(f"Fetching {interval} data (attempt {attempt + 1}/{max_retries})...")
-                results, df = fetch_and_save_data(intervals=[interval], return_interval=interval)
+                _, df = fetch_and_save_data(intervals=[interval], return_interval=interval)
                 
                 if df is not None and not df.empty:
                     self.last_fetch_times[interval] = datetime.now()
                     logger.info(f"Successfully fetched {len(df)} rows of {interval} data")
-                    
-                    # Store market data WITHOUT VIX (VIX will be calculated separately)
-                    store_market_data(df, symbol="NIFTY50", interval=interval)
                     logger.info(f"Stored {interval} market data successfully")
                     
                     # Generate and store signals

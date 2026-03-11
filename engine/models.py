@@ -60,6 +60,21 @@ class Position:
 
     notes : Optional[str] = None  # any additional notes about the position
 
+@dataclass
+class Preview:
+    """
+    Represents a temporary manual trade preview.
+    Exists only while engine_state == PREVIEWING.
+    """
+    legs: List[Leg]
+
+    estimated_margin: float
+    max_loss: float
+
+    expires_at: datetime
+
+    created_at: datetime = field(default_factory=datetime.now)
+
 
 @dataclass
 class EngineStatus: 
@@ -69,6 +84,7 @@ class EngineStatus:
     engine_state: EngineState
     mode : str
     position: Optional[Position] = None
+    preview : Optional[Preview] = None
     last_update_ts: Optional[datetime] = None 
     net_pnl: float = 0.0
     error_message : Optional[str] = None

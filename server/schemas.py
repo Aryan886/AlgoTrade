@@ -53,10 +53,17 @@ class PositionResponse(BaseModel):
     monitoring: bool
     legs: Dict[str, LegResponse]
 
+class PreviewResponse(BaseModel):
+    legs: List[LegResponse]
+    estimated_margin: float
+    max_loss: float
+    expires_at: datetime
+
 class EngineStatusResponse(BaseModel):
     engine_state: str
     mode: str
     position: Optional[PositionResponse]
+    preview : Optional[PreviewResponse] = None
     last_update_ts: Optional[datetime]
     net_pnl: float
 
@@ -92,6 +99,12 @@ def engine_status_to_response(status: EngineStatus) -> EngineStatusResponse:
         mode=status.mode,
         position=position_to_response(status.position)
         if status.position else None,
+        preview=PreviewResponse(
+            legs=[LegResponse(**vars(leg)) for leg in status.preview.legs],
+            estimated_margin=status.preview.estimated_margin,
+            max_loss=status.preview.max_loss,
+            expires_at=status.preview.expires_at,
+        ) if status.preview else None,
         last_update_ts=status.last_update_ts,
         net_pnl=status.net_pnl,
     )
