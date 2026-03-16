@@ -649,14 +649,16 @@ def compute_smas(df: pd.DataFrame) -> pd.DataFrame:
 
 def compute_smas_with_high_low(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Return a copy of df with 'sma_5', 'sma_20' and their corresponding high/low values.
+    Return a copy of df with 'sma_5', 'sma_20', 'sma_50', 'sma_200'
+    and their corresponding high/low helper values.
     For each SMA calculation window, tracks the highest and lowest prices in that window.
     
     Parameters:
         df: DataFrame with OHLC data, must contain 'close', 'high', 'low' columns
     
     Returns:
-        DataFrame with additional columns: sma_5, sma_20, sma_5_high, sma_5_low, sma_20_high, sma_20_low
+        DataFrame with additional columns: sma_5, sma_20, sma_50, sma_200,
+        sma_5_high, sma_5_low, sma_20_high, sma_20_low
     """
     df2 = df.copy()
     # Normalize column names to lowercase
@@ -670,6 +672,8 @@ def compute_smas_with_high_low(df: pd.DataFrame) -> pd.DataFrame:
     # Compute SMAs
     df2['sma_5'] = df2['close'].rolling(window=5, min_periods=1).mean()
     df2['sma_20'] = df2['close'].rolling(window=20, min_periods=1).mean()
+    df2['sma_50'] = df2['close'].rolling(window=50, min_periods=1).mean()
+    df2['sma_200'] = df2['close'].rolling(window=200, min_periods=1).mean()
     
     # Compute high/low for SMA windows
     # For SMA_5: track highest and lowest prices in 5-candle window

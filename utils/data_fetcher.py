@@ -119,7 +119,8 @@ class Nifty50DataFetcher:
         interval_map = {
             '1m': 'minute',
             '5m': '5minute', 
-            '15m': '15minute'
+            '15m': '15minute',
+            '1h': '60minute'
         }
         
         kite_interval = interval_map.get(interval, interval)
@@ -159,6 +160,11 @@ class Nifty50DataFetcher:
             # For 15m data, get 10 days of data (Kite API might have limitations)
             extended_start = today_start - timedelta(days=10)
             print(f"[DEBUG] For 15m interval, extending date range from {today_start} to {extended_start}")
+            today_start = extended_start
+        elif interval == '1h':
+            # For 1h data, fetch enough history to populate longer SMAs consistently.
+            extended_start = today_start - timedelta(days=180)
+            print(f"[DEBUG] For 1h interval, extending date range from {today_start} to {extended_start}")
             today_start = extended_start
         
         print(f"[DEBUG] Fetching data for interval: {interval} (Kite format: {kite_interval})")
@@ -274,7 +280,8 @@ def fetch_and_save_data(intervals=["1m", "5m", "15m"], return_interval=None, sym
             db_interval_map = {
                 '1m': '1m',  # Use 1m for database table
                 '5m': '5m',  # Use 5m for database table
-                '15m': '15m'  # Use 15m for database table
+                '15m': '15m',  # Use 15m for database table
+                '1h': '1h'
             }
             db_interval = db_interval_map.get(interval, interval) or interval
             store_market_data(df, symbol=symbol, interval=db_interval)

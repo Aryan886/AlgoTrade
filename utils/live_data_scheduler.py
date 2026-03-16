@@ -87,6 +87,22 @@ class LiveDataScheduler:
                 logger.warning("Failed to fetch 15m data")
         except Exception as e:
             logger.error(f"Error fetching 15m data: {e}")
+
+    def fetch_1h_data(self):
+        """Fetch 1-hour data"""
+        if not self.is_market_open():
+            logger.info("Market is closed, skipping 1h data fetch")
+            return
+
+        try:
+            logger.info("Fetching 1-hour data...")
+            results, df = fetch_and_save_data(intervals=["1h"], return_interval="1h")
+            if df is not None:
+                logger.info(f"Successfully fetched {len(df)} rows of 1h data")
+            else:
+                logger.warning("Failed to fetch 1h data")
+        except Exception as e:
+            logger.error(f"Error fetching 1h data: {e}")
     
     def setup_schedule(self):
         """Setup the schedule for data fetching"""
@@ -101,11 +117,15 @@ class LiveDataScheduler:
         
         # Schedule 15-minute data fetching every 15 minutes during market hours
         schedule.every(15).minutes.do(self.fetch_15m_data)
+
+        # Schedule 1-hour data fetching on the 15th minute to align with the 9:15 market open.
+        schedule.every().hour.at(":15").do(self.fetch_1h_data)
         
         logger.info("Schedule setup completed:")
         logger.info("- 1m data: Every minute")
         logger.info("- 5m data: Every 5 minutes")
         logger.info("- 15m data: Every 15 minutes")
+        logger.info("- 1h data: Every hour at :15")
     
     def run_scheduler(self):
         """Run the scheduler in a separate thread"""

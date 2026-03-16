@@ -826,6 +826,24 @@ def create_sma_table(conn: sqlite3.Connection, interval : str):
             PRIMARY KEY (timestamp, symbol)
         );      
     """)
+
+    # Backfill columns for older tables created before sma_5_high/sma_5_low existed.
+    cursor = conn.cursor()
+    cursor.execute(f"PRAGMA table_info({tbl})")
+    columns = [col[1] for col in cursor.fetchall()]
+
+    required_columns = {
+        'sma_20': 'REAL',
+        'sma_50': 'REAL',
+        'sma_200': 'REAL',
+        'sma_5_high': 'REAL',
+        'sma_5_low': 'REAL',
+    }
+
+    for column_name, column_type in required_columns.items():
+        if column_name not in columns:
+            conn.execute(f"ALTER TABLE {tbl} ADD COLUMN {column_name} {column_type}")
+
     conn.commit()
     
 def store_sma_from_df(df: pd.DateOffset, symbol : str, interval: str, db_path= DB_PATH):
@@ -1105,7 +1123,7 @@ def migrate_add_sma_high_low(db_path=DB_PATH):
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
-    for interval in ['1m', '5m', '15m']:
+    for interval in ['1m', '5m', '15m', '1h']:
         tbl = sma_table_name(interval)
         
         # Check if table exists first
@@ -1119,17 +1137,14 @@ def migrate_add_sma_high_low(db_path=DB_PATH):
         columns = [col[1] for col in cursor.fetchall()]
         
         try:
-            if 'sma_5_high' not in columns:
-                cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN sma_5_high REAL")
-                print(f"[MIGRATION] Added sma_5_high to {tbl}")
-            else:
-                print(f"[MIGRATION] sma_5_high already exists in {tbl}")
-            
-            if 'sma_5_low' not in columns:
-                cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN sma_5_low REAL")
-                print(f"[MIGRATION] Added sma_5_low to {tbl}")
-            else:
-                print(f"[MIGRATION] sma_5_low already exists in {tbl}")
+            required_columns = ['sma_20', 'sma_50', 'sma_200', 'sma_5_high', 'sma_5_low']
+
+            for column_name in required_columns:
+                if column_name not in columns:
+                    cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN {column_name} REAL")
+                    print(f"[MIGRATION] Added {column_name} to {tbl}")
+                else:
+                    print(f"[MIGRATION] {column_name} already exists in {tbl}")
         except sqlite3.OperationalError as e:
             print(f"[MIGRATION] Warning for {tbl}: {e}")
     

@@ -158,14 +158,16 @@ class MarketDataAutomation:
         self.last_fetch_times: Dict[str, Optional[datetime]] = {
             '1m': None,
             '5m': None,
-            '15m': None
+            '15m': None,
+            '1h': None
         }
         
         # Minimum intervals between fetches to avoid API rate limits
         self.min_intervals = {
             '1m': 60,    # 1 minute
             '5m': 300,   # 5 minutes
-            '15m': 900   # 15 minutes
+            '15m': 900,  # 15 minutes
+            '1h': 3600   # 1 hour
         }
     
     def is_market_holiday(self, date=None):
@@ -272,6 +274,10 @@ class MarketDataAutomation:
     def fetch_15m_data(self):
         """Fetch 15-minute data"""
         return self.fetch_data_with_retry('15m')
+
+    def fetch_1h_data(self):
+        """Fetch 1-hour data"""
+        return self.fetch_data_with_retry('1h')
     
     def fetch_1m_equity_data(self):
         """Fetch 1minute equity data"""
@@ -485,6 +491,7 @@ class MarketDataAutomation:
         schedule.every().minute.do(self.fetch_1m_data)
         schedule.every(5).minutes.do(self.fetch_5m_data)
         schedule.every(15).minutes.do(self.fetch_15m_data)
+        schedule.every().hour.at(":15").do(self.fetch_1h_data)
         
         # Equity data fetching (every minute/5min/15min)
         schedule.every().minute.do(self.fetch_1m_equity_data)   
@@ -513,6 +520,7 @@ class MarketDataAutomation:
         logger.info("- 1m data: Every minute (during market hours)")
         logger.info("- 5m data: Every 5 minutes (during market hours)")
         logger.info("- 15m data: Every 15 minutes (during market hours)")
+        logger.info("- 1h data: Every hour at :15 (during market hours)")
         logger.info("- VIX calculation: Every 5 minutes (independent)")
         logger.info("- High-accuracy delta: Every minute (Black-Scholes)")
         logger.info("- Trading Strategy: Every minute")
