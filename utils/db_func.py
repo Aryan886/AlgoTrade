@@ -785,7 +785,7 @@ def fetch_latest_delta_data(symbol: str = 'NIFTY50', db_path=DB_PATH) -> List[Di
 
     # Fetch all records with that timestamp
     cursor.execute("""
-        SELECT strike_price, option_type, delta, ltp, tradingsymbol
+        SELECT strike_price, option_type, delta, ltp, tradingsymbol, expiry_date
         FROM delta_cache
         WHERE timestamp = ? AND symbol = ?
     """, (latest_timestamp, symbol))
@@ -800,7 +800,8 @@ def fetch_latest_delta_data(symbol: str = 'NIFTY50', db_path=DB_PATH) -> List[Di
             'option_type': row[1],
             'delta': row[2],
             'ltp': row[3],
-            'tradingsymbol': row[4]
+            'tradingsymbol': row[4],
+            'expiry': row[5],
         })
     return options_data
 

@@ -28,7 +28,7 @@ class BaseTrader:
         self.last_data_refresh = None
 
         # loggers
-        self.logger, self.trade_logger, self.position_logger = setup_paper_trading_logger()
+        self.logger, self.trade_logger, self.position_logger, *_ = setup_paper_trading_logger()
 
         # restore old position if exists
         self.load_position()

@@ -15,6 +15,7 @@ from core.strat_donchian import donchian_ao_strategy
 from core.paper_trades import PaperTraderDonchian
 from core.paper_trder_sma import PaperTraderSMA
 from core.equity_trader import EquityPaperTrader
+from core.bot_nifty import NiftyPaperBot
 import argparse
 import json
 
@@ -139,7 +140,8 @@ class MarketDataAutomation:
         self.paper_trader = PaperTraderDonchian("NIFTY50")
         self.sma_trader = PaperTraderSMA("NIFTY50")
         self.equity_trader = EquityPaperTrader("INFY")
-        logger.info("Paper traders (Donchian, SMA & Equity) successfully initialised....")
+        self.nifty_trader = NiftyPaperBot("NIFTY50")
+        logger.info("Paper traders (Donchian, SMA, Equity & Nifty Options) successfully initialised....")
         
         # Market holidays for 2025 (you can update this list)
         self.market_holidays_2025 = [
@@ -433,18 +435,43 @@ class MarketDataAutomation:
         except Exception as e:
             logger.error(f"Error in Equity paper trading cycle: {e}")
 
+    def run_nifty_paper_trading_cycle(self):
+        """Run one cycle of Nifty Options paper trading logic"""
+        if not self.is_market_open():
+            return
+
+        try:
+            logger.info("Running Nifty Options paper trading cycle...")
+            self.nifty_trader.run_once()
+
+            # Log position status
+            if not self.nifty_trader.all_lots_flat():
+                lots = self.nifty_trader.position.get("lots", {})
+                lot1_status = lots.get("lot1", {}).get("status", "N/A")
+                lot2_status = lots.get("lot2", {}).get("status", "N/A")
+                logger.info(f"Nifty Position Status - Lot1: {lot1_status}, Lot2: {lot2_status}")
+            else:
+                logger.debug("Nifty trader: No active position, waiting for signals")
+
+        except Exception as e:
+            logger.error(f"Error in Nifty Options paper trading cycle: {e}")
+
     def get_paper_trading_summary(self):
-        """Get detailed paper trading summary for both Donchian and SMA traders"""
+        """Get detailed paper trading summary for Donchian, SMA, and Nifty traders"""
         try:
             donchian_status = self.paper_trader.get_position_status()
             sma_status = self.sma_trader.get_position_status()
-            
+
             summary = {
                 'donchian': {
                     'active_position': False,
                     'message': 'No active position'
                 },
                 'sma': {
+                    'active_position': False,
+                    'message': 'No active position'
+                },
+                'nifty': {
                     'active_position': False,
                     'message': 'No active position'
                 }
@@ -475,7 +502,23 @@ class MarketDataAutomation:
                     'strategy_type': sma_status.get('strategy_type', 'sma_spread'),
                     'position_duration': str(datetime.now() - sma_status['entry_time']) if sma_status['entry_time'] else None
                 }
-            
+
+            # Nifty Options trader status
+            if not self.nifty_trader.all_lots_flat():
+                lots = self.nifty_trader.position.get("lots", {})
+                lot1 = lots.get("lot1", {})
+                lot2 = lots.get("lot2", {})
+                summary['nifty'] = {
+                    'active_position': True,
+                    'lot1_status': lot1.get("status", "N/A"),
+                    'lot2_status': lot2.get("status", "N/A"),
+                    'lot1_sl': lot1.get("sl_current_level"),
+                    'lot2_sl': lot2.get("sl_current_level"),
+                    'opened_at': lot1.get("opened_at") or lot2.get("opened_at"),
+                    'position_type': lot1.get("meta", {}).get("position_type"),
+                    'num_legs': len(lot1.get("legs", [])),
+                }
+
             return summary
             
         except Exception as e:
@@ -516,6 +559,9 @@ class MarketDataAutomation:
         #Equity PAPER TRADING - Run every minute during market hours
         schedule.every().minute.do(self.run_equity_paper_trading_cycle)
 
+        #Nifty Options PAPER TRADING - Run every minute during market hours
+        schedule.every().minute.do(self.run_nifty_paper_trading_cycle)
+
         logger.info("Schedule setup completed:")
         logger.info("- 1m data: Every minute (during market hours)")
         logger.info("- 5m data: Every 5 minutes (during market hours)")
@@ -526,6 +572,7 @@ class MarketDataAutomation:
         logger.info("- Trading Strategy: Every minute")
         logger.info("- Donchian Paper Trading: Every minute")
         logger.info("- SMA Paper Trading: Every minute")
+        logger.info("- Nifty Options Paper Trading: Every minute")
         logger.info("- Signal generation: Integrated with data fetching")
     
     def run_scheduler(self):
@@ -589,12 +636,14 @@ class MarketDataAutomation:
         """Get the current status of the automation"""
         donchian_status = self.paper_trader.get_position_status()
         sma_status = self.sma_trader.get_position_status()
+        nifty_has_position = not self.nifty_trader.all_lots_flat()
         return {
             'is_running': self.is_running,
             'market_open': self.is_market_open(),
             'last_fetch_times': self.last_fetch_times,
             'donchian_trading_status': donchian_status,
-            'sma_trading_status': sma_status
+            'sma_trading_status': sma_status,
+            'nifty_trading_active': nifty_has_position
         }
     
     def test_connection(self):
@@ -672,6 +721,22 @@ class MarketDataAutomation:
                 print(f" BUY CE Price: Rs{sma['buy_ce_price']}")
             if sma.get('sell_ce_price'):
                 print(f" SELL CE Price: Rs{sma['sell_ce_price']}")
+        else:
+            print(f" Position:  NO ACTIVE POSITION")
+            print(f" Status: Waiting for trading signals...")
+
+        # Nifty Options Trader Status
+        print(f"\n📉 NIFTY OPTIONS TRADER:")
+        nifty = paper_status.get('nifty', {})
+        if nifty.get('active_position'):
+            print(f" Position:  ACTIVE")
+            print(f" Lot1 Status: {nifty.get('lot1_status', 'N/A')}")
+            print(f" Lot2 Status: {nifty.get('lot2_status', 'N/A')}")
+            print(f" Lot1 SL Level: {nifty.get('lot1_sl', 'N/A')}")
+            print(f" Lot2 SL Level: {nifty.get('lot2_sl', 'N/A')}")
+            print(f" Opened At: {nifty.get('opened_at', 'N/A')}")
+            print(f" Position Type: {nifty.get('position_type', 'N/A')}")
+            print(f" Num Legs: {nifty.get('num_legs', 0)}")
         else:
             print(f" Position:  NO ACTIVE POSITION")
             print(f" Status: Waiting for trading signals...")

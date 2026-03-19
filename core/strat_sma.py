@@ -5,7 +5,7 @@ from utils.utility import setup_paper_trading_logger, emergency_column_fix
 from datetime import datetime
 
 #Initialize logger
-paper_logger, trade_logger, position_logger, sma_logger, equity_logger = setup_paper_trading_logger()
+paper_logger, trade_logger, position_logger, sma_logger, equity_logger, _nifty_logger = setup_paper_trading_logger()
 
 START_TIME = pd.to_datetime("09:15:00").time()
 

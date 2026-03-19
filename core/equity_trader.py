@@ -19,7 +19,7 @@ from core.equity_strat import (
 import uuid
 
 # Initialize loggers
-paper_logger, trade_logger, position_logger, sma_logger, equity_logger = setup_paper_trading_logger()
+paper_logger, trade_logger, position_logger, sma_logger, equity_logger, _nifty_logger = setup_paper_trading_logger()
 
 
 class EquityPaperTrader:
@@ -35,7 +35,7 @@ class EquityPaperTrader:
         self.signal_cooldown = 300  # 5 minutes in seconds
         
         # Loggers
-        paper_logger, trade_logger, position_logger, sma_logger, equity_logger = setup_paper_trading_logger()
+        paper_logger, trade_logger, position_logger, sma_logger, equity_logger, _nifty_logger = setup_paper_trading_logger()
         self.logger = equity_logger
         
         # JSON file
