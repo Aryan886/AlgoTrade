@@ -118,7 +118,22 @@ def setup_paper_trading_logger():
     equity_logger.handlers.clear()
     equity_logger.addHandler(equity_handler)
 
-    return paper_logger, trade_logger, position_logger, sma_logger, equity_logger
+    # 6. Logger for nifty options strategy specific logs
+    nifty_handler = RotatingFileHandler(
+        'logs/strat_nifty.log',
+        maxBytes=5*1024*1024,
+        backupCount=3
+    )
+    nifty_handler.setFormatter(detailed_formatter)
+    nifty_handler.setLevel(logging.DEBUG)
+
+    nifty_logger = logging.getLogger('paper_trading.strat_nifty')
+    nifty_logger.setLevel(logging.DEBUG)
+    nifty_logger.handlers.clear()
+    nifty_logger.addHandler(nifty_handler)
+    nifty_logger.propagate = False
+
+    return paper_logger, trade_logger, position_logger, sma_logger, equity_logger, nifty_logger
 
 def standardize_column_names(df):
     """
