@@ -27,12 +27,41 @@ def _ceil_100(x: float) -> int:
     return int(math.ceil(float(x) / 100.0) * 100)
 
 
-def _rsi_stub(_df_5m: pd.DataFrame) -> Optional[float]:
+def _simple_rsi(df: pd.DataFrame, period: int = 14, price_col: str = "close") -> Optional[float]:
     """
-    TODO (Spec Section 6): RSI Filter Signal.
-    Intentionally not implemented/wired yet per user instruction.
+    Compute the latest RSI using simple rolling averages.
+
+    Spec alignment:
+    - Section 6 calls for "5min RSI (14, simple)".
+    - "Simple" here means average gains/losses use SMA, not Wilder smoothing.
     """
-    return None
+    if df is None or df.empty or price_col not in df.columns:
+        return None
+    if period <= 0:
+        raise ValueError("period must be greater than 0")
+
+    prices = pd.to_numeric(df[price_col], errors="coerce")
+    if prices.isna().all():
+        return None
+
+    delta = prices.diff()
+    gains = delta.clip(lower=0.0)
+    losses = -delta.clip(upper=0.0)
+
+    avg_gain = gains.rolling(window=period, min_periods=period).mean()
+    avg_loss = losses.rolling(window=period, min_periods=period).mean()
+
+    rs = avg_gain / avg_loss.replace(0.0, pd.NA)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+
+    # Handle flat / one-directional windows explicitly.
+    both_zero = (avg_gain == 0.0) & (avg_loss == 0.0)
+    rsi = rsi.mask(both_zero, 50.0)
+    rsi = rsi.mask((avg_gain > 0.0) & (avg_loss == 0.0), 100.0)
+    rsi = rsi.mask((avg_gain == 0.0) & (avg_loss > 0.0), 0.0)
+
+    latest = rsi.iloc[-1]
+    return None if pd.isna(latest) else float(latest)
 
 
 def _rolling_sma(series: pd.Series, window: int) -> pd.Series:
@@ -77,7 +106,7 @@ class NiftyOptionsStrategy:
     - Multi-leg from day one (Type A has 3 legs).
     - Flags are latched and persisted to JSON.
     - Flags + last-processed timestamps hard-reset at 09:15 each session.
-    - Section 2 (RSI) is a stub/TODO only for now (not wired).
+    - Section 2 entry flow is still TODO, but the RSI helper now exists.
     """
 
     SESSION_RESET_TIME = dtime(9, 15)
@@ -541,8 +570,9 @@ class NiftyOptionsStrategy:
             if self._second_flag_ok(df_1m) and self._sl_filter_ok(df_1m, lookback=7, threshold_pts=sl_threshold):
                 section1_ok = True
 
-        # Section 2: stub only (explicitly not wired)
-        _ = _rsi_stub(df_5m)
+        # Section 2 entry logic is still pending, but compute the RSI helper here
+        # so the strategy can reuse it when the filter is wired in.
+        _ = _simple_rsi(df_5m)
 
         # Section 3 entry: break latched + retest + confirmation(2nd flag) + SL filter(7)
         section3_ok = False
