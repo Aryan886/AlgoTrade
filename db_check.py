@@ -6,7 +6,7 @@ from utils.db_func import fetch_market_data, fetch_vix_data
 from core.indicators import add_donchian_channel, add_awesome_oscillator
 from utils.utility import setup_paper_trading_logger
 
-paper_logger = setup_paper_trading_logger()
+paper_logger, *_ = setup_paper_trading_logger()
 
 
 def simple_data_test():

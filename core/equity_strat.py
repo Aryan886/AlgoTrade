@@ -10,7 +10,7 @@ from utils.db_func import fetch_equity_data, fetch_equity_sma_data
 from utils.utility import setup_paper_trading_logger
 
 # Initialize logger
-paper_logger, trade_logger, position_logger, sma_logger, equity_logger = setup_paper_trading_logger()
+paper_logger, trade_logger, position_logger, sma_logger, equity_logger, _nifty_logger = setup_paper_trading_logger()
 strategy_logger = equity_logger
 
 # Test logging immediately
