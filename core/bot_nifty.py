@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Literal, Optional
 import pandas as pd
 
 from core.strat_nifty import NiftyOptionsStrategy
-from utils.db_func import fetch_latest_delta_data, fetch_market_data
+from utils.db_func import fetch_latest_delta_data, fetch_latest_option_price, fetch_market_data
 from utils.utility import setup_paper_trading_logger
 
 
@@ -117,6 +117,7 @@ class NiftyPaperBot:
     """
 
     SESSION_RESET_TIME = dtime(9, 15)
+    ENTRY_CUTOFF_TIME = dtime(15, 0)
 
     def __init__(
         self,
@@ -124,6 +125,7 @@ class NiftyPaperBot:
         position_file: str = "active_position_nifty.json",
         state_file: str = "nifty_strategy_state.json",
         dry_run: bool = False,
+        strategy: Optional[NiftyOptionsStrategy] = None,
     ) -> None:
         self.symbol = symbol or "NIFTY50"
         self.position_file = position_file
@@ -134,13 +136,31 @@ class NiftyPaperBot:
         self.trade_logger = nifty_logger
         self.position_logger = nifty_logger
 
-        self.strategy = NiftyOptionsStrategy(symbol=self.symbol, state_file=state_file)
+        self.strategy = strategy or NiftyOptionsStrategy(symbol=self.symbol, state_file=state_file)
         self.position: Dict[str, Any] = self._load_position()
 
         self.lots = [
             LotSpec(lot_id="lot1", timeframe="1m", sl_lookback=7),
             LotSpec(lot_id="lot2", timeframe="5m", sl_lookback=7),
         ]
+
+    def _now(self) -> datetime:
+        return datetime.now()
+
+    def _entry_cutoff_reached(self, now: Optional[datetime] = None) -> bool:
+        now = now or self._now()
+        return now.time() >= self.ENTRY_CUTOFF_TIME
+
+    # ---------------------------
+    # Data helpers (overridable for backtesting)
+    # ---------------------------
+    def _get_df(self, interval: str, limit: int = 400) -> pd.DataFrame:
+        """Override this in BacktestableBot to use HistoricalDataProvider."""
+        return _df(interval, self.symbol, limit)
+
+    def _fetch_options_data(self) -> List[Dict[str, Any]]:
+        """Override this in BacktestableBot to use HistoricalDataProvider."""
+        return fetch_latest_delta_data(symbol=self.symbol)
 
     # ---------------------------
     # Persistence
@@ -192,12 +212,20 @@ class NiftyPaperBot:
         """
         Creates two independent lots with identical legs but separate SL timeframe.
         """
-        now = datetime.now()
+        if self._entry_cutoff_reached():
+            self.logger.info("Skipping new Nifty entry because the 3:00 pm cutoff has been reached.")
+            return
+
+        if not self.all_lots_flat():
+            self.logger.info("Skipping new Nifty entry because an existing position is still open.")
+            return
+
+        now = self._now()
         lots_obj: Dict[str, Any] = self.position.setdefault("lots", {})
 
         # Snapshot underlying data for SL initialization
-        df_1m = _df("1m", self.symbol, limit=200)
-        df_5m = _df("5m", self.symbol, limit=200)
+        df_1m = self._get_df("1m", limit=200)
+        df_5m = self._get_df("5m", limit=200)
         if df_1m.empty or df_5m.empty:
             self.logger.warning("Cannot open lots: missing 1m/5m market data.")
             return
@@ -221,12 +249,15 @@ class NiftyPaperBot:
             return
 
         # Build entry price map from option cache for mark-to-market
-        options_data = fetch_latest_delta_data(symbol=self.symbol)
+        options_data = self._fetch_options_data()
         price_map = _mark_to_market_price_map(options_data or [])
 
         def normalize_leg(l: Dict[str, Any]) -> Dict[str, Any]:
             sym = l.get("tradingsymbol")
             side = (l.get("action") or "").upper()
+            option_type = (l.get("option_type") or "").upper() or None
+            strike_price = l.get("strike_price")
+            expiry = l.get("expiry")
             entry_price = None
             try:
                 if sym in price_map:
@@ -238,7 +269,11 @@ class NiftyPaperBot:
             return {
                 "tradingsymbol": sym,
                 "side": side,
+                "option_type": option_type,
+                "strike_price": int(strike_price) if strike_price is not None else None,
+                "expiry": expiry,
                 "entry_price": entry_price,
+                "last_price": entry_price,
                 "exit_price": None,
                 "exit_time": None,
             }
@@ -357,7 +392,7 @@ class NiftyPaperBot:
         if not lot or lot.get("status") != "OPEN":
             return
 
-        options_data = fetch_latest_delta_data(symbol=self.symbol)
+        options_data = self._fetch_options_data()
         price_map = _mark_to_market_price_map(options_data or [])
 
         pnl = 0.0
@@ -365,7 +400,7 @@ class NiftyPaperBot:
             sym = leg.get("tradingsymbol")
             side = (leg.get("side") or "BUY").upper()
             entry = float(leg.get("entry_price") or 0.0)
-            current = float(price_map.get(sym, 0.0))
+            current = self._resolve_leg_current_price(leg, price_map)
             leg["exit_price"] = current
             leg["exit_time"] = exit_time
             pnl += _leg_pnl(side, entry, current)
@@ -380,6 +415,18 @@ class NiftyPaperBot:
 
         self.save_position()
 
+    def _force_square_off_all_open_lots(self, exit_time: str) -> None:
+        lots = self.position.get("lots") or {}
+        open_lot_ids = [lot_id for lot_id in ("lot1", "lot2") if lots.get(lot_id, {}).get("status") == "OPEN"]
+        if not open_lot_ids:
+            return
+
+        self.logger.info(
+            f"3:00 pm cutoff reached. Force-closing all open Nifty lots: {', '.join(open_lot_ids)}."
+        )
+        for lot_id in open_lot_ids:
+            self._close_lot(lot_id, exit_time=exit_time)
+
     # ---------------------------
     # Main cycle
     # ---------------------------
@@ -387,11 +434,17 @@ class NiftyPaperBot:
         """
         One scheduling cycle. Safe to call every minute from your automation.
         """
-        # Strategy session reset (flags/timestamps) at 09:15
-        self.strategy.maybe_session_reset()
+        now = self._now()
 
-        df_1m = _df("1m", self.symbol, limit=300)
-        df_5m = _df("5m", self.symbol, limit=300)
+        # Strategy session reset (flags/timestamps) at 09:15
+        self.strategy.maybe_session_reset(now=now)
+
+        if self._entry_cutoff_reached(now):
+            self._force_square_off_all_open_lots(exit_time=_to_iso(now))
+            return
+
+        df_1m = self._get_df("1m", limit=300)
+        df_5m = self._get_df("5m", limit=300)
         if df_1m.empty:
             return
 
@@ -432,6 +485,43 @@ class NiftyPaperBot:
             "break_time": None,
         }
         self.strategy.save_state()
+
+    def _lookup_held_leg_price(self, leg: Dict[str, Any]) -> Optional[float]:
+        return fetch_latest_option_price(
+            symbol=self.symbol,
+            tradingsymbol=leg.get("tradingsymbol"),
+            strike_price=leg.get("strike_price"),
+            option_type=leg.get("option_type"),
+            expiry=leg.get("expiry"),
+        )
+
+    def _resolve_leg_current_price(self, leg: Dict[str, Any], price_map: Dict[str, float]) -> float:
+        sym = leg.get("tradingsymbol")
+        if sym in price_map:
+            current = float(price_map[sym])
+            leg["last_price"] = current
+            return current
+
+        fallback_price = self._lookup_held_leg_price(leg)
+        if fallback_price is not None:
+            leg["last_price"] = float(fallback_price)
+            self.logger.warning(
+                f"Quote for held leg {sym} missing from latest snapshot; using last known contract price {fallback_price:.2f}."
+            )
+            return float(fallback_price)
+
+        last_known = leg.get("last_price")
+        if last_known is not None:
+            self.logger.warning(
+                f"Quote for held leg {sym} unavailable; reusing prior mark price {float(last_known):.2f}."
+            )
+            return float(last_known)
+
+        entry = float(leg.get("entry_price") or 0.0)
+        self.logger.warning(
+            f"Quote for held leg {sym} unavailable and no prior mark exists; falling back to entry price {entry:.2f}."
+        )
+        return entry
 
     def run_forever(self, sleep_seconds: int = 10) -> None:
         self.logger.info("Starting Nifty paper bot loop...")

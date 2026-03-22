@@ -1,6 +1,59 @@
 import sqlite3
 import os
 
+MARKET_DATA_COLUMNS = {
+    "open": "REAL",
+    "high": "REAL",
+    "low": "REAL",
+    "close": "REAL",
+    "ao_value": "REAL",
+    "donchian_upper": "REAL",
+    "donchian_lower": "REAL",
+    "donchian_mid": "REAL",
+    "vix_value": "REAL",
+    "SL": "REAL",
+    "SH": "REAL",
+}
+
+
+def create_market_data_table(conn: sqlite3.Connection, interval: str) -> None:
+    """Create or backfill the schema for a market_data_<interval> table."""
+    table_name = f"market_data_{interval}"
+    cursor = conn.cursor()
+
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS {table_name} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            open REAL,
+            high REAL,
+            low REAL,
+            close REAL,
+            ao_value REAL,
+            donchian_upper REAL,
+            donchian_lower REAL,
+            donchian_mid REAL,
+            vix_value REAL,
+            SL REAL,
+            SH REAL
+        );
+    """)
+    cursor.execute(f"""
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_market_data_{interval}_symbol_timestamp
+        ON {table_name} (symbol, timestamp);
+    """)
+
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    existing_columns = {column[1] for column in cursor.fetchall()}
+
+    for column_name, column_type in MARKET_DATA_COLUMNS.items():
+        if column_name not in existing_columns:
+            cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+
+    conn.commit()
+
+
 def create_tables(db_path='db/trading_bot.db'):
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     conn = sqlite3.connect(db_path)
@@ -45,77 +98,9 @@ def create_tables(db_path='db/trading_bot.db'):
         );
     """)
 
-    #4. Market Data Table for 1m
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS market_data_1m (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
-            symbol TEXT NOT NULL,
-            open REAL,
-            high REAL,
-            low REAL,
-            close REAL,
-            ao_value REAL,
-            donchian_upper REAL,
-            donchian_lower REAL,
-            donchian_mid REAL,
-            vix_value REAL,
-            SL REAL,
-            SH REAL
-        );
-    """)
-    cursor.execute("""
-        CREATE UNIQUE INDEX IF NOT EXISTS ux_market_data_1m_symbol_timestamp
-        ON market_data_1m (symbol, timestamp);
-    """)
-
-    #5. Market Data Table for 5m
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS market_data_5m (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
-            symbol TEXT NOT NULL,
-            open REAL,
-            high REAL,
-            low REAL,
-            close REAL,
-            ao_value REAL,
-            donchian_upper REAL,
-            donchian_lower REAL,
-            donchian_mid REAL,
-            vix_value REAL,
-            SL REAL,
-            SH REAL
-        );
-    """)
-    cursor.execute("""
-        CREATE UNIQUE INDEX IF NOT EXISTS ux_market_data_5m_symbol_timestamp
-        ON market_data_5m (symbol, timestamp);
-    """)
-
-    #6. Market Data Table for 15m
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS market_data_15m (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
-            symbol TEXT NOT NULL,
-            open REAL,
-            high REAL,
-            low REAL,
-            close REAL,
-            ao_value REAL,
-            donchian_upper REAL,
-            donchian_lower REAL,
-            donchian_mid REAL,
-            vix_value REAL,
-            SL REAL,
-            SH REAL
-        );
-    """)
-    cursor.execute("""
-        CREATE UNIQUE INDEX IF NOT EXISTS ux_market_data_15m_symbol_timestamp
-        ON market_data_15m (symbol, timestamp);
-    """)
+    #4-7. Market Data Tables for 1m, 5m, 15m, 1h
+    for interval in ["1m", "5m", "15m", "1h"]:
+        create_market_data_table(conn, interval)
 
     #7. Options Data Table for PE/CE storage
     cursor.execute("""

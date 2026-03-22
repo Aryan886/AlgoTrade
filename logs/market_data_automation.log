@@ -120589,3 +120589,18 @@
 2026-03-21 21:56:28,303 - INFO - Starting market data automation...
 2026-03-21 21:56:28,303 - INFO - Market data automation started successfully
 2026-03-21 21:56:28,305 - INFO - Press Ctrl+C to stop the automation
+2026-03-22 10:30:05,895 - INFO - POSITION RESTORED FROM FILE:
+2026-03-22 10:30:05,895 - INFO -   CE: NIFTY2632423200CE at 194.375
+2026-03-22 10:30:05,898 - INFO -   PE: NIFTY2632423050PE at 199.0
+2026-03-22 10:30:05,904 - INFO -   Entry Time: 2026-03-20 15:05:13.304496
+2026-03-22 10:30:05,904 - INFO -   Adjustment Cost: 0.0
+2026-03-22 10:30:05,906 - INFO -   Adjustments Count: 0
+2026-03-22 10:30:05,921 - INFO - POSITION RESTORED FROM FILE:
+2026-03-22 10:30:05,925 - INFO -   Symbol: INFY
+2026-03-22 10:30:05,925 - INFO -   Entry Price: 1255.6
+2026-03-22 10:30:05,927 - INFO -   Stop Loss: 1257.0
+2026-03-22 10:30:05,929 - INFO -   Quantity: 0.0625
+2026-03-22 10:30:05,933 - INFO -   Entry Time: 2026-03-20 15:14:28.614039
+2026-03-22 10:30:05,936 - INFO - Paper traders (Donchian, SMA, Equity & Nifty Options) successfully initialised....
+2026-03-22 10:30:05,936 - INFO - Testing Kite API connection...
+2026-03-22 10:30:05,936 - ERROR - Connection test failed: [Errno 2] No such file or directory: 'C:\\Users\\Sachin\\OneDrive\\Desktop\\algo\\utils\\..\\config\\secrets.yaml'

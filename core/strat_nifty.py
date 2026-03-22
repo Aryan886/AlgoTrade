@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 import pandas as pd
 
 from utils.db_func import fetch_latest_delta_data, fetch_market_data, fetch_vix_data
+from utils.market_data_1h import build_1h_market_data_from_15m
 from utils.utility import setup_paper_trading_logger
 
 
@@ -29,39 +30,37 @@ def _ceil_100(x: float) -> int:
 
 def _simple_rsi(df: pd.DataFrame, period: int = 14, price_col: str = "close") -> Optional[float]:
     """
-    Compute the latest RSI using simple rolling averages.
+    Compute the latest simple RSI from the most recent closed window.
 
     Spec alignment:
     - Section 6 calls for "5min RSI (14, simple)".
-    - "Simple" here means average gains/losses use SMA, not Wilder smoothing.
     """
     if df is None or df.empty or price_col not in df.columns:
         return None
     if period <= 0:
         raise ValueError("period must be greater than 0")
 
-    prices = pd.to_numeric(df[price_col], errors="coerce")
-    if prices.isna().all():
+    prices = pd.to_numeric(df[price_col], errors="coerce").dropna()
+    if prices.empty or len(prices) < (period + 1):
         return None
 
-    delta = prices.diff()
+    recent = prices.iloc[-(period + 1):]
+    delta = recent.diff().iloc[1:]
     gains = delta.clip(lower=0.0)
     losses = -delta.clip(upper=0.0)
 
-    avg_gain = gains.rolling(window=period, min_periods=period).mean()
-    avg_loss = losses.rolling(window=period, min_periods=period).mean()
+    avg_gain = float(gains.sum()) / float(period)
+    avg_loss = float(losses.sum()) / float(period)
 
-    rs = avg_gain / avg_loss.replace(0.0, pd.NA)
-    rsi = 100.0 - (100.0 / (1.0 + rs))
+    if avg_gain == 0.0 and avg_loss == 0.0:
+        return 50.0
+    if avg_loss == 0.0:
+        return 100.0
+    if avg_gain == 0.0:
+        return 0.0
 
-    # Handle flat / one-directional windows explicitly.
-    both_zero = (avg_gain == 0.0) & (avg_loss == 0.0)
-    rsi = rsi.mask(both_zero, 50.0)
-    rsi = rsi.mask((avg_gain > 0.0) & (avg_loss == 0.0), 100.0)
-    rsi = rsi.mask((avg_gain == 0.0) & (avg_loss > 0.0), 0.0)
-
-    latest = rsi.iloc[-1]
-    return None if pd.isna(latest) else float(latest)
+    rs = avg_gain / avg_loss
+    return float(100.0 - (100.0 / (1.0 + rs)))
 
 
 def _rolling_sma(series: pd.Series, window: int) -> pd.Series:
@@ -110,6 +109,7 @@ class NiftyOptionsStrategy:
     """
 
     SESSION_RESET_TIME = dtime(9, 15)
+    ENTRY_CUTOFF_TIME = dtime(15, 0)
 
     def __init__(
         self,
@@ -125,6 +125,13 @@ class NiftyOptionsStrategy:
         self.position_logger = nifty_logger
 
         self.state: Dict[str, Any] = self._load_state()
+
+    def _now(self) -> datetime:
+        return datetime.now()
+
+    def _entry_cutoff_reached(self, now: Optional[datetime] = None) -> bool:
+        now = now or self._now()
+        return now.time() >= self.ENTRY_CUTOFF_TIME
 
     # ---------------------------
     # Persistence + session reset
@@ -169,7 +176,7 @@ class NiftyOptionsStrategy:
             self.logger.error(f"Failed to persist strategy state: {e}")
 
     def maybe_session_reset(self, now: Optional[datetime] = None) -> bool:
-        now = now or datetime.now()
+        now = now or self._now()
         today = now.date().isoformat()
         last_reset_date = self.state.get("last_reset_date")
         if last_reset_date == today:
@@ -188,13 +195,60 @@ class NiftyOptionsStrategy:
     # ---------------------------
     # Data helpers
     # ---------------------------
+    def _fetch_market_data(self, interval: str, limit: Optional[int]) -> pd.DataFrame:
+        """Override this in BacktestableStrategy to use HistoricalDataProvider."""
+        if interval != "1h":
+            return fetch_market_data(symbol=self.symbol, interval=interval, limit=limit)
+
+        try:
+            df_1h = fetch_market_data(symbol=self.symbol, interval=interval, limit=limit)
+            if df_1h is not None and not df_1h.empty:
+                return df_1h
+            self.logger.warning("market_data_1h is empty; falling back to resampled 15m data for live strategy evaluation.")
+        except Exception as exc:
+            self.logger.warning(f"market_data_1h unavailable; falling back to resampled 15m data: {exc}")
+
+        return self._build_1h_from_15m_fallback(limit=limit)
+
+    def _fetch_vix_data(self) -> pd.DataFrame:
+        """Override this in BacktestableStrategy to use HistoricalDataProvider."""
+        return fetch_vix_data(symbol=self.symbol)
+
+    def _fetch_options_data(self) -> List[Dict[str, Any]]:
+        """Override this in BacktestableStrategy to use HistoricalDataProvider."""
+        return fetch_latest_delta_data(symbol=self.symbol)
+
     def _get_df(self, interval: str, limit: Optional[int] = 300) -> pd.DataFrame:
-        df = fetch_market_data(symbol=self.symbol, interval=interval, limit=limit)
+        df = self._fetch_market_data(interval, limit)
         if df is None or df.empty:
             return pd.DataFrame()
         df = df.copy()
         df.columns = [c.lower() for c in df.columns]
         return df
+
+    def _build_1h_from_15m_fallback(self, limit: Optional[int]) -> pd.DataFrame:
+        """Generate 1h candles in memory when persisted hourly data is unavailable."""
+        source_limit = None if limit is None else max((limit * 4) + 12, 400)
+
+        try:
+            df_15m = fetch_market_data(symbol=self.symbol, interval="15m", limit=source_limit)
+        except Exception as exc:
+            self.logger.warning(f"15m fallback data unavailable while building 1h frame: {exc}")
+            return pd.DataFrame()
+
+        if df_15m is None or df_15m.empty:
+            self.logger.warning("15m fallback data is empty; cannot synthesize 1h candles.")
+            return pd.DataFrame()
+
+        df_1h = build_1h_market_data_from_15m(df_15m)
+        if df_1h.empty:
+            self.logger.warning("Could not synthesize any complete 1h candles from 15m data.")
+            return pd.DataFrame()
+
+        if limit is not None and len(df_1h) > limit:
+            df_1h = df_1h.iloc[-limit:]
+
+        return df_1h
 
     def _compute_required_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -255,7 +309,7 @@ class NiftyOptionsStrategy:
             return False
 
     def _vix_regime(self) -> Optional[Literal["A", "B"]]:
-        vix = fetch_vix_data(symbol=self.symbol)
+        vix = self._fetch_vix_data()
         if vix is None or vix.empty or "vix_value" not in vix.columns:
             self.logger.warning("VIX data missing; cannot determine VIX regime.")
             return None
@@ -384,9 +438,9 @@ class NiftyOptionsStrategy:
             ce_upper = self._pick_option(options_data, "CE", strikes.pe_strike_upper)
             if not ce_near or not pe_upper or not ce_upper:
                 return None
-            legs.append({"action": "BUY", "tradingsymbol": ce_near["tradingsymbol"], "option_type": "CE", "strike_price": strikes.ce_strike_near, "last_price": ce_near.get("last_price")})
-            legs.append({"action": "BUY", "tradingsymbol": pe_upper["tradingsymbol"], "option_type": "PE", "strike_price": strikes.pe_strike_upper, "last_price": pe_upper.get("last_price")})
-            legs.append({"action": "SELL", "tradingsymbol": ce_upper["tradingsymbol"], "option_type": "CE", "strike_price": strikes.pe_strike_upper, "last_price": ce_upper.get("last_price")})
+            legs.append({"action": "BUY", "tradingsymbol": ce_near["tradingsymbol"], "option_type": "CE", "strike_price": strikes.ce_strike_near, "expiry": ce_near.get("expiry") or ce_near.get("expiry_date"), "last_price": ce_near.get("last_price")})
+            legs.append({"action": "BUY", "tradingsymbol": pe_upper["tradingsymbol"], "option_type": "PE", "strike_price": strikes.pe_strike_upper, "expiry": pe_upper.get("expiry") or pe_upper.get("expiry_date"), "last_price": pe_upper.get("last_price")})
+            legs.append({"action": "SELL", "tradingsymbol": ce_upper["tradingsymbol"], "option_type": "CE", "strike_price": strikes.pe_strike_upper, "expiry": ce_upper.get("expiry") or ce_upper.get("expiry_date"), "last_price": ce_upper.get("last_price")})
             return legs
 
         # position_type == "B"
@@ -395,8 +449,8 @@ class NiftyOptionsStrategy:
         pe_buy = self._pick_option(options_data, "PE", strikes.pe_strike + 100)
         if not pe_sell or not pe_buy:
             return None
-        legs.append({"action": "SELL", "tradingsymbol": pe_sell["tradingsymbol"], "option_type": "PE", "strike_price": strikes.pe_strike, "last_price": pe_sell.get("last_price")})
-        legs.append({"action": "BUY", "tradingsymbol": pe_buy["tradingsymbol"], "option_type": "PE", "strike_price": strikes.pe_strike + 100, "last_price": pe_buy.get("last_price")})
+        legs.append({"action": "SELL", "tradingsymbol": pe_sell["tradingsymbol"], "option_type": "PE", "strike_price": strikes.pe_strike, "expiry": pe_sell.get("expiry") or pe_sell.get("expiry_date"), "last_price": pe_sell.get("last_price")})
+        legs.append({"action": "BUY", "tradingsymbol": pe_buy["tradingsymbol"], "option_type": "PE", "strike_price": strikes.pe_strike + 100, "expiry": pe_buy.get("expiry") or pe_buy.get("expiry_date"), "last_price": pe_buy.get("last_price")})
         return legs
 
     # ---------------------------
@@ -485,6 +539,15 @@ class NiftyOptionsStrategy:
         sl_pts = hh - close
         return sl_pts <= float(threshold_pts)
 
+    def _section2_rsi_ok(self, df_5m: pd.DataFrame, threshold: float = 40.0) -> Tuple[bool, Optional[float]]:
+        """
+        Section 2 uses the latest closed 5m candle's RSI(14, simple).
+        """
+        latest_rsi = _simple_rsi(df_5m, period=14, price_col="close")
+        if latest_rsi is None:
+            return False, None
+        return latest_rsi > float(threshold), float(latest_rsi)
+
     # ---------------------------
     # Section 3: break & retest
     # ---------------------------
@@ -532,7 +595,14 @@ class NiftyOptionsStrategy:
         Returns an entry intent dict or None.
         This does NOT place orders or manage positions.
         """
-       # self.maybe_session_reset()
+        now = self._now()
+        if self._entry_cutoff_reached(now):
+            self.logger.info(
+                "Skipping Nifty entry evaluation because the 3:00 pm cutoff has been reached."
+            )
+            return None
+
+        # self.maybe_session_reset()
 
         # Load latest candles (keep moderate history for rolling calcs)
         df_1m = self._compute_required_indicators(self._get_df("1m", limit=300))
@@ -570,9 +640,13 @@ class NiftyOptionsStrategy:
             if self._second_flag_ok(df_1m) and self._sl_filter_ok(df_1m, lookback=7, threshold_pts=sl_threshold):
                 section1_ok = True
 
-        # Section 2 entry logic is still pending, but compute the RSI helper here
-        # so the strategy can reuse it when the filter is wired in.
-        _ = _simple_rsi(df_5m)
+        # Section 2 entry: direct 2nd-flag trigger + 5m RSI + tighter SL filter(5)
+        section2_ok = False
+        section2_rsi = None
+        if self._second_flag_ok(df_1m):
+            rsi_ok, section2_rsi = self._section2_rsi_ok(df_5m, threshold=40.0)
+            if rsi_ok and self._sl_filter_ok(df_1m, lookback=5, threshold_pts=sl_threshold):
+                section2_ok = True
 
         # Section 3 entry: break latched + retest + confirmation(2nd flag) + SL filter(7)
         section3_ok = False
@@ -580,16 +654,23 @@ class NiftyOptionsStrategy:
             if self._second_flag_ok(df_1m) and self._sl_filter_ok(df_1m, lookback=7, threshold_pts=sl_threshold):
                 section3_ok = True
 
-        if not (section1_ok or section3_ok):
+        if not (section1_ok or section2_ok or section3_ok):
             return None
 
-        # If Section 1 triggers, apply subcategory priority among latched ones
+        # Entry section priority is explicit: Section 1 > Section 2 > Section 3
+        chosen_section = None
         chosen_subcat = None
-        if section1_ok and active_subcats:
-            chosen_subcat = sorted(active_subcats, key=self._priority_sort_key)[0]
+        if section1_ok:
+            chosen_section = "section1"
+            if active_subcats:
+                chosen_subcat = sorted(active_subcats, key=self._priority_sort_key)[0]
+        elif section2_ok:
+            chosen_section = "section2"
+        else:
+            chosen_section = "section3"
 
         # Build legs from options cache
-        options_data = fetch_latest_delta_data(symbol=self.symbol)
+        options_data = self._fetch_options_data()
         if not options_data:
             self.logger.warning("Options cache missing; cannot form legs.")
             return None
@@ -605,12 +686,14 @@ class NiftyOptionsStrategy:
         if not legs:
             return None
 
-        now_ts = self._latest_ts(df_1m) or pd.Timestamp.now()
+        now_ts = self._latest_ts(df_1m) or pd.Timestamp(now)
         reason = {
-            "section": "section1" if section1_ok else "section3",
+            "section": chosen_section,
             "subcat": chosen_subcat,
             "position_type": position_type,
         }
+        if chosen_section == "section2" and section2_rsi is not None:
+            reason["rsi_5m"] = round(float(section2_rsi), 6)
 
         return {
             "symbol": self.symbol,

@@ -752,10 +752,10 @@ def get_current_delta_from_cache(
 
 def print_latest_market_data_timestamps(db_path=DB_PATH):
     """
-    Print the latest timestamp for 5m and 15m data in the database.
+    Print the latest timestamp for 5m, 15m, and 1h data in the database.
     """
     import sqlite3
-    for interval in ["5m", "15m"]:
+    for interval in ["5m", "15m", "1h"]:
         table_name = f"market_data_{interval}"
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
@@ -805,6 +805,61 @@ def fetch_latest_delta_data(symbol: str = 'NIFTY50', db_path=DB_PATH) -> List[Di
         })
     return options_data
 
+
+def fetch_latest_option_price(
+    symbol: str = 'NIFTY50',
+    tradingsymbol: Optional[str] = None,
+    strike_price: Optional[int] = None,
+    option_type: Optional[str] = None,
+    expiry: Optional[str] = None,
+    db_path=DB_PATH,
+) -> Optional[float]:
+    """
+    Fetch the latest known quote for a specific held option from delta_cache.
+
+    The lookup prefers an exact tradingsymbol match and falls back to the
+    option contract identifiers when needed.
+    """
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    try:
+        if tradingsymbol:
+            cursor.execute("""
+                SELECT ltp
+                FROM delta_cache
+                WHERE symbol = ? AND tradingsymbol = ? AND ltp IS NOT NULL
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """, (symbol, tradingsymbol))
+            row = cursor.fetchone()
+            if row and row[0] is not None:
+                return float(row[0])
+
+        if strike_price is None or not option_type:
+            return None
+
+        query = """
+            SELECT ltp
+            FROM delta_cache
+            WHERE symbol = ? AND strike_price = ? AND option_type = ? AND ltp IS NOT NULL
+        """
+        params = [symbol, int(strike_price), str(option_type).upper()]
+
+        if expiry:
+            query += " AND expiry_date = ?"
+            params.append(str(expiry))
+
+        query += " ORDER BY timestamp DESC LIMIT 1"
+        cursor.execute(query, params)
+        row = cursor.fetchone()
+        if row and row[0] is not None:
+            return float(row[0])
+
+        return None
+    finally:
+        conn.close()
+
 def sma_table_name(interval : str) -> str:
     # Replace any characters not letters/numbers with underscore
     safe_interval = re.sub(r'[^0-9a-zA-Z]+', '_', str(interval))
@@ -852,7 +907,7 @@ def store_sma_from_df(df: pd.DateOffset, symbol : str, interval: str, db_path= D
     Compute SMA with high/low tracking on df and store into market_sma_<interval>.
     - df: DataFrame indexed by timestamp (index can be DatetimeIndex or strings). Must contain 'close', 'high', 'low'.
     - symbol: single symbol string (e.g., 'NIFTY50').
-    - interval: '1m','5m','15m'
+    - interval: '1m','5m','15m','1h'
     - db_path: path to sqlite DB file
     """
     df = df.copy()

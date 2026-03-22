@@ -196,10 +196,10 @@ def simple_rsi_series(df: pd.DataFrame, period: int = 14, price_col: str = "clos
     gains = delta.clip(lower=0.0)
     losses = -delta.clip(upper=0.0)
 
-    avg_gain = gains.rolling(window=period, min_periods=period).mean()
-    avg_loss = losses.rolling(window=period, min_periods=period).mean()
+    avg_gain = gains.rolling(window=period, min_periods=period).sum() / period
+    avg_loss = losses.rolling(window=period, min_periods=period).sum() / period
 
-    rs = avg_gain / avg_loss.replace(0.0, pd.NA)
+    rs = avg_gain / avg_loss.mask(avg_loss == 0.0)
     rsi = 100.0 - (100.0 / (1.0 + rs))
 
     both_zero = (avg_gain == 0.0) & (avg_loss == 0.0)

@@ -21,7 +21,7 @@ def migrate_add_vix_column(db_path='db/trading_bot.db'):
     cursor = conn.cursor()
     
     # Tables that need VIX column
-    tables = ['market_data_1m', 'market_data_5m', 'market_data_15m']
+    tables = ['market_data_1m', 'market_data_5m', 'market_data_15m', 'market_data_1h']
     
     for table in tables:
         try:
@@ -63,7 +63,7 @@ def migrate_add_sl_sh_columns(db_path='db/trading_bot.db'):
     cursor = conn.cursor()
     
     # Tables that need SL and SH columns
-    tables = ['market_data_1m', 'market_data_5m', 'market_data_15m']
+    tables = ['market_data_1m', 'market_data_5m', 'market_data_15m', 'market_data_1h']
     
     for table in tables:
         try:
@@ -104,7 +104,7 @@ def verify_migration(db_path='db/trading_bot.db'):
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
-    tables = ['market_data_1m', 'market_data_5m', 'market_data_15m']
+    tables = ['market_data_1m', 'market_data_5m', 'market_data_15m', 'market_data_1h']
     
     print("\nVerifying migration:")
     for table in tables:
@@ -129,7 +129,7 @@ def verify_sl_sh_migration(db_path='db/trading_bot.db'):
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
-    tables = ['market_data_1m', 'market_data_5m', 'market_data_15m']
+    tables = ['market_data_1m', 'market_data_5m', 'market_data_15m', 'market_data_1h']
     
     print("\nVerifying SL/SH migration:")
     for table in tables:
