@@ -78,7 +78,7 @@ def calculate_high_accuracy_delta():
         if delta_data:
             spot_price = delta_data.get('spot_price', 0)
             strike_band = delta_data.get('strike_band', [])
-            logger.info(f"High-accuracy delta calculated: Spot={spot_price}, Strikes={strike_band}")
+            #logger.info(f"High-accuracy delta calculated: Spot={spot_price}, Strikes={strike_band}")
         else:
             logger.warning("High-accuracy delta calculation failed")
     except Exception as e:
