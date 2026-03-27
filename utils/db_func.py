@@ -478,6 +478,21 @@ def store_high_accuracy_options_data(options_list: List[Dict], symbol: str, spot
     conn.close()
     print("Options data stored successfully.")
 
+def _map_option_data_rows(rows) -> List[Dict]:
+    options_data = []
+    for row in rows:
+        options_data.append({
+            'strike_price': row[3],
+            'option_type': row[4],
+            'ltp': row[5],
+            'iv': row[6],
+            'expiry_date': row[7],
+            'spot_price': row[8],
+            'tradingsymbol': row[9],
+            'open_interest': row[10]
+        })
+    return options_data
+
 def fetch_cached_options_data(symbol: str = 'NIFTY50', db_path=DB_PATH) -> List[Dict]:
     """
     Fetch cached options data for delta calculations.
@@ -492,19 +507,38 @@ def fetch_cached_options_data(symbol: str = 'NIFTY50', db_path=DB_PATH) -> List[
     """, (symbol,))
     rows = cursor.fetchall()
     conn.close()
-    options_data = []
-    for row in rows:
-        options_data.append({
-            'strike_price': row[3],
-            'option_type': row[4],
-            'ltp': row[5],
-            'iv': row[6],
-            'expiry_date': row[7],
-            'spot_price': row[8],
-            'tradingsymbol': row[9],
-            'open_interest': row[10]
-        })
-    return options_data
+    return _map_option_data_rows(rows)
+
+def fetch_latest_option_snapshot(symbol: str = 'NIFTY50', db_path=DB_PATH) -> List[Dict]:
+    """
+    Fetch the complete latest option_data snapshot for a symbol.
+
+    Unlike fetch_cached_options_data(), this returns all rows for the most
+    recent timestamp rather than a capped tail of records.
+    """
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT MAX(timestamp)
+        FROM option_data
+        WHERE symbol = ?
+    """, (symbol,))
+    latest_timestamp = cursor.fetchone()[0]
+
+    if not latest_timestamp:
+        conn.close()
+        return []
+
+    cursor.execute("""
+        SELECT *
+        FROM option_data
+        WHERE symbol = ? AND timestamp = ?
+        ORDER BY strike_price, option_type, expiry_date
+    """, (symbol, latest_timestamp))
+    rows = cursor.fetchall()
+    conn.close()
+    return _map_option_data_rows(rows)
 
 def calculate_and_store_high_accuracy_delta(
     symbol: str = 'NIFTY50',
@@ -537,7 +571,7 @@ def calculate_and_store_high_accuracy_delta(
             return None
         
         # Get cached options data
-        cached_options = fetch_cached_options_data(symbol, db_path)
+        cached_options = fetch_latest_option_snapshot(symbol, db_path)
         #print(f"[DEBUG] Total cached_options: {len(cached_options)}")
         #print("[DEBUG] First 5 cached options:")
         """
@@ -623,7 +657,7 @@ def calculate_and_store_high_accuracy_delta(
                     'open_interest': opt.get('openInterest', 0)
                 })
             store_high_accuracy_options_data(formatted_options, symbol, spot_price, db_path)
-            cached_options = fetch_cached_options_data(symbol, db_path)
+            cached_options = fetch_latest_option_snapshot(symbol, db_path)
             
         if not cached_options:
             print("No options data available after refresh.")

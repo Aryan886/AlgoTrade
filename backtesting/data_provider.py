@@ -33,6 +33,7 @@ class HistoricalDataProvider:
     _market_data: Dict[str, pd.DataFrame] = field(default_factory=dict, repr=False)
     _vix_data: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
     _delta_cache: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
+    _option_data: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
     _data_loaded: bool = field(default=False, repr=False)
 
     def load_all_data(self, start_date: datetime, end_date: datetime) -> None:
@@ -53,6 +54,7 @@ class HistoricalDataProvider:
 
             self._vix_data = self._load_vix_data(conn, warmup_start, end_date)
             self._delta_cache = self._load_delta_cache(conn, warmup_start, end_date)
+            self._option_data = self._load_option_data(conn, start_date, end_date)
             self._data_loaded = True
         finally:
             conn.close()
@@ -162,6 +164,21 @@ class HistoricalDataProvider:
         df.columns = [c.lower() for c in df.columns]
         return df
 
+    def _load_option_data(self, conn: sqlite3.Connection, start: datetime, end: datetime) -> pd.DataFrame:
+        try:
+            query = "SELECT * FROM option_data WHERE symbol = ? AND timestamp >= ? AND timestamp <= ? ORDER BY timestamp"
+            df = pd.read_sql_query(query, conn, params=(
+                self.symbol, start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")
+            ))
+        except Exception as e:
+            print(f"Warning: Could not load option_data: {e}")
+            return pd.DataFrame()
+        if df.empty:
+            return df
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df.columns = [c.lower() for c in df.columns]
+        return df
+
     def fetch_market_data(self, current_time: datetime, interval: str, limit: int = 300) -> pd.DataFrame:
         """Returns last `limit` fully known candles for the requested interval."""
         if not self._data_loaded:
@@ -193,21 +210,10 @@ class HistoricalDataProvider:
         """Returns options data for the most recent timestamp <= current_time."""
         if not self._data_loaded:
             raise RuntimeError("Data not loaded. Call load_all_data() first.")
-        if self._delta_cache.empty:
-            return []
         current_ts = pd.Timestamp(current_time)
-        valid_records = self._delta_cache[self._delta_cache["timestamp"] <= current_ts]
-        if valid_records.empty:
-            return []
-        latest_ts = valid_records["timestamp"].max()
-        snapshot = valid_records[valid_records["timestamp"] == latest_ts]
-        result = []
-        for _, row in snapshot.iterrows():
-            record = row.to_dict()
-            record.setdefault("tradingsymbol", self._build_tradingsymbol(record))
-            record.setdefault("ltp", record.get("last_price", 0.0))
-            result.append(record)
-        return result
+        delta_snapshot = self._latest_snapshot(self._delta_cache, current_ts)
+        option_snapshot = self._latest_snapshot(self._option_data, current_ts)
+        return self._merge_option_snapshots(delta_snapshot, option_snapshot)
 
     def fetch_option_price(
         self,
@@ -220,16 +226,20 @@ class HistoricalDataProvider:
         """Return the latest known quote for a specific option contract up to current_time."""
         if not self._data_loaded:
             raise RuntimeError("Data not loaded. Call load_all_data() first.")
-        if self._delta_cache.empty:
-            return None
 
         current_ts = pd.Timestamp(current_time)
-        valid_records = self._delta_cache[self._delta_cache["timestamp"] <= current_ts]
-        if valid_records.empty:
-            return None
+        valid_records = self._delta_cache[self._delta_cache["timestamp"] <= current_ts] if not self._delta_cache.empty else pd.DataFrame()
+        option_records = self._option_data[self._option_data["timestamp"] <= current_ts] if not self._option_data.empty else pd.DataFrame()
 
         if tradingsymbol and "tradingsymbol" in valid_records.columns:
             exact_rows = valid_records[valid_records["tradingsymbol"] == tradingsymbol]
+            if not exact_rows.empty:
+                price = exact_rows.iloc[-1].get("ltp")
+                if pd.notna(price):
+                    return float(price)
+
+        if tradingsymbol and "tradingsymbol" in option_records.columns:
+            exact_rows = option_records[option_records["tradingsymbol"] == tradingsymbol]
             if not exact_rows.empty:
                 price = exact_rows.iloc[-1].get("ltp")
                 if pd.notna(price):
@@ -241,19 +251,92 @@ class HistoricalDataProvider:
         contract_rows = valid_records[
             (valid_records["strike_price"] == int(strike_price))
             & (valid_records["option_type"].astype(str).str.upper() == str(option_type).upper())
-        ]
+        ] if not valid_records.empty else pd.DataFrame()
         if expiry and "expiry_date" in contract_rows.columns:
             expiry_rows = contract_rows[contract_rows["expiry_date"].astype(str) == str(expiry)]
             if not expiry_rows.empty:
                 contract_rows = expiry_rows
 
-        if contract_rows.empty:
-            return None
+        if not contract_rows.empty:
+            price = contract_rows.iloc[-1].get("ltp")
+            if pd.notna(price):
+                return float(price)
 
-        price = contract_rows.iloc[-1].get("ltp")
-        if pd.notna(price):
-            return float(price)
+        option_contract_rows = option_records[
+            (option_records["strike_price"] == int(strike_price))
+            & (option_records["option_type"].astype(str).str.upper() == str(option_type).upper())
+        ] if not option_records.empty else pd.DataFrame()
+        if expiry and "expiry_date" in option_contract_rows.columns:
+            expiry_rows = option_contract_rows[option_contract_rows["expiry_date"].astype(str) == str(expiry)]
+            if not expiry_rows.empty:
+                option_contract_rows = expiry_rows
+
+        if not option_contract_rows.empty:
+            price = option_contract_rows.iloc[-1].get("ltp")
+            if pd.notna(price):
+                return float(price)
         return None
+
+    def _latest_snapshot(self, df: pd.DataFrame, current_ts: pd.Timestamp) -> pd.DataFrame:
+        if df is None or df.empty:
+            return pd.DataFrame()
+        valid_records = df[df["timestamp"] <= current_ts]
+        if valid_records.empty:
+            return pd.DataFrame()
+        latest_ts = valid_records["timestamp"].max()
+        return valid_records[valid_records["timestamp"] == latest_ts].copy()
+
+    def _normalize_snapshot(self, snapshot: pd.DataFrame, source: str) -> List[Dict[str, Any]]:
+        if snapshot is None or snapshot.empty:
+            return []
+        result = []
+        for _, row in snapshot.iterrows():
+            record = row.to_dict()
+            record.setdefault("tradingsymbol", self._build_tradingsymbol(record))
+            if source == "option":
+                record.setdefault("ltp", record.get("ltp") or record.get("last_price") or 0.0)
+            else:
+                record.setdefault("ltp", record.get("ltp") or record.get("last_price") or 0.0)
+            result.append(record)
+        return result
+
+    def _merge_option_snapshots(
+        self,
+        delta_snapshot: pd.DataFrame,
+        option_snapshot: pd.DataFrame,
+    ) -> List[Dict[str, Any]]:
+        option_records = self._normalize_snapshot(option_snapshot, source="option")
+        if not option_records:
+            return self._normalize_snapshot(delta_snapshot, source="delta")
+
+        delta_records = self._normalize_snapshot(delta_snapshot, source="delta")
+        delta_by_key = {}
+        for record in delta_records:
+            key = (
+                record.get("tradingsymbol"),
+                record.get("strike_price"),
+                (record.get("option_type") or "").upper(),
+                str(record.get("expiry_date") or record.get("expiry") or ""),
+            )
+            delta_by_key[key] = record
+
+        merged = []
+        for record in option_records:
+            key = (
+                record.get("tradingsymbol"),
+                record.get("strike_price"),
+                (record.get("option_type") or "").upper(),
+                str(record.get("expiry_date") or record.get("expiry") or ""),
+            )
+            merged_record = dict(record)
+            delta_record = delta_by_key.get(key)
+            if delta_record:
+                merged_record.update({
+                    "delta": delta_record.get("delta"),
+                    "timestamp": delta_record.get("timestamp", merged_record.get("timestamp")),
+                })
+            merged.append(merged_record)
+        return merged
 
     def _build_tradingsymbol(self, record: Dict[str, Any]) -> str:
         strike = record.get("strike_price", 0)

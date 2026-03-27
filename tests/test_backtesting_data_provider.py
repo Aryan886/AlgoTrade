@@ -111,6 +111,106 @@ class HistoricalDataProviderTests(unittest.TestCase):
 
         self.assertEqual(price, 235.65)
 
+    def test_fetch_delta_data_merges_full_option_snapshot_with_delta_cache(self):
+        provider = HistoricalDataProvider(db_path=":memory:")
+        provider._data_loaded = True
+        provider._delta_cache = pd.DataFrame(
+            [
+                {
+                    "timestamp": pd.Timestamp("2026-03-27 12:42:07"),
+                    "tradingsymbol": "NIFTY26MAR22950PE",
+                    "strike_price": 22950,
+                    "option_type": "PE",
+                    "expiry_date": "2026-03-30",
+                    "ltp": 226.95,
+                    "delta": -25.0,
+                },
+                {
+                    "timestamp": pd.Timestamp("2026-03-27 12:42:07"),
+                    "tradingsymbol": "NIFTY26MAR23000PE",
+                    "strike_price": 23000,
+                    "option_type": "PE",
+                    "expiry_date": "2026-03-30",
+                    "ltp": 251.18,
+                    "delta": -27.5,
+                },
+            ]
+        )
+        provider._option_data = pd.DataFrame(
+            [
+                {
+                    "timestamp": pd.Timestamp("2026-03-27 12:42:06"),
+                    "tradingsymbol": "NIFTY26MAR22900PE",
+                    "strike_price": 22900,
+                    "option_type": "PE",
+                    "expiry_date": "2026-03-30",
+                    "ltp": 205.50,
+                },
+                {
+                    "timestamp": pd.Timestamp("2026-03-27 12:42:06"),
+                    "tradingsymbol": "NIFTY26MAR22950PE",
+                    "strike_price": 22950,
+                    "option_type": "PE",
+                    "expiry_date": "2026-03-30",
+                    "ltp": 226.95,
+                },
+                {
+                    "timestamp": pd.Timestamp("2026-03-27 12:42:06"),
+                    "tradingsymbol": "NIFTY26MAR23000PE",
+                    "strike_price": 23000,
+                    "option_type": "PE",
+                    "expiry_date": "2026-03-30",
+                    "ltp": 251.18,
+                },
+            ]
+        )
+
+        options = provider.fetch_delta_data(datetime(2026, 3, 27, 12, 42, 8))
+
+        self.assertEqual({row["strike_price"] for row in options}, {22900, 22950, 23000})
+        delta_by_strike = {row["strike_price"]: row.get("delta") for row in options}
+        self.assertIsNone(delta_by_strike[22900])
+        self.assertEqual(delta_by_strike[22950], -25.0)
+        self.assertEqual(delta_by_strike[23000], -27.5)
+
+    def test_fetch_option_price_falls_back_to_option_data_when_delta_cache_misses_contract(self):
+        provider = HistoricalDataProvider(db_path=":memory:")
+        provider._data_loaded = True
+        provider._delta_cache = pd.DataFrame(
+            [
+                {
+                    "timestamp": pd.Timestamp("2026-03-27 12:42:07"),
+                    "tradingsymbol": "NIFTY26MAR22950PE",
+                    "strike_price": 22950,
+                    "option_type": "PE",
+                    "expiry_date": "2026-03-30",
+                    "ltp": 226.95,
+                },
+            ]
+        )
+        provider._option_data = pd.DataFrame(
+            [
+                {
+                    "timestamp": pd.Timestamp("2026-03-27 12:42:06"),
+                    "tradingsymbol": "NIFTY26MAR22900PE",
+                    "strike_price": 22900,
+                    "option_type": "PE",
+                    "expiry_date": "2026-03-30",
+                    "ltp": 205.50,
+                },
+            ]
+        )
+
+        price = provider.fetch_option_price(
+            current_time=datetime(2026, 3, 27, 12, 42, 8),
+            tradingsymbol="NIFTY26MAR22900PE",
+            strike_price=22900,
+            option_type="PE",
+            expiry="2026-03-30",
+        )
+
+        self.assertEqual(price, 205.50)
+
 
 if __name__ == "__main__":
     unittest.main()

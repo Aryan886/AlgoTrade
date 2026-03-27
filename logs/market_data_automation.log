@@ -25886,3 +25886,11 @@
 2026-03-27 19:07:45,321 - INFO - Starting market data automation...
 2026-03-27 19:07:45,321 - INFO - Market data automation started successfully
 2026-03-27 19:07:45,321 - INFO - Press Ctrl+C to stop the automation
+2026-03-27 20:16:29,139 - INFO - POSITION RESTORED FROM FILE:
+2026-03-27 20:16:29,139 - INFO -   CE: NIFTY2632423200CE at 194.375
+2026-03-27 20:16:29,139 - INFO -   PE: NIFTY2632423050PE at 199.0
+2026-03-27 20:16:29,139 - INFO -   Entry Time: 2026-03-20 15:05:13.304496
+2026-03-27 20:16:29,149 - INFO -   Adjustment Cost: 0.0
+2026-03-27 20:16:29,149 - INFO -   Adjustments Count: 0
+2026-03-27 20:16:29,166 - INFO - Paper traders (Donchian, SMA, Equity & Nifty Options) successfully initialised....
+2026-03-27 20:16:29,166 - INFO - Testing Kite API connection...
