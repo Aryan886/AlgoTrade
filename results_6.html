@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Backtest Report</title>
+  <style>
+    :root {
+      --bg: #f3f6ef;
+      --panel: #ffffff;
+      --ink: #17301f;
+      --muted: #5f6f65;
+      --line: #d8e0d4;
+      --accent: #2f6b3b;
+      --accent-soft: #dcedd7;
+      --danger: #b53a2f;
+      --danger-soft: #fde3df;
+      --shadow: 0 12px 30px rgba(24, 45, 27, 0.08);
+    }
+    body {
+      font-family: Segoe UI, Arial, sans-serif;
+      margin: 0;
+      padding: 28px;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, #e8f3dd 0%, rgba(232, 243, 221, 0) 32%),
+        linear-gradient(180deg, #f7faf5 0%, var(--bg) 100%);
+    }
+    h1, h2 {
+      margin-bottom: 12px;
+    }
+    h1 {
+      font-size: 34px;
+      margin-top: 0;
+      margin-bottom: 8px;
+    }
+    p {
+      color: var(--muted);
+      margin-top: 0;
+    }
+    .hero {
+      margin-bottom: 22px;
+    }
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 14px;
+      margin-bottom: 20px;
+    }
+    .kpi-card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 16px 18px;
+      box-shadow: var(--shadow);
+    }
+    .kpi-card.positive {
+      background: linear-gradient(180deg, #ffffff 0%, #f2fbef 100%);
+    }
+    .kpi-card.negative {
+      background: linear-gradient(180deg, #ffffff 0%, #fff2ef 100%);
+    }
+    .kpi-label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    .kpi-value {
+      font-size: 28px;
+      font-weight: 700;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: 1.1fr 1.9fr;
+      gap: 20px;
+      margin-bottom: 20px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 20px;
+      box-shadow: var(--shadow);
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 14px;
+      background: var(--panel);
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      text-align: left;
+    }
+    th {
+      background: #eef3eb;
+    }
+    tr:nth-child(even) td {
+      background: #f9fbf8;
+    }
+    .trade-table tbody tr.trade-win td {
+      background: var(--accent-soft);
+    }
+    .trade-table tbody tr.trade-loss td {
+      background: var(--danger-soft);
+    }
+    .trade-table tbody tr.trade-flat td {
+      background: #fbfcfb;
+    }
+    .table-wrap {
+      overflow-x: auto;
+    }
+    .equity-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .equity-meta {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .equity-chart {
+      width: 100%;
+      height: auto;
+      background: linear-gradient(180deg, #fbfdf9 0%, #f1f7ec 100%);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+    }
+    .equity-line {
+      stroke-width: 4;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .equity-line.positive {
+      stroke: var(--accent);
+    }
+    .equity-line.negative {
+      stroke: var(--danger);
+    }
+    .empty-state {
+      padding: 18px;
+      border: 1px dashed var(--line);
+      border-radius: 14px;
+      color: var(--muted);
+      background: #fbfcfa;
+    }
+    .sl-kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .sl-lot-breakdown {
+      font-size: 13px;
+      color: var(--muted);
+      padding: 10px 14px;
+      background: #f8faf6;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+    }
+    @media (max-width: 900px) {
+      body {
+        padding: 16px;
+      }
+      .layout {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="hero">
+    <h1>Backtest Report</h1>
+    <p>A cleaner view of strategy performance, trade quality, and equity movement.</p>
+  </div>
+  <div class="kpi-grid">
+    <div class="kpi-card negative"><div class="kpi-label">Total P&L</div><div class="kpi-value">-1,093.75</div></div>
+<div class="kpi-card neutral"><div class="kpi-label">Trades</div><div class="kpi-value">4</div></div>
+<div class="kpi-card neutral"><div class="kpi-label">Win Rate</div><div class="kpi-value">50.00%</div></div>
+<div class="kpi-card negative"><div class="kpi-label">Max Drawdown</div><div class="kpi-value">1,663.75</div></div>
+<div class="kpi-card neutral"><div class="kpi-label">Sharpe Ratio</div><div class="kpi-value">-13.83</div></div>
+<div class="kpi-card negative"><div class="kpi-label">Expectancy</div><div class="kpi-value">-273.44</div></div>
+  </div>
+  <div class="layout">
+    <div class="card">
+      <h2>Summary</h2>
+      <table>
+        <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+        <tbody><tr><td>Total P&L</td><td>-1,093.75</td></tr><tr><td>Number of Trades</td><td>4</td></tr><tr><td>Win Rate</td><td>50.00%</td></tr><tr><td>Avg Win</td><td>131.25</td></tr><tr><td>Avg Loss</td><td>-678.12</td></tr><tr><td>Profit Factor</td><td>0.19</td></tr><tr><td>Max Drawdown</td><td>1,663.75</td></tr><tr><td>Max Drawdown %</td><td>1.65%</td></tr><tr><td>Sharpe Ratio</td><td>-13.83</td></tr><tr><td>Expectancy</td><td>-273.44</td></tr></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h2>Equity Curve</h2>
+      
+    <div class="equity-wrap">
+      <div class="equity-meta">
+        <span>Start Equity: 100,000.00</span>
+        <span>End Equity: 98,906.25</span>
+        <span>Points: 150</span>
+      </div>
+      <svg viewBox="0 0 960 260" class="equity-chart" role="img" aria-label="Equity curve chart">
+        <polyline class="equity-line negative" fill="none" points="24.00,96.63 30.12,96.63 36.24,96.63 42.36,96.63 48.48,96.63 54.60,96.63 60.72,85.16 66.85,103.00 72.97,216.73 79.09,115.11 85.21,24.00 91.33,36.42 97.45,104.91 103.57,105.39 109.69,105.39 115.81,105.39 121.93,105.39 128.05,105.39 134.17,105.39 140.30,105.39 146.42,105.39 152.54,105.39 158.66,105.39 164.78,105.39 170.90,105.39 177.02,78.95 183.14,88.67 189.26,102.84 195.38,134.38 201.50,114.31 207.62,146.96 213.74,146.96 219.87,146.96 225.99,146.96 232.11,146.96 238.23,167.99 244.35,111.92 250.47,96.95 256.59,236.00 262.71,236.00 268.83,236.00 274.95,236.00 281.07,236.00 287.19,236.00 293.32,236.00 299.44,236.00 305.56,236.00 311.68,236.00 317.80,236.00 323.92,236.00 330.04,236.00 336.16,236.00 342.28,236.00 348.40,236.00 354.52,236.00 360.64,236.00 366.77,236.00 372.89,236.00 379.01,236.00 385.13,236.00 391.25,236.00 397.37,236.00 403.49,236.00 409.61,236.00 415.73,236.00 421.85,236.00 427.97,236.00 434.09,236.00 440.21,236.00 446.34,236.00 452.46,236.00 458.58,236.00 464.70,236.00 470.82,236.00 476.94,236.00 483.06,236.00 489.18,236.00 495.30,236.00 501.42,236.00 507.54,236.00 513.66,236.00 519.79,236.00 525.91,236.00 532.03,236.00 538.15,236.00 544.27,236.00 550.39,236.00 556.51,236.00 562.63,236.00 568.75,236.00 574.87,236.00 580.99,236.00 587.11,236.00 593.23,236.00 599.36,236.00 605.48,236.00 611.60,236.00 617.72,236.00 623.84,236.00 629.96,236.00 636.08,236.00 642.20,236.00 648.32,236.00 654.44,236.00 660.56,236.00 666.68,236.00 672.81,236.00 678.93,236.00 685.05,236.00 691.17,236.00 697.29,236.00 703.41,236.00 709.53,236.00 715.65,236.00 721.77,236.00 727.89,236.00 734.01,236.00 740.13,236.00 746.26,236.00 752.38,236.00 758.50,236.00 764.62,236.00 770.74,236.00 776.86,236.00 782.98,236.00 789.10,236.00 795.22,236.00 801.34,236.00 807.46,236.00 813.58,236.00 819.70,236.00 825.83,236.00 831.95,236.00 838.07,236.00 844.19,236.00 850.31,236.00 856.43,236.00 862.55,236.00 868.67,236.00 874.79,236.00 880.91,236.00 887.03,236.00 893.15,236.00 899.28,236.00 905.40,236.00 911.52,236.00 917.64,236.00 923.76,236.00 929.88,236.00 936.00,236.00"></polyline>
+      </svg>
+    </div>
+    
+    </div>
+  </div>
+  <div class="card">
+    <h2>Stop Loss Analysis</h2>
+    
+    <div class="sl-kpi-grid">
+      <div class="kpi-card neutral">
+        <div class="kpi-label">Total SL Adjustments</div>
+        <div class="kpi-value">11</div>
+      </div>
+      <div class="kpi-card neutral">
+        <div class="kpi-label">Avg Per Trade</div>
+        <div class="kpi-value">2.8</div>
+      </div>
+      <div class="kpi-card neutral">
+        <div class="kpi-label">Avg SL Movement</div>
+        <div class="kpi-value">0.30%</div>
+      </div>
+      <div class="kpi-card negative">
+        <div class="kpi-label">SL Hit / Time Exit</div>
+        <div class="kpi-value">4 / 0</div>
+      </div>
+    </div>
+    <div class="sl-lot-breakdown">SL Exits by Lot: lot1: 2 | lot2: 2</div>
+    
+  </div>
+  <div class="card">
+    <h2>Trade Log</h2>
+    <div class="table-wrap">
+      
+    <table class="trade-table">
+      <thead><tr><th>Trade Id</th><th>Entry Time</th><th>Exit Time</th><th>Lot Id</th><th>Position Type</th><th>Entry Price</th><th>Exit Price</th><th>Pnl</th><th>Section</th><th>Subcat</th><th>Sl Initial</th><th>Sl Final</th><th>Sl Adjustments</th><th>Exit Reason</th></tr></thead>
+      <tbody>
+        <tr class="trade-win"><td>251d16d7</td><td>2026-03-24 09:48:00</td><td>2026-03-24 10:17:00</td><td>lot1</td><td>B</td><td>-2,752.50</td><td>2,818.75</td><td>66.25</td><td>section2</td><td>None</td><td>22,783.10</td><td>22,724.45</td><td>6</td><td>SL_HIT</td></tr><tr class="trade-loss"><td>94b11410</td><td>2026-03-24 09:48:00</td><td>2026-03-24 11:50:00</td><td>lot2</td><td>B</td><td>-2,752.50</td><td>2,291.25</td><td>-461.25</td><td>section2</td><td>None</td><td>22,899.60</td><td>22,766.80</td><td>3</td><td>SL_HIT</td></tr><tr class="trade-win"><td>c9357013</td><td>2026-03-24 12:09:00</td><td>2026-03-24 12:23:00</td><td>lot1</td><td>B</td><td>-3,320.00</td><td>3,516.25</td><td>196.25</td><td>section1</td><td>a</td><td>22,805.00</td><td>22,787.75</td><td>1</td><td>SL_HIT</td></tr><tr class="trade-loss"><td>a1cdd1a3</td><td>2026-03-24 12:09:00</td><td>2026-03-24 12:25:00</td><td>lot2</td><td>B</td><td>-3,320.00</td><td>2,425.00</td><td>-895.00</td><td>section1</td><td>a</td><td>22,827.80</td><td>22,766.80</td><td>1</td><td>SL_HIT</td></tr>
+      </tbody>
+    </table>
+    
+    </div>
+  </div>
+</body>
+</html>

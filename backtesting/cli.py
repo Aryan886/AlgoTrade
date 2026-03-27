@@ -3,6 +3,8 @@ Command-line interface for backtesting.
 
 Usage:
     python -m backtesting.cli --start 2025-11-03 --end 2026-03-15 --output results.html
+    # Run backtest with debug logging enabled
+    python -m backtesting.cli --start 2025-11-03 --end 2025-11-05 --debug-log logs/debug_test.log -v
     python -m backtesting.cli --start YYYY-MM-DD --end YYYY-MM-DD --output report.html
     
 """
@@ -559,6 +561,12 @@ Examples:
         action="store_true",
         help="Print detailed progress",
     )
+    parser.add_argument(
+        "--debug-log",
+        type=str,
+        default=None,
+        help="Path for rich text debug log file (e.g., logs/backtest_debug.log)",
+    )
 
     args = parser.parse_args()
 
@@ -582,6 +590,7 @@ Examples:
         db_path=args.db,
         symbol=args.symbol,
         verbose=args.verbose,
+        debug_log_path=args.debug_log,
     )
 
     # Run backtest

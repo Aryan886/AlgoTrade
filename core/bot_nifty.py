@@ -117,7 +117,7 @@ class NiftyPaperBot:
     """
 
     SESSION_RESET_TIME = dtime(9, 15)
-    ENTRY_CUTOFF_TIME = dtime(15, 0)
+    ENTRY_CUTOFF_TIME = dtime(15, 00)
 
     def __init__(
         self,
@@ -358,6 +358,12 @@ class NiftyPaperBot:
         try:
             close = float(df_tf.iloc[-1]["close"])
         except Exception:
+            self.save_position()
+            return
+
+        opened_at = _parse_ts(lot.get("opened_at"))
+        
+        if opened_at is not None and ts < (opened_at + pd.Timedelta(minutes=5)):
             self.save_position()
             return
 

@@ -13,6 +13,7 @@ from typing import Optional
 from backtesting.data_provider import HistoricalDataProvider
 from backtesting.backtest_bot import BacktestableBot
 from backtesting.metrics import TradeLog, MetricsCalculator, BacktestResult
+from backtesting.trade_logger import BacktestTradeLogger, NullTradeLogger
 
 
 @dataclass
@@ -27,6 +28,7 @@ class BacktestConfig:
     trading_end: dtime = field(default_factory=lambda: dtime(15, 30))
     equity_update_interval: int = 5  # Update equity curve every N minutes
     verbose: bool = False
+    debug_log_path: Optional[str] = None  # Path for rich text debug log file
 
 
 class BacktestRunner:
@@ -46,6 +48,15 @@ class BacktestRunner:
         self._current_time: datetime = config.start_date
         self.trade_log = TradeLog()
 
+        # Initialize debug trade logger
+        if config.debug_log_path:
+            self.trade_logger = BacktestTradeLogger(
+                output_path=config.debug_log_path,
+                enabled=True,
+            )
+        else:
+            self.trade_logger = NullTradeLogger()
+
         # Initialize data provider
         self.data_provider = HistoricalDataProvider(
             db_path=config.db_path,
@@ -58,6 +69,7 @@ class BacktestRunner:
             current_time_fn=self.get_current_time,
             trade_log=self.trade_log,
             symbol=config.symbol,
+            debug_logger=self.trade_logger,
         )
 
         self._steps_since_equity_update = 0
@@ -112,6 +124,9 @@ class BacktestRunner:
                 print(f"  {day.date()}: {day_steps} steps, {len(self.trade_log.trades)} trades so far")
 
         print(f"Backtest complete: {total_steps} steps, {len(self.trade_log.trades)} trades")
+
+        # Close debug logger
+        self.trade_logger.close()
 
         # Compute final metrics
         return self._compute_results()

@@ -18,6 +18,15 @@ from core.bot_nifty import NiftyPaperBot, LotSpec, _to_iso, _mark_to_market_pric
 from backtesting.data_provider import HistoricalDataProvider
 from backtesting.backtest_strategy import BacktestableStrategy
 from backtesting.metrics import Trade, TradeLog, NIFTY_LOT_SIZE, SLAdjustment
+from backtesting.trade_logger import (
+    BacktestTradeLogger,
+    NullTradeLogger,
+    EntryContext,
+    ExitCheckContext,
+    ExitContext,
+    SLTrailContext,
+    GateCheckResult,
+)
 
 
 class BacktestableBot(NiftyPaperBot):
@@ -37,6 +46,7 @@ class BacktestableBot(NiftyPaperBot):
         current_time_fn: Callable[[], datetime],
         trade_log: TradeLog,
         symbol: str = "NIFTY50",
+        debug_logger: Optional[BacktestTradeLogger] = None,
     ) -> None:
         """
         Args:
@@ -44,10 +54,12 @@ class BacktestableBot(NiftyPaperBot):
             current_time_fn: Callable that returns the current simulated time
             trade_log: TradeLog instance for recording trades
             symbol: Trading symbol (default: NIFTY50)
+            debug_logger: Optional BacktestTradeLogger for rich debugging
         """
         self._data_provider = data_provider
         self._current_time_fn = current_time_fn
         self.trade_log = trade_log
+        self._debug_logger = debug_logger or NullTradeLogger()
 
         # Don't call parent __init__ directly; set up manually
         self.symbol = symbol
@@ -61,6 +73,7 @@ class BacktestableBot(NiftyPaperBot):
             current_time_fn=current_time_fn,
             symbol=symbol,
             state_file=None,  # In-memory state
+            debug_logger=self._debug_logger,
         )
 
         self.lots = [
@@ -157,6 +170,22 @@ class BacktestableBot(NiftyPaperBot):
                         trigger="INIT",
                     )
 
+        # Log entry to debug logger
+        lot1 = (self.position.get("lots") or {}).get("lot1", {})
+        lot2 = (self.position.get("lots") or {}).get("lot2", {})
+        reason = intent.get("reason", {})
+        self._debug_logger.log_entry_triggered(EntryContext(
+            timestamp=current_time,
+            section=reason.get("section", ""),
+            subcategory=reason.get("subcat"),
+            position_type=intent.get("position_type", ""),
+            gate_checks=intent.get("_gate_checks", []),
+            spot_price=float(intent.get("spot") or 0.0),
+            legs=legs,
+            lot1_sl=float(lot1.get("sl_current_level") or 0.0),
+            lot2_sl=float(lot2.get("sl_current_level") or 0.0),
+        ))
+
     def _trail_sl_for_lot(self, lot_id: str, timeframe: Literal["1m", "5m"], df_tf: pd.DataFrame) -> None:
         """Override to capture SL trail events."""
         lot = (self.position.get("lots") or {}).get(lot_id)
@@ -196,6 +225,17 @@ class BacktestableBot(NiftyPaperBot):
                 trigger="TRAIL",
             )
 
+            # Log to debug logger
+            self._debug_logger.log_sl_trail(SLTrailContext(
+                timestamp=current_time,
+                lot_id=lot_id,
+                timeframe=timeframe,
+                old_sl=old_sl,
+                new_sl=new_sl,
+                sh_value=float(new_sh) if new_sh is not None else None,
+                close_price=close_price,
+            ))
+
     def _exit_check_for_lot(self, lot_id: str, timeframe: Literal["1m", "5m"], df_tf: pd.DataFrame) -> None:
         """Override to track SL hit exits."""
         lot = (self.position.get("lots") or {}).get(lot_id)
@@ -210,6 +250,25 @@ class BacktestableBot(NiftyPaperBot):
 
         sl = float(lot.get("sl_current_level") or 0.0)
         will_exit = sl and close > sl
+
+        # Check min hold period
+        from core.bot_nifty import _parse_ts
+        opened_at = _parse_ts(lot.get("opened_at"))
+        current_time = self._current_time_fn()
+        min_hold_ok = True
+        if opened_at is not None:
+            min_hold_ok = current_time >= (opened_at + pd.Timedelta(minutes=5))
+
+        # Log exit check to debug logger
+        self._debug_logger.log_exit_check(ExitCheckContext(
+            timestamp=current_time,
+            lot_id=lot_id,
+            timeframe=timeframe,
+            candle_close=close,
+            sl_level=sl,
+            will_exit=bool(will_exit and min_hold_ok),
+            min_hold_ok=min_hold_ok,
+        ))
 
         # Mark that next exit for this lot is due to SL hit
         if will_exit:
@@ -232,6 +291,7 @@ class BacktestableBot(NiftyPaperBot):
         # Calculate P&L
         pnl = 0.0
         exit_total = 0.0
+        legs_pnl = []  # For debug logging
         for leg in lot.get("legs") or []:
             side = (leg.get("side") or "BUY").upper()
             entry = float(leg.get("entry_price") or 0.0)
@@ -246,6 +306,16 @@ class BacktestableBot(NiftyPaperBot):
                 exit_total += current * NIFTY_LOT_SIZE
             else:
                 exit_total -= current * NIFTY_LOT_SIZE
+
+            # Track for debug logging
+            legs_pnl.append({
+                "action": side,
+                "option_type": leg.get("option_type", ""),
+                "strike_price": leg.get("strike_price", ""),
+                "entry_price": entry,
+                "exit_price": current,
+                "pnl": leg_pnl,
+            })
 
         # Update lot status
         lot["status"] = "CLOSED"
@@ -279,6 +349,30 @@ class BacktestableBot(NiftyPaperBot):
                 pnl=pnl,
                 exit_reason=exit_reason,
             )
+
+            # Log to debug logger
+            from core.bot_nifty import _parse_ts
+            opened_at = _parse_ts(lot.get("opened_at"))
+            entry_time = opened_at.to_pydatetime() if opened_at else None
+
+            # Get last close price for logging
+            try:
+                df_1m = self._get_df("1m", limit=1)
+                candle_close = float(df_1m.iloc[-1]["close"]) if not df_1m.empty else 0.0
+            except Exception:
+                candle_close = 0.0
+
+            self._debug_logger.log_exit_triggered(ExitContext(
+                timestamp=current_time,
+                lot_id=lot_id,
+                exit_reason=exit_reason,
+                sl_level=final_sl,
+                candle_close=candle_close,
+                pnl=pnl,
+                entry_time=entry_time,
+                legs_pnl=legs_pnl,
+            ))
+
             del self._active_trade_ids[lot_id]
 
     def reset_position(self) -> None:

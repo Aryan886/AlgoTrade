@@ -109,7 +109,7 @@ class NiftyOptionsStrategy:
     """
 
     SESSION_RESET_TIME = dtime(9, 15)
-    ENTRY_CUTOFF_TIME = dtime(15, 0)
+    ENTRY_CUTOFF_TIME = dtime(15, 00)  # 3:00 pm cutoff to allow order placement before market close
 
     def __init__(
         self,
@@ -350,8 +350,8 @@ class NiftyOptionsStrategy:
     def _select_ce_strike_near(self, spot: float, options_data: List[Dict[str, Any]]) -> Optional[int]:
         """
         Spec clarification:
-        - Must be the closest available CE strike to spot within ±20 pts strictly.
-        - If none exists within ±20, log a warning and choose the closest strike to the ±20 boundary.
+        - Must be the closest available CE strike to spot within ±200 pts strictly.
+        - If none exists within ±200, log a warning and choose the closest strike to the ±200 boundary.
         """
         ce = []
         for o in options_data:
@@ -369,14 +369,14 @@ class NiftyOptionsStrategy:
             self.logger.warning("No CE strikes available in options cache.")
             return None
 
-        in_range = [s for s in ce if abs(s - spot) <= 20.0]
+        in_range = [s for s in ce if abs(s - spot) <= 200.0]
         if in_range:
             # closest to spot (tie-breaker: lower abs, then lower strike)
             chosen = min(in_range, key=lambda s: (abs(s - spot), s))
             return int(chosen)
 
-        # fallback: closest to the interval [spot-20, spot+20]
-        lower, upper = spot - 20.0, spot + 20.0
+        # fallback: closest to the interval [spot-200, spot+200]
+        lower, upper = spot - 200.0, spot + 200.0
         def dist_to_range(s: float) -> float:
             if s < lower:
                 return lower - s
@@ -386,8 +386,8 @@ class NiftyOptionsStrategy:
 
         chosen = min(ce, key=lambda s: (dist_to_range(s), abs(s - spot), s))
         self.logger.warning(
-            f"No CE strike found within ±20 of spot={spot:.2f}. "
-            f"Fallback selecting CE strike {int(chosen)} (closest to the ±20 boundary)."
+            f"No CE strike found within ±200 of spot={spot:.2f}. "
+            f"Fallback selecting CE strike {int(chosen)} (closest to the ±200 boundary)."
         )
         return int(chosen)
 
@@ -636,14 +636,15 @@ class NiftyOptionsStrategy:
         # Section 1 entry: requires any latched subcategory + 2nd flag + SL filter(7)
         section1_ok = False
         active_subcats = [k for k, v in (self.state.get("section1_flags") or {}).items() if v]
+        second_flag_ok = self._second_flag_ok(df_1m)
         if active_subcats:
-            if self._second_flag_ok(df_1m) and self._sl_filter_ok(df_1m, lookback=7, threshold_pts=sl_threshold):
+            if second_flag_ok and self._sl_filter_ok(df_1m, lookback=5, threshold_pts=sl_threshold):
                 section1_ok = True
 
-        # Section 2 entry: direct 2nd-flag trigger + 5m RSI + tighter SL filter(5)
+        # Section 2 entry: direct 2nd-flag trigger + 5m RSI + SL filter(7)
         section2_ok = False
         section2_rsi = None
-        if self._second_flag_ok(df_1m):
+        if second_flag_ok:
             rsi_ok, section2_rsi = self._section2_rsi_ok(df_5m, threshold=40.0)
             if rsi_ok and self._sl_filter_ok(df_1m, lookback=5, threshold_pts=sl_threshold):
                 section2_ok = True
@@ -651,7 +652,7 @@ class NiftyOptionsStrategy:
         # Section 3 entry: break latched + retest + confirmation(2nd flag) + SL filter(7)
         section3_ok = False
         if self._section3_retest_ok(df_5m):
-            if self._second_flag_ok(df_1m) and self._sl_filter_ok(df_1m, lookback=7, threshold_pts=sl_threshold):
+            if second_flag_ok and self._sl_filter_ok(df_1m, lookback=5, threshold_pts=sl_threshold):
                 section3_ok = True
 
         if not (section1_ok or section2_ok or section3_ok):
@@ -708,4 +709,3 @@ class NiftyOptionsStrategy:
             },
             "legs": legs,  # list[leg]
         }
-
