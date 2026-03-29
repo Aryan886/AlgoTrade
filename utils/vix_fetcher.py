@@ -6,7 +6,13 @@ Fetches live option chain data from Kite API, calculates VIX, and stores in data
 import pandas as pd
 import math
 from datetime import datetime, timedelta
-from utils.db_func import store_vix_data_bulk, fetch_vix_data, store_high_accuracy_options_data
+from utils.db_func import (
+    store_vix_data_bulk,
+    fetch_vix_data,
+    store_high_accuracy_options_data,
+    build_nifty_strategy_required_contracts,
+    summarize_option_snapshot_coverage,
+)
 from broker.zerodha_client import kite_from_saved_token
 import time
 import sqlite3
@@ -80,7 +86,7 @@ def get_nifty50_spot_price():
         return None
 
 
-def fetch_live_option_chain():
+def fetch_live_option_chain(spot_price=None, required_contracts=None):
     """
     Fetch NIFTY option chain quotes and return a list of enriched dicts:
     Each dict has keys: strikePrice, optionType (CE/PE), expiry, tradingsymbol,
@@ -113,74 +119,145 @@ def fetch_live_option_chain():
 
         print(f"Found {len(nifty_option_symbols)} option instruments")
 
+        def expiry_sort_value(inst):
+            expiry = inst.get('expiry')
+            if isinstance(expiry, str):
+                try:
+                    return datetime.strptime(expiry, "%Y-%m-%d").date()
+                except Exception:
+                    return expiry
+            if hasattr(expiry, 'date'):
+                return expiry.date()
+            return expiry
+
+        if required_contracts is None and spot_price is not None:
+            ce_strikes = [
+                int(inst.get('strike'))
+                for inst in nifty_option_symbols
+                if inst.get('instrument_type') == 'CE' and inst.get('strike') is not None
+            ]
+            required_contracts = build_nifty_strategy_required_contracts(spot_price, ce_strikes)
+
+        required_quote_keys = []
+        if required_contracts:
+            for contract in required_contracts:
+                option_type = str(contract.get("option_type") or "").upper()
+                strike_price = contract.get("strike_price")
+                if strike_price is None:
+                    continue
+                candidates = [
+                    inst for inst in nifty_option_symbols
+                    if inst.get('instrument_type') == option_type and int(inst.get('strike') or 0) == int(strike_price)
+                ]
+                if not candidates:
+                    continue
+                chosen = min(candidates, key=lambda inst: (expiry_sort_value(inst), inst.get('tradingsymbol') or ""))
+                required_quote_keys.append(f"NFO:{chosen['tradingsymbol']}")
+
+        required_quote_keys = sorted(set(required_quote_keys))
+
         # batch fetch quotes
         batch_size = 50
         results = []
-        quote_keys = []
         # prepare map tradingsymbol -> instrument
         ts_map = {f"NFO:{inst['tradingsymbol']}": inst for inst in nifty_option_symbols}
+        seen_symbols = set()
+
+        def append_quotes(quote_keys, quotes):
+            for sym in quote_keys:
+                if sym in seen_symbols or sym not in quotes:
+                    continue
+                q = quotes[sym]
+                inst = ts_map[sym]
+                strike = inst.get('strike')
+                opt_type = inst.get('instrument_type')
+                expiry = inst.get('expiry')
+                tradingsymbol = inst.get('tradingsymbol')
+                oi = q.get('oi') or q.get('open_interest') or q.get('openInterest') or 0
+
+                bestBid = 0.0
+                bestAsk = 0.0
+                depth = q.get('depth') or {}
+                buys = depth.get('buy') or []
+                sells = depth.get('sell') or []
+
+                if buys and isinstance(buys, list) and len(buys) > 0:
+                    bestBid = buys[0].get('price') or buys[0].get('price')
+                if sells and isinstance(sells, list) and len(sells) > 0:
+                    bestAsk = sells[0].get('price') or sells[0].get('price')
+
+                try:
+                    if bestBid and bestAsk:
+                        ltp = (float(bestBid) + float(bestAsk)) / 2.0
+                    elif bestBid:
+                        ltp = float(bestBid)
+                    elif bestAsk:
+                        ltp = float(bestAsk)
+                    else:
+                        ltp = q.get('last_price') or q.get('lastPrice') or q.get('ltp') or 0
+                except Exception as e:
+                    print(f"Failed to calculate ltp due to : {e}")
+                    ltp = q.get('last_price') or q.get('lastPrice') or q.get('ltp') or 0
+
+                results.append({
+                    "strikePrice": strike,
+                    "optionType": opt_type,
+                    "expiry": expiry,
+                    "tradingsymbol": tradingsymbol,
+                    "bestBid": bestBid,
+                    "bestAsk": bestAsk,
+                    "lastPrice": ltp,
+                    "openInterest": oi
+                })
+                seen_symbols.add(sym)
 
         keys = list(ts_map.keys())
         for i in range(0, len(keys), batch_size):
             chunk = keys[i:i+batch_size]
             try:
                 quotes = kite.quote(chunk)
-                for sym in chunk:
-                    if sym not in quotes:
-                        continue
-                    q = quotes[sym]
-                    inst = ts_map[sym]
-                    strike = inst.get('strike')
-                    opt_type = inst.get('instrument_type')
-                    expiry = inst.get('expiry')
-                    tradingsymbol = inst.get('tradingsymbol')
-                    #ltp = q.get('last_price') or q.get('lastPrice') or q.get('ltp') or 0
-                    oi = q.get('oi') or q.get('open_interest') or q.get('openInterest') or 0
-
-                    # depth may have buy/sell lists
-                    bestBid = 0.0
-                    bestAsk = 0.0
-                    depth = q.get('depth') or {}
-                    buys = depth.get('buy') or []
-                    sells = depth.get('sell') or []
-
-                    if buys and isinstance(buys, list) and len(buys) > 0:
-                        bestBid = buys[0].get('price') or buys[0].get('price')
-                    if sells and isinstance(sells, list) and len(sells) > 0:
-                        bestAsk = sells[0].get('price') or sells[0].get('price')
-
-                    #--- Synthetic LTP Caluclation --- #
-                    
-                    try:
-                        if bestBid and bestAsk:
-                            ltp = (float(bestBid) + float(bestAsk)) / 2.0
-                        elif bestBid:
-                            ltp = float(bestBid)
-                        elif bestAsk:
-                            ltp = float(bestAsk)
-
-                        else:
-                            ltp = q.get('last_price') or q.get('lastPrice') or q.get('ltp') or 0
-                    except Exception as e:
-                        print(f"Failed to calculate ltp due to : {e}")
-                        
-                    
-                    results.append({
-                        "strikePrice": strike,
-                        "optionType": opt_type,
-                        "expiry": expiry,
-                        "tradingsymbol": tradingsymbol,
-                        "bestBid": bestBid,
-                        "bestAsk": bestAsk,
-                        "lastPrice": ltp,
-                        "openInterest": oi
-                    })
+                append_quotes(chunk, quotes)
                 # small pause
                 time.sleep(0.2)
             except Exception as e:
                 print("Error fetching chunk quotes:", e)
                 time.sleep(0.5)
                 continue
+
+        missing_required_keys = [key for key in required_quote_keys if key not in seen_symbols]
+        if missing_required_keys:
+            print(f"[OPTION SNAPSHOT] Retrying {len(missing_required_keys)} required contract quote(s)")
+            for i in range(0, len(missing_required_keys), 10):
+                chunk = missing_required_keys[i:i+10]
+                try:
+                    quotes = kite.quote(chunk)
+                    append_quotes(chunk, quotes)
+                    time.sleep(0.2)
+                except Exception as e:
+                    print("Error retrying required quote chunk:", e)
+                    time.sleep(0.5)
+                    continue
+
+        if required_contracts:
+            coverage = summarize_option_snapshot_coverage(
+                [
+                    {
+                        "option_type": row["optionType"],
+                        "strike_price": row["strikePrice"],
+                    }
+                    for row in results
+                ],
+                required_contracts=required_contracts,
+            )
+            missing_desc = ", ".join(
+                f"{item['option_type']} {item['strike_price']}"
+                for item in coverage["missing_required_contracts"]
+            ) or "none"
+            print(
+                f"[OPTION SNAPSHOT] contracts={coverage['contract_count']} "
+                f"range={coverage['min_available_strike']}-{coverage['max_available_strike']} "
+                f"missing={missing_desc}"
+            )
 
         print(f"Fetched {len(results)} option quotes")
         return results

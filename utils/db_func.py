@@ -1,7 +1,7 @@
 import sqlite3
 import pandas as pd
 import os
-from typing import Optional, List, Dict
+from typing import Any, Optional, List, Dict
 from datetime import datetime
 from datetime import date
 from config.config import CONFIG
@@ -24,6 +24,150 @@ PRUNE_AFTER_MINUTES = CONFIG["PRUNE_AFTER_MINUTES"]
 ENABLE_DELTA_LOGGING = CONFIG["ENABLE_DELTA_LOGGING"]
 
 EXPECTED_COLUMNS = ['open', 'high', 'low', 'close', 'ao_value', 'donchian_upper', 'donchian_lower', 'donchian_mid']
+
+
+def _nearest_100(x: float) -> int:
+    return int(((float(x) + 50.0) // 100.0) * 100)
+
+
+def _ceil_100(x: float) -> int:
+    value = float(x)
+    return int(((value + 99.999999999) // 100.0) * 100)
+
+
+def _select_ce_strike_near(spot_price: float, ce_strikes: List[int]) -> Optional[int]:
+    if not ce_strikes:
+        return None
+
+    normalized = sorted({int(strike) for strike in ce_strikes})
+    in_range = [strike for strike in normalized if abs(strike - float(spot_price)) <= 200.0]
+    if in_range:
+        return int(min(in_range, key=lambda strike: (abs(strike - float(spot_price)), strike)))
+
+    lower = float(spot_price) - 200.0
+    upper = float(spot_price) + 200.0
+
+    def distance_to_band(strike: int) -> float:
+        if strike < lower:
+            return lower - strike
+        if strike > upper:
+            return strike - upper
+        return 0.0
+
+    return int(min(normalized, key=lambda strike: (distance_to_band(strike), abs(strike - float(spot_price)), strike)))
+
+
+def build_nifty_strategy_required_contracts(
+    spot_price: float,
+    available_ce_strikes: Optional[List[int]] = None,
+    position_type: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Return the exact strike/type contracts the NIFTY strategy expects to exist."""
+    pe_strike = _nearest_100(float(spot_price))
+    pe_plus_100 = pe_strike + 100
+    pe_upper = _ceil_100(float(spot_price) + 200.0)
+    ce_near = _select_ce_strike_near(float(spot_price), available_ce_strikes or [pe_strike])
+
+    required: List[tuple[str, int]] = []
+    normalized_position_type = (position_type or "").upper()
+    if normalized_position_type == "A":
+        if ce_near is not None:
+            required.append(("CE", ce_near))
+        required.extend([("PE", pe_upper), ("CE", pe_upper)])
+    elif normalized_position_type == "B":
+        required.extend([("PE", pe_strike), ("PE", pe_plus_100)])
+    else:
+        if ce_near is not None:
+            required.append(("CE", ce_near))
+        required.extend([
+            ("PE", pe_strike),
+            ("PE", pe_plus_100),
+            ("PE", pe_upper),
+            ("CE", pe_upper),
+        ])
+
+    deduped: List[Dict[str, Any]] = []
+    seen = set()
+    for option_type, strike_price in required:
+        key = (option_type, int(strike_price))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append({"option_type": option_type, "strike_price": int(strike_price)})
+    return deduped
+
+
+def summarize_option_snapshot_coverage(
+    option_rows: List[Dict[str, Any]],
+    required_contracts: Optional[List[Dict[str, Any]]] = None,
+    snapshot_timestamp: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Summarize whether a snapshot contains the exact contracts required by the strategy."""
+    available_contracts = set()
+    strikes: List[int] = []
+    resolved_timestamp = snapshot_timestamp
+
+    for row in option_rows or []:
+        option_type = str(row.get("option_type") or "").upper()
+        strike_price = row.get("strike_price")
+        if not option_type or strike_price is None:
+            continue
+        try:
+            strike_int = int(float(strike_price))
+        except Exception:
+            continue
+        available_contracts.add((option_type, strike_int))
+        strikes.append(strike_int)
+        if resolved_timestamp is None and row.get("timestamp") is not None:
+            resolved_timestamp = str(row.get("timestamp"))
+
+    missing_required_contracts: List[Dict[str, Any]] = []
+    for contract in required_contracts or []:
+        option_type = str(contract.get("option_type") or "").upper()
+        strike_price = contract.get("strike_price")
+        if strike_price is None:
+            continue
+        key = (option_type, int(strike_price))
+        if key not in available_contracts:
+            missing_required_contracts.append({
+                "option_type": option_type,
+                "strike_price": int(strike_price),
+            })
+
+    return {
+        "snapshot_timestamp": resolved_timestamp,
+        "contract_count": len(option_rows or []),
+        "available_contract_count": len(available_contracts),
+        "min_available_strike": min(strikes) if strikes else None,
+        "max_available_strike": max(strikes) if strikes else None,
+        "required_contracts": list(required_contracts or []),
+        "missing_required_contracts": missing_required_contracts,
+        "complete": len(missing_required_contracts) == 0,
+    }
+
+
+def inspect_latest_option_snapshot_coverage(
+    symbol: str = 'NIFTY50',
+    required_contracts: Optional[List[Dict[str, Any]]] = None,
+    db_path=DB_PATH,
+) -> Dict[str, Any]:
+    """Inspect the full latest stored option snapshot for required contract coverage."""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT MAX(timestamp)
+        FROM option_data
+        WHERE symbol = ?
+    """, (symbol,))
+    latest_timestamp = cursor.fetchone()[0]
+    conn.close()
+
+    latest_rows = fetch_latest_option_snapshot(symbol, db_path)
+    return summarize_option_snapshot_coverage(
+        latest_rows,
+        required_contracts=required_contracts,
+        snapshot_timestamp=latest_timestamp,
+    )
 
 def ensure_db_dir(path=DB_PATH):
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -540,6 +684,20 @@ def fetch_latest_option_snapshot(symbol: str = 'NIFTY50', db_path=DB_PATH) -> Li
     conn.close()
     return _map_option_data_rows(rows)
 
+
+def _log_option_snapshot_coverage(context: str, coverage: Dict[str, Any]) -> None:
+    missing_desc = ", ".join(
+        f"{item['option_type']} {item['strike_price']}"
+        for item in coverage.get("missing_required_contracts", [])
+    ) or "none"
+    print(
+        f"[OPTION COVERAGE] {context}: "
+        f"ts={coverage.get('snapshot_timestamp')} "
+        f"contracts={coverage.get('contract_count')} "
+        f"range={coverage.get('min_available_strike')}-{coverage.get('max_available_strike')} "
+        f"missing={missing_desc}"
+    )
+
 def calculate_and_store_high_accuracy_delta(
     symbol: str = 'NIFTY50',
     strike_band: Optional[List[int]] = None,
@@ -570,6 +728,20 @@ def calculate_and_store_high_accuracy_delta(
             print("Could not get spot price")
             return None
         
+        def build_required_contracts(option_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            ce_strikes = []
+            for row in option_rows:
+                if str(row.get("option_type") or "").upper() != "CE":
+                    continue
+                strike_price = row.get("strike_price")
+                if strike_price is None:
+                    continue
+                try:
+                    ce_strikes.append(int(float(strike_price)))
+                except Exception:
+                    continue
+            return build_nifty_strategy_required_contracts(spot_price, ce_strikes)
+
         # Get cached options data
         cached_options = fetch_latest_option_snapshot(symbol, db_path)
         #print(f"[DEBUG] Total cached_options: {len(cached_options)}")
@@ -618,12 +790,15 @@ def calculate_and_store_high_accuracy_delta(
                 all_expired = False
                 break
                 
-        # Refresh cache if expired/empty OR too stale by age
+        # Refresh cache if expired/empty OR too stale by age.
+        # Keep the shared live path permissive so existing consumers continue to
+        # see the same behavior as before; stricter completeness checks belong
+        # in strategy/backtest-specific call paths.
         STALE_THRESHOLD_SECONDS = 15
         is_stale_by_age = newest_age is not None and newest_age > STALE_THRESHOLD_SECONDS
         if all_expired or not cached_options or is_stale_by_age:
             print("All cached options are expired or cache is empty. Fetching fresh option data...")
-            from utils.vix_fetcher import fetch_live_option_chain, store_high_accuracy_options_data
+            from utils.vix_fetcher import fetch_live_option_chain
             fresh_options = fetch_live_option_chain()
             if not fresh_options:
                 print("Failed to fetch fresh option data.")
@@ -662,6 +837,11 @@ def calculate_and_store_high_accuracy_delta(
         if not cached_options:
             print("No options data available after refresh.")
             return None
+
+        coverage = summarize_option_snapshot_coverage(
+            cached_options,
+            required_contracts=build_required_contracts(cached_options),
+        )
             
         if strike_band is None:
             strikes = [opt['strike_price'] for opt in cached_options]
@@ -738,7 +918,8 @@ def calculate_and_store_high_accuracy_delta(
             'spot_price': spot_price,
             'strike_band': strike_band,
             'delta_results': delta_results,
-            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'coverage': coverage,
         }
     except Exception as e:
         print(f"Error in delta calculation: {e}")

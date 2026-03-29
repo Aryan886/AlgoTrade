@@ -13,8 +13,10 @@ from typing import Any, Callable, Dict, List, Literal, Optional
 
 import pandas as pd
 
+import core.strat_nifty as strat_nifty_module
 from core.strat_nifty import NiftyOptionsStrategy, _ensure_cols
 from backtesting.data_provider import HistoricalDataProvider
+from backtesting.option_snapshot import validate_nifty_strategy_snapshot
 from backtesting.trade_logger import BacktestTradeLogger, NullTradeLogger, GateCheckResult
 
 
@@ -48,7 +50,20 @@ class BacktestableStrategy(NiftyOptionsStrategy):
 
         # Initialize parent with a dummy state file
         # We'll override state management for backtesting
-        super().__init__(symbol=symbol, state_file=state_file or "")
+        safe_logger = logging.getLogger("backtest.strategy.init")
+        original_logger_factory = strat_nifty_module.setup_paper_trading_logger
+        strat_nifty_module.setup_paper_trading_logger = lambda: (
+            safe_logger,
+            safe_logger,
+            safe_logger,
+            safe_logger,
+            safe_logger,
+            safe_logger,
+        )
+        try:
+            super().__init__(symbol=symbol, state_file=state_file or "")
+        finally:
+            strat_nifty_module.setup_paper_trading_logger = original_logger_factory
 
         # Override to use in-memory state for backtest isolation
         if state_file is None:
@@ -65,7 +80,7 @@ class BacktestableStrategy(NiftyOptionsStrategy):
         return self._data_provider.fetch_market_data(
             current_time=current_time,
             interval=interval,
-            limit=limit or 300,
+            limit=300 or 500,  # Fetch more data than needed to ensure we have enough after time-gating
         )
 
     def _fetch_vix_data(self) -> pd.DataFrame:
@@ -93,6 +108,14 @@ class BacktestableStrategy(NiftyOptionsStrategy):
     def reset_state(self) -> None:
         """Reset strategy state to default values."""
         self.state = self._default_state()
+
+    def _build_legs(self, position_type: Literal["A", "B"], strikes, options_data: List[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
+        """Apply strict snapshot validation only in backtests before selecting exact legs."""
+        validation_error = validate_nifty_strategy_snapshot(position_type, strikes, options_data)
+        if validation_error:
+            self.logger.warning(validation_error)
+            return None
+        return super()._build_legs(position_type, strikes, options_data)
 
     def evaluate_for_entry(self) -> Optional[Dict[str, Any]]:
         """
@@ -142,7 +165,8 @@ class BacktestableStrategy(NiftyOptionsStrategy):
             return None
 
         # Latch new subcategory touches (Section 1)
-        self._detect_touches_and_latch({"1m": df_1m, "5m": df_5m, "15m": df_15m, "1h": df_1h})
+        #self._detect_touches_and_latch({"1m": df_1m, "5m": df_5m, "15m": df_15m, "1h": df_1h})
+        self._detect_touches_and_latch({"5m": df_5m, "15m": df_15m, "1h": df_1h})
 
         # Update Section 3 break latch
         latest_5m_ts = self._latest_ts(df_5m)
@@ -178,11 +202,12 @@ class BacktestableStrategy(NiftyOptionsStrategy):
         second_flag_ok = self._second_flag_ok(df_1m)
 
         if active_subcats:
-            # Log 1st Flag (which subcategories are latched)
+            # Log 1st Flag with detailed touch information
+            section1_details = self._get_section1_flag_details({"1m": df_1m, "5m": df_5m, "15m": df_15m, "1h": df_1h})
             gate_checks.append(GateCheckResult(
                 gate_name="1st Flag (Section 1)",
                 passed=True,
-                details={"active_subcategories": active_subcats},
+                details=section1_details,
             ))
 
             if second_flag_ok:
@@ -331,6 +356,44 @@ class BacktestableStrategy(NiftyOptionsStrategy):
             "sma_20": float(last.get("sma_20", 0)),
             "sma_50": float(last.get("sma_50", 0)),
             "sma_200": float(last.get("sma_200", 0)),
+        }
+
+    def _get_section1_flag_details(self, data_by_interval: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
+        """Extract detailed information about Section 1 flags for logging."""
+        active_subcats = [k for k, v in (self.state.get("section1_flags") or {}).items() if v]
+        if not active_subcats:
+            return {"active_subcategories": [], "touches": []}
+        
+        defs = self._section1_subcategory_defs()
+        touches = []
+        
+        for subcat in sorted(active_subcats, key=self._priority_sort_key):
+            interval, indicator = defs[subcat]
+            df = data_by_interval.get(interval)
+            
+            touch_info = {
+                "subcat": subcat,
+                "interval": interval,
+                "indicator": indicator,
+                "high": None,
+                "indicator_value": None,
+                "touch_time": self.state.get("section1_last_touch", {}).get(subcat),
+            }
+            
+            if df is not None and not df.empty:
+                df = self._compute_required_indicators(df)
+                if _ensure_cols(df, ["high", indicator]):
+                    last = df.iloc[-1]
+                    touch_info["high"] = float(last["high"])
+                    ind_val = last.get(indicator)
+                    if pd.notna(ind_val):
+                        touch_info["indicator_value"] = float(ind_val)
+            
+            touches.append(touch_info)
+        
+        return {
+            "active_subcategories": active_subcats,
+            "touches": touches,
         }
 
     def _get_vix_regime_values(self) -> Dict[str, Any]:

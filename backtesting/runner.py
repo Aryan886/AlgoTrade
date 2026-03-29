@@ -12,6 +12,7 @@ from typing import Optional
 
 from backtesting.data_provider import HistoricalDataProvider
 from backtesting.backtest_bot import BacktestableBot
+from backtesting.exceptions import StrictBacktestDataError
 from backtesting.metrics import TradeLog, MetricsCalculator, BacktestResult
 from backtesting.trade_logger import BacktestTradeLogger, NullTradeLogger
 
@@ -157,6 +158,8 @@ class BacktestRunner:
             # Run bot cycle
             try:
                 self.bot.run_once()
+            except StrictBacktestDataError:
+                raise
             except Exception as e:
                 if self.config.verbose:
                     print(f"    Error at {current}: {e}")

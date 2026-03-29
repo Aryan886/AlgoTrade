@@ -9,13 +9,23 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Literal, Optional
 
 import pandas as pd
 
-from core.bot_nifty import NiftyPaperBot, LotSpec, _to_iso, _mark_to_market_price_map, _leg_pnl, _get_latest_sh, _latest_ts
+from core.bot_nifty import (
+    NiftyPaperBot,
+    LotSpec,
+    _to_iso,
+    _mark_to_market_price_map,
+    _leg_pnl,
+    _get_latest_sh,
+    _latest_ts,
+    _highest_high_last_n,
+)
 from backtesting.data_provider import HistoricalDataProvider
+from backtesting.exceptions import StrictBacktestDataError
 from backtesting.backtest_strategy import BacktestableStrategy
 from backtesting.metrics import Trade, TradeLog, NIFTY_LOT_SIZE, SLAdjustment
 from backtesting.trade_logger import (
@@ -39,6 +49,8 @@ class BacktestableBot(NiftyPaperBot):
     - Calculates P&L using historical options prices
     - No file I/O for position persistence
     """
+
+    TARGET_FILL_LATENCY = timedelta(seconds=5)
 
     def __init__(
         self,
@@ -116,26 +128,154 @@ class BacktestableBot(NiftyPaperBot):
         """Override to always start with empty position."""
         return {"symbol": self.symbol, "lots": {}, "meta": {}}
 
+    def _next_fill_snapshot(self, signal_time: datetime, phase: str) -> tuple[datetime, List[Dict[str, Any]], Dict[str, float]]:
+        """Fetch the first options snapshot at or after the target fill latency."""
+        target_fill_time = signal_time + self.TARGET_FILL_LATENCY
+        fill_time, options_data = self._data_provider.fetch_next_delta_snapshot(target_fill_time)
+        if fill_time is None or not options_data:
+            raise StrictBacktestDataError(
+                f"Missing post-signal options snapshot for {phase} after target fill time {target_fill_time:%Y-%m-%d %H:%M:%S}"
+            )
+        return fill_time, options_data, _mark_to_market_price_map(options_data)
+
+    def _strict_leg_prices(
+        self,
+        legs: List[Dict[str, Any]],
+        price_map: Dict[str, float],
+        fill_time: datetime,
+        phase: str,
+    ) -> Dict[str, float]:
+        """Resolve strict per-leg prices from a single fill snapshot."""
+        prices: Dict[str, float] = {}
+        missing: List[str] = []
+
+        for leg in legs:
+            symbol = leg.get("tradingsymbol") or ""
+            price = price_map.get(symbol)
+            if price is None or pd.isna(price):
+                missing.append(symbol or "<unknown>")
+                continue
+            prices[symbol] = float(price)
+
+        if missing:
+            raise StrictBacktestDataError(
+                f"Missing {phase} price(s) at {fill_time:%Y-%m-%d %H:%M:%S} for: {', '.join(missing)}"
+            )
+        return prices
+
     def _open_two_lots(self, intent: Dict[str, Any]) -> None:
         """Override to log trade to TradeLog after opening."""
-        # Call parent implementation
-        super()._open_two_lots(intent)
+        if self._entry_cutoff_reached():
+            self.logger.info("Skipping new Nifty entry because the 3:00 pm cutoff has been reached.")
+            return
 
-        # Log the trade entry
-        current_time = self._current_time_fn()
+        if not self.all_lots_flat():
+            self.logger.info("Skipping new Nifty entry because an existing position is still open.")
+            return
+
+        signal_time = self._current_time_fn()
+        lots_obj: Dict[str, Any] = self.position.setdefault("lots", {})
         legs = intent.get("legs") or []
+        if not legs:
+            return
 
-        # Calculate total entry premium
+        df_1m = self._get_df("1m", limit=200)
+        df_5m = self._get_df("5m", limit=200)
+        if df_1m.empty or df_5m.empty:
+            self.logger.warning("Cannot open lots: missing 1m/5m market data.")
+            return
+
+        try:
+            entry_close = float(df_1m.iloc[-1]["close"])
+        except Exception:
+            self.logger.warning("Cannot open lots: missing 1m close for entry price reference.")
+            return
+
+        lot1_sl = _highest_high_last_n(df_1m, 7)
+        lot2_sl = _highest_high_last_n(df_5m, 7)
+        if lot1_sl is None or lot2_sl is None:
+            self.logger.warning("Cannot open lots: insufficient candles for initial SL (need 7).")
+            return
+
+        try:
+            fill_time, _, price_map = self._next_fill_snapshot(signal_time, "entry")
+            strict_prices = self._strict_leg_prices(legs, price_map, fill_time, "entry")
+        except StrictBacktestDataError as exc:
+            message = str(exc)
+            self.logger.warning(message)
+            self.trade_log.record_skipped_entry(signal_time, message)
+            self._debug_logger.log_entry_evaluation_blocked(
+                signal_time,
+                intent.get("_gate_checks", []),
+                message,
+            )
+            return
+
+        def normalize_leg(l: Dict[str, Any]) -> Dict[str, Any]:
+            sym = l.get("tradingsymbol")
+            side = (l.get("action") or "").upper()
+            option_type = (l.get("option_type") or "").upper() or None
+            strike_price = l.get("strike_price")
+            expiry = l.get("expiry")
+            entry_price = strict_prices.get(sym, 0.0)
+            return {
+                "tradingsymbol": sym,
+                "side": side,
+                "option_type": option_type,
+                "strike_price": int(strike_price) if strike_price is not None else None,
+                "expiry": expiry,
+                "entry_price": entry_price,
+                "last_price": entry_price,
+                "exit_price": None,
+                "exit_time": None,
+            }
+
+        norm_legs = [normalize_leg(l) for l in legs]
+
         entry_total = 0.0
-        for leg in legs:
-            price = leg.get("last_price") or 0.0
-            action = (leg.get("action") or "").upper()
+        for leg in norm_legs:
+            price = float(leg.get("entry_price") or 0.0)
+            action = (leg.get("side") or "").upper()
             if action == "BUY":
                 entry_total -= price * NIFTY_LOT_SIZE
             else:
                 entry_total += price * NIFTY_LOT_SIZE
 
-        # Create trade records for each lot
+        for spec in self.lots:
+            sl_init = lot1_sl if spec.lot_id == "lot1" else lot2_sl
+            lot_legs = [dict(leg) for leg in norm_legs]
+            lots_obj[spec.lot_id] = {
+                "lot_id": spec.lot_id,
+                "timeframe": spec.timeframe,
+                "status": "OPEN",
+                "opened_at": _to_iso(fill_time),
+                "closed_at": None,
+                "entry_close": entry_close,
+                "sl_init_level": float(sl_init),
+                "sl_current_level": float(sl_init),
+                "last_trail_ts": None,
+                "last_exit_check_ts": None,
+                "legs": lot_legs,
+                "meta": {
+                    "position_type": intent.get("position_type"),
+                    "reason": intent.get("reason"),
+                    "strikes": intent.get("strikes"),
+                    "spot": intent.get("spot"),
+                    "entry_signal_time": _to_iso(signal_time),
+                    "entry_fill_time": _to_iso(fill_time),
+                },
+            }
+
+        self.position["meta"] = {"last_entry_intent_ts": intent.get("timestamp")}
+
+        msg = f"OPENED NIFTY POSITION: 2 lots, {len(norm_legs)} legs, type={intent.get('position_type')} reason={intent.get('reason')}"
+        self.logger.info(msg)
+        self.trade_logger.info(msg)
+        for leg in norm_legs:
+            self.trade_logger.info(f"  {leg['side']} {leg['tradingsymbol']} @ {leg['entry_price']}")
+
+        self.save_position()
+
         for lot_id in ["lot1", "lot2"]:
             lot = (self.position.get("lots") or {}).get(lot_id)
             if lot and lot.get("status") == "OPEN":
@@ -144,7 +284,9 @@ class BacktestableBot(NiftyPaperBot):
 
                 trade = Trade(
                     trade_id=trade_id,
-                    entry_time=current_time,
+                    entry_time=fill_time,
+                    entry_signal_time=signal_time,
+                    entry_fill_time=fill_time,
                     lot_id=lot_id,
                     position_type=intent.get("position_type", ""),
                     legs=lot.get("legs", []),
@@ -162,7 +304,7 @@ class BacktestableBot(NiftyPaperBot):
                 if initial_sl:
                     self.trade_log.record_sl_adjustment(
                         trade_id=trade_id,
-                        timestamp=current_time,
+                        timestamp=fill_time,
                         old_sl=0.0,
                         new_sl=initial_sl,
                         sh_value=None,
@@ -175,13 +317,13 @@ class BacktestableBot(NiftyPaperBot):
         lot2 = (self.position.get("lots") or {}).get("lot2", {})
         reason = intent.get("reason", {})
         self._debug_logger.log_entry_triggered(EntryContext(
-            timestamp=current_time,
+            timestamp=fill_time,
             section=reason.get("section", ""),
             subcategory=reason.get("subcat"),
             position_type=intent.get("position_type", ""),
             gate_checks=intent.get("_gate_checks", []),
             spot_price=float(intent.get("spot") or 0.0),
-            legs=legs,
+            legs=norm_legs,
             lot1_sl=float(lot1.get("sl_current_level") or 0.0),
             lot2_sl=float(lot2.get("sl_current_level") or 0.0),
         ))
@@ -271,7 +413,7 @@ class BacktestableBot(NiftyPaperBot):
         ))
 
         # Mark that next exit for this lot is due to SL hit
-        if will_exit:
+        if will_exit and min_hold_ok:
             self._pending_sl_exit = self._pending_sl_exit if hasattr(self, '_pending_sl_exit') else set()
             self._pending_sl_exit.add(lot_id)
 
@@ -284,20 +426,26 @@ class BacktestableBot(NiftyPaperBot):
         if not lot or lot.get("status") != "OPEN":
             return
 
-        # Get exit prices
-        options_data = self._fetch_options_data()
-        price_map = _mark_to_market_price_map(options_data or [])
+        exit_signal_time = self._current_time_fn()
+        try:
+            exit_fill_time, _, price_map = self._next_fill_snapshot(exit_signal_time, "exit")
+            strict_prices = self._strict_leg_prices(lot.get("legs") or [], price_map, exit_fill_time, "exit")
+        except StrictBacktestDataError as exc:
+            self.trade_log.record_data_quality_warning(str(exc))
+            raise
+        exit_fill_time_iso = _to_iso(exit_fill_time)
 
         # Calculate P&L
         pnl = 0.0
         exit_total = 0.0
         legs_pnl = []  # For debug logging
         for leg in lot.get("legs") or []:
+            symbol = leg.get("tradingsymbol") or ""
             side = (leg.get("side") or "BUY").upper()
             entry = float(leg.get("entry_price") or 0.0)
-            current = self._resolve_leg_current_price(leg, price_map)
+            current = strict_prices[symbol]
             leg["exit_price"] = current
-            leg["exit_time"] = exit_time
+            leg["exit_time"] = exit_fill_time_iso
 
             leg_pnl = _leg_pnl(side, entry, current) * NIFTY_LOT_SIZE
             pnl += leg_pnl
@@ -319,13 +467,15 @@ class BacktestableBot(NiftyPaperBot):
 
         # Update lot status
         lot["status"] = "CLOSED"
-        lot["closed_at"] = exit_time
+        lot["closed_at"] = exit_fill_time_iso
         lot["pnl"] = pnl
+        lot.setdefault("meta", {})
+        lot["meta"]["exit_signal_time"] = _to_iso(exit_signal_time)
+        lot["meta"]["exit_fill_time"] = exit_fill_time_iso
 
         # Log to TradeLog
         trade_id = self._active_trade_ids.get(lot_id)
         if trade_id:
-            current_time = self._current_time_fn()
             # Determine exit reason
             exit_reason = "SL_HIT" if lot_id in self._pending_sl_exit else "TIME_EXIT"
             self._pending_sl_exit.discard(lot_id)
@@ -334,7 +484,7 @@ class BacktestableBot(NiftyPaperBot):
             final_sl = float(lot.get("sl_current_level") or 0.0)
             self.trade_log.record_sl_adjustment(
                 trade_id=trade_id,
-                timestamp=current_time,
+                timestamp=exit_fill_time,
                 old_sl=final_sl,
                 new_sl=final_sl,
                 sh_value=None,
@@ -344,10 +494,11 @@ class BacktestableBot(NiftyPaperBot):
 
             self.trade_log.record_exit(
                 trade_id=trade_id,
-                exit_time=current_time,
+                exit_time=exit_fill_time,
                 exit_price_total=exit_total,
                 pnl=pnl,
                 exit_reason=exit_reason,
+                exit_signal_time=exit_signal_time,
             )
 
             # Log to debug logger
@@ -363,7 +514,7 @@ class BacktestableBot(NiftyPaperBot):
                 candle_close = 0.0
 
             self._debug_logger.log_exit_triggered(ExitContext(
-                timestamp=current_time,
+                timestamp=exit_fill_time,
                 lot_id=lot_id,
                 exit_reason=exit_reason,
                 sl_level=final_sl,

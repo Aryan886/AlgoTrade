@@ -47,7 +47,11 @@ def make_result() -> SimpleNamespace:
         max_drawdown=0.0,
         max_drawdown_pct=0.0,
         sharpe_ratio=0.0,
+        daily_sharpe_ratio=0.0,
         expectancy=20.0,
+        skipped_entries=1,
+        data_quality_warnings=["2026-03-20 09:20:00 skipped entry: missing post-signal options snapshot"],
+        trades=[],
         equity_curve=[
             ("2026-03-20 09:20:00", 100000.0),
             ("2026-03-20 09:25:00", 100050.0),
@@ -75,6 +79,8 @@ class BacktestingCliExportTests(unittest.TestCase):
             self.assertIn("Equity Curve", html)
             self.assertIn("kpi-card", html)
             self.assertIn("trade-win", html)
+            self.assertIn("Daily Sharpe", html)
+            self.assertIn("Data Quality", html)
 
     def test_export_results_writes_csv_when_requested(self):
         runner = DummyRunner()

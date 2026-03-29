@@ -48,8 +48,9 @@ def build_summary_dataframe(result) -> pd.DataFrame:
             {"metric": "Profit Factor", "value": result.profit_factor},
             {"metric": "Max Drawdown", "value": result.max_drawdown},
             {"metric": "Max Drawdown %", "value": result.max_drawdown_pct},
-            {"metric": "Sharpe Ratio", "value": result.sharpe_ratio},
+            {"metric": "Daily Sharpe", "value": getattr(result, "daily_sharpe_ratio", result.sharpe_ratio)},
             {"metric": "Expectancy", "value": result.expectancy},
+            {"metric": "Skipped Entries", "value": getattr(result, "skipped_entries", 0)},
         ]
     )
 
@@ -105,7 +106,7 @@ def _format_metric(metric: str, value) -> str:
         return "-"
     if metric in {"Win Rate", "Max Drawdown %"}:
         return f"{float(value):.2%}"
-    if metric in {"Number of Trades"}:
+    if metric in {"Number of Trades", "Skipped Entries"}:
         return f"{int(value)}"
     if metric in {"Profit Factor"}:
         return "inf" if value == float("inf") else f"{float(value):.2f}"
@@ -118,7 +119,7 @@ def _build_kpi_cards(result) -> str:
         ("Trades", f"{result.num_trades}", "neutral"),
         ("Win Rate", f"{result.win_rate:.2%}", "neutral"),
         ("Max Drawdown", f"{result.max_drawdown:,.2f}", "negative" if result.max_drawdown > 0 else "neutral"),
-        ("Sharpe Ratio", f"{result.sharpe_ratio:.2f}", "positive" if result.sharpe_ratio > 0 else "neutral"),
+        ("Daily Sharpe", f"{getattr(result, 'daily_sharpe_ratio', result.sharpe_ratio):.2f}", "positive" if getattr(result, 'daily_sharpe_ratio', result.sharpe_ratio) > 0 else "neutral"),
         ("Expectancy", f"{result.expectancy:,.2f}", "positive" if result.expectancy >= 0 else "negative"),
     ]
     return "\n".join(
@@ -172,7 +173,8 @@ def _build_trades_table(trades_df: pd.DataFrame) -> str:
 
     # Define which columns to show and their order
     display_columns = [
-        "trade_id", "entry_time", "exit_time", "lot_id", "position_type",
+        "trade_id", "entry_signal_time", "entry_fill_time", "exit_signal_time", "exit_fill_time",
+        "lot_id", "position_type",
         "entry_price", "exit_price", "pnl", "section", "subcat",
         "sl_initial", "sl_final", "sl_adjustments", "exit_reason"
     ]
@@ -212,6 +214,27 @@ def _build_trades_table(trades_df: pd.DataFrame) -> str:
         {''.join(body_rows)}
       </tbody>
     </table>
+    """
+
+
+def _build_data_quality_html(result) -> str:
+    warnings = list(getattr(result, "data_quality_warnings", []) or [])
+    skipped_entries = int(getattr(result, "skipped_entries", 0) or 0)
+
+    if not warnings and skipped_entries == 0:
+        return '<div class="empty-state">No strict backtest data-quality issues were recorded.</div>'
+
+    items = "".join(f"<li>{warning}</li>" for warning in warnings[:20])
+    extra = ""
+    if len(warnings) > 20:
+        extra = f"<li>...and {len(warnings) - 20} more warning(s).</li>"
+
+    return f"""
+    <div class="sl-lot-breakdown">Skipped Entries: {skipped_entries}</div>
+    <ul class="warning-list">
+      {items}
+      {extra}
+    </ul>
     """
 
 
@@ -459,6 +482,14 @@ def write_html_report(output: Path, summary_df: pd.DataFrame, trades_df: pd.Data
       border-radius: 10px;
       border: 1px solid var(--line);
     }}
+    .warning-list {{
+      margin: 14px 0 0;
+      padding-left: 20px;
+      color: var(--ink);
+    }}
+    .warning-list li {{
+      margin-bottom: 8px;
+    }}
     @media (max-width: 900px) {{
       body {{
         padding: 16px;
@@ -493,6 +524,10 @@ def write_html_report(output: Path, summary_df: pd.DataFrame, trades_df: pd.Data
   <div class="card">
     <h2>Stop Loss Analysis</h2>
     {_build_sl_analysis_html(result.trades)}
+  </div>
+  <div class="card">
+    <h2>Data Quality</h2>
+    {_build_data_quality_html(result)}
   </div>
   <div class="card">
     <h2>Trade Log</h2>

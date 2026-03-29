@@ -30,7 +30,11 @@ class Trade:
     """Represents a single trade (entry to exit)."""
     trade_id: str
     entry_time: datetime
+    entry_signal_time: Optional[datetime] = None
+    entry_fill_time: Optional[datetime] = None
     exit_time: Optional[datetime] = None
+    exit_signal_time: Optional[datetime] = None
+    exit_fill_time: Optional[datetime] = None
     lot_id: str = ""
     position_type: str = ""  # "A" or "B"
     legs: List[Dict[str, Any]] = field(default_factory=list)
@@ -70,9 +74,15 @@ class TradeLog:
         self._equity_curve: List[Tuple[datetime, float]] = []
         self._initial_capital: float = 100000.0
         self._realized_pnl: float = 0.0
+        self._skipped_entries: int = 0
+        self._data_quality_warnings: List[str] = []
 
     def record_entry(self, trade: Trade) -> None:
         """Record a new trade entry."""
+        if trade.entry_fill_time is None:
+            trade.entry_fill_time = trade.entry_time
+        if trade.entry_signal_time is None:
+            trade.entry_signal_time = trade.entry_fill_time
         self.trades.append(trade)
 
     def record_exit(
@@ -82,16 +92,28 @@ class TradeLog:
         exit_price_total: float,
         pnl: float,
         exit_reason: str = "",
+        exit_signal_time: Optional[datetime] = None,
     ) -> None:
         """Update an existing trade with exit information."""
         for trade in self.trades:
             if trade.trade_id == trade_id:
                 trade.exit_time = exit_time
+                trade.exit_fill_time = exit_time
+                trade.exit_signal_time = exit_signal_time or exit_time
                 trade.exit_price_total = exit_price_total
                 trade.pnl = pnl
                 trade.exit_reason = exit_reason
                 self._realized_pnl += pnl
                 break
+
+    def record_skipped_entry(self, timestamp: datetime, reason: str) -> None:
+        """Record a skipped entry caused by strict data-quality rules."""
+        self._skipped_entries += 1
+        self._data_quality_warnings.append(f"{timestamp:%Y-%m-%d %H:%M:%S} skipped entry: {reason}")
+
+    def record_data_quality_warning(self, message: str) -> None:
+        """Record a strict backtesting data-quality warning."""
+        self._data_quality_warnings.append(message)
 
     def record_sl_adjustment(
         self,
@@ -140,7 +162,11 @@ class TradeLog:
         for t in self.trades:
             records.append({
                 "trade_id": t.trade_id,
+                "entry_signal_time": t.entry_signal_time,
+                "entry_fill_time": t.entry_fill_time,
                 "entry_time": t.entry_time,
+                "exit_signal_time": t.exit_signal_time,
+                "exit_fill_time": t.exit_fill_time,
                 "exit_time": t.exit_time,
                 "lot_id": t.lot_id,
                 "position_type": t.position_type,
@@ -170,7 +196,10 @@ class BacktestResult:
     max_drawdown: float = 0.0
     max_drawdown_pct: float = 0.0
     sharpe_ratio: float = 0.0
+    daily_sharpe_ratio: float = 0.0
     expectancy: float = 0.0
+    skipped_entries: int = 0
+    data_quality_warnings: List[str] = field(default_factory=list)
     trades: List[Trade] = field(default_factory=list)
     equity_curve: List[Tuple[datetime, float]] = field(default_factory=list)
 
@@ -186,8 +215,9 @@ Avg Win:         {self.avg_win:,.2f}
 Avg Loss:        {self.avg_loss:,.2f}
 Profit Factor:   {self.profit_factor:.2f}
 Max Drawdown:    {self.max_drawdown:,.2f} ({self.max_drawdown_pct:.2%})
-Sharpe Ratio:    {self.sharpe_ratio:.2f}
+Daily Sharpe:    {self.daily_sharpe_ratio:.2f}
 Expectancy:      {self.expectancy:,.2f}
+Skipped Entries: {self.skipped_entries}
 """
 
 
@@ -240,7 +270,10 @@ class MetricsCalculator:
             max_drawdown=max_dd,
             max_drawdown_pct=max_dd_pct,
             sharpe_ratio=sharpe,
+            daily_sharpe_ratio=sharpe,
             expectancy=expectancy,
+            skipped_entries=self.trade_log._skipped_entries,
+            data_quality_warnings=list(self.trade_log._data_quality_warnings),
             trades=trades,
             equity_curve=self.trade_log._equity_curve,
         )
@@ -248,6 +281,8 @@ class MetricsCalculator:
     def _empty_result(self) -> BacktestResult:
         """Return an empty result when no trades."""
         return BacktestResult(
+            skipped_entries=self.trade_log._skipped_entries,
+            data_quality_warnings=list(self.trade_log._data_quality_warnings),
             trades=self.trade_log.trades,
             equity_curve=self.trade_log._equity_curve,
         )
@@ -277,22 +312,30 @@ class MetricsCalculator:
         return max_dd, max_dd_pct
 
     def _calculate_sharpe(self) -> float:
-        """Calculate annualized Sharpe ratio."""
-        curve = self.trade_log._equity_curve
-        if len(curve) < 2:
+        """Calculate annualized daily Sharpe ratio from closed-trade P&L."""
+        closed = self.trade_log.get_closed_trades()
+        if len(closed) < 2:
             return 0.0
 
-        equities = pd.Series([eq for _, eq in curve])
-        returns = equities.pct_change().dropna()
+        daily_pnl: Dict[Any, float] = {}
+        for trade in closed:
+            exit_dt = trade.exit_fill_time or trade.exit_time or trade.entry_fill_time or trade.entry_time
+            if exit_dt is None or trade.pnl is None:
+                continue
+            day = exit_dt.date()
+            daily_pnl[day] = daily_pnl.get(day, 0.0) + float(trade.pnl)
 
-        if returns.empty or returns.std() == 0:
+        if len(daily_pnl) < 2:
             return 0.0
 
-        # Assume 1-minute data, ~375 trading minutes per day, ~252 trading days
-        annualization = math.sqrt(375 * 252)
-        excess_return = returns.mean() - (self.risk_free_rate / (375 * 252))
+        returns = pd.Series(list(daily_pnl.values()), dtype=float) / self.trade_log._initial_capital
+        std = returns.std()
+        if returns.empty or pd.isna(std) or std == 0:
+            return 0.0
 
-        return (excess_return / returns.std()) * annualization
+        daily_rf = self.risk_free_rate / 252.0
+        excess_return = returns.mean() - daily_rf
+        return float((excess_return / std) * math.sqrt(252.0))
 
 
 def calculate_position_pnl(

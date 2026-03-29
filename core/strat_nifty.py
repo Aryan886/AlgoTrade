@@ -10,7 +10,12 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import pandas as pd
 
-from utils.db_func import fetch_latest_delta_data, fetch_market_data, fetch_vix_data
+from utils.db_func import (
+    calculate_and_store_high_accuracy_delta,
+    fetch_latest_delta_data,
+    fetch_market_data,
+    fetch_vix_data,
+)
 from utils.market_data_1h import build_1h_market_data_from_15m
 from utils.utility import setup_paper_trading_logger
 
@@ -216,6 +221,9 @@ class NiftyOptionsStrategy:
 
     def _fetch_options_data(self) -> List[Dict[str, Any]]:
         """Override this in BacktestableStrategy to use HistoricalDataProvider."""
+        # Populate delta_cache before read (same as strat_donchian); read-only fetch misses rows
+        # if no prior snapshot job ran or cache was empty.
+        calculate_and_store_high_accuracy_delta(symbol=self.symbol)
         return fetch_latest_delta_data(symbol=self.symbol)
 
     def _get_df(self, interval: str, limit: Optional[int] = 300) -> pd.DataFrame:
@@ -519,6 +527,7 @@ class NiftyOptionsStrategy:
             return False
         last = df_1m.iloc[-1]
         try:
+            #return True 
             return (float(last["close"]) < float(last["sma_20"])) and (float(last["close"]) < float(last["sma_5_low"]))
         except Exception:
             return False
@@ -618,7 +627,8 @@ class NiftyOptionsStrategy:
             return None
 
         # Latch new subcategory touches (Section 1)
-        self._detect_touches_and_latch({"1m": df_1m, "5m": df_5m, "15m": df_15m, "1h": df_1h})
+        #self._detect_touches_and_latch({"1m": df_1m, "5m": df_5m, "15m": df_15m, "1h": df_1h})
+        self._detect_touches_and_latch({"5m": df_5m, "15m": df_15m, "1h": df_1h})
 
         # Update Section 3 break latch on new 5m candles (it is evaluated on 5m candle closes)
         latest_5m_ts = self._latest_ts(df_5m)

@@ -118,6 +118,7 @@ class NiftyStrategySectionTests(unittest.TestCase):
              patch.object(strategy, "_get_df", side_effect=get_df), \
              patch.object(strategy, "_detect_touches_and_latch", return_value=[]), \
              patch.object(strategy, "_vix_regime", return_value="A"), \
+             patch("core.strat_nifty.calculate_and_store_high_accuracy_delta", return_value=None), \
              patch("core.strat_nifty.fetch_latest_delta_data", return_value=make_options_chain()):
             intent = strategy.evaluate_for_entry()
 
@@ -139,6 +140,7 @@ class NiftyStrategySectionTests(unittest.TestCase):
              patch.object(strategy, "_get_df", side_effect=get_df), \
              patch.object(strategy, "_detect_touches_and_latch", return_value=[]), \
              patch.object(strategy, "_vix_regime", return_value="A"), \
+             patch("core.strat_nifty.calculate_and_store_high_accuracy_delta", return_value=None), \
              patch("core.strat_nifty.fetch_latest_delta_data", return_value=make_options_chain()):
             intent = strategy.evaluate_for_entry()
 
@@ -163,6 +165,7 @@ class NiftyStrategySectionTests(unittest.TestCase):
              patch.object(strategy, "_get_df", side_effect=get_df), \
              patch.object(strategy, "_detect_touches_and_latch", return_value=[]), \
              patch.object(strategy, "_vix_regime", return_value="A"), \
+             patch("core.strat_nifty.calculate_and_store_high_accuracy_delta", return_value=None), \
              patch("core.strat_nifty.fetch_latest_delta_data", return_value=make_options_chain()):
             intent = strategy.evaluate_for_entry()
 
@@ -180,6 +183,7 @@ class NiftyStrategySectionTests(unittest.TestCase):
              patch.object(strategy, "_get_df", side_effect=get_df), \
              patch.object(strategy, "_detect_touches_and_latch", return_value=[]), \
              patch.object(strategy, "_vix_regime", return_value="A"), \
+             patch("core.strat_nifty.calculate_and_store_high_accuracy_delta", return_value=None), \
              patch("core.strat_nifty.fetch_latest_delta_data", return_value=make_options_chain()):
             intent = strategy.evaluate_for_entry()
 

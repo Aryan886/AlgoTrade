@@ -276,7 +276,7 @@ class BacktestTradeLogger:
         ])
 
         for leg in ctx.legs:
-            action = leg.get("action", "?")
+            action = leg.get("action") or leg.get("side") or "?"
             opt_type = leg.get("option_type", "?")
             strike = leg.get("strike_price", "?")
             price = leg.get("last_price") or leg.get("entry_price")
@@ -424,6 +424,31 @@ class BacktestTradeLogger:
             return f"VIX ({vix}) {op} VIX_SMA20 ({vix_sma}) -> Type {ptype} (SL threshold: {threshold}pts)"
 
         if "1st Flag" in gate.gate_name:
+            # Handle detailed format with touches array
+            touches = d.get("touches")
+            if touches and len(touches) > 0:
+                # Format each touch: "d (5m HIGH 22950.00 >= sma_20 22920.50)"
+                touch_strs = []
+                for t in touches[:3]:  # Show first 3 touches to avoid too long output
+                    subcat = t.get("subcat", "?")
+                    interval = t.get("interval", "?")
+                    indicator = t.get("indicator", "?")
+                    high = self._format_float(t.get("high"))
+                    ind_val = self._format_float(t.get("indicator_value"))
+                    touch_strs.append(f"{subcat} ({interval} HIGH {high} >= {indicator} {ind_val})")
+                
+                result = " | ".join(touch_strs)
+                if len(touches) > 3:
+                    result += f" | +{len(touches)-3} more"
+                return result
+            
+            # Simpler format with just subcategory list
+            active_subcats = d.get("active_subcategories")
+            if active_subcats:
+                subcats_str = ", ".join(sorted(active_subcats)) if active_subcats else "none"
+                return f"Active subcategories: [{subcats_str}]"
+            
+            # Legacy format
             high = self._format_float(d.get("high"))
             indicator = d.get("indicator", "?")
             ind_val = self._format_float(d.get("indicator_value"))

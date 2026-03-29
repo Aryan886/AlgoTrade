@@ -7,7 +7,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -39,7 +39,8 @@ class HistoricalDataProvider:
     def load_all_data(self, start_date: datetime, end_date: datetime) -> None:
         """Pre-load all data for the date range into memory."""
         # Keep enough warmup for the longest lookback currently used by the strategy
-        # (1h SMA200 needs well over a month of candles when 1h data is generated from 15m).
+        # Stored hourly data/SMAs are the production-parity path; fallback generation
+        # from 15m remains available when market_data_1h is missing.
         warmup_start = start_date - timedelta(days=60)
         conn = sqlite3.connect(self.db_path)
         try:
@@ -48,9 +49,13 @@ class HistoricalDataProvider:
                     conn, interval, warmup_start, end_date
                 )
 
-            # If 1h data is missing, generate it from 15m data
+            # Prefer stored hourly data because it matches the production strategy's
+            # current indicator basis. If it is unavailable, fall back to a 15m resample.
             if self._market_data.get("1h") is None or self._market_data["1h"].empty:
-                self._market_data["1h"] = self._generate_1h_from_15m(conn)
+                self._market_data["1h"] = self._generate_1h_from_15m()
+
+            if self._market_data.get("1h") is not None and not self._market_data["1h"].empty:
+                self._market_data["1h"] = self._merge_with_sma_1h(self._market_data["1h"], conn)
 
             self._vix_data = self._load_vix_data(conn, warmup_start, end_date)
             self._delta_cache = self._load_delta_cache(conn, warmup_start, end_date)
@@ -59,8 +64,8 @@ class HistoricalDataProvider:
         finally:
             conn.close()
 
-    def _generate_1h_from_15m(self, conn: sqlite3.Connection = None) -> pd.DataFrame:
-        """Generate 1H candles from 15m data and merge with pre-calculated SMAs."""
+    def _generate_1h_from_15m(self) -> pd.DataFrame:
+        """Generate fallback 1H candles from 15m data when market_data_1h is unavailable."""
         df_15m = self._market_data.get("15m")
         if df_15m is None or df_15m.empty:
             print("Warning: Cannot generate 1h data - 15m data not available")
@@ -77,15 +82,15 @@ class HistoricalDataProvider:
             print("Warning: No complete 1h candles could be generated from 15m data")
             return pd.DataFrame()
 
-        # Try to merge with pre-calculated SMAs from market_sma_1h
-        if conn is not None:
-            resampled = self._merge_with_sma_1h(resampled, conn)
-
         print(f"Generated {len(resampled)} 1h candles from 15m data")
         return resampled
 
     def _merge_with_sma_1h(self, df_1h: pd.DataFrame, conn: sqlite3.Connection) -> pd.DataFrame:
-        """Merge 1H OHLC data with pre-calculated SMAs from market_sma_1h table."""
+        """Merge stored 1h SMA values by exact timestamp only.
+
+        Exact alignment avoids pulling in a nearby future row via forward-fill while
+        preserving parity with the existing production hourly/SMA tables.
+        """
         try:
             query = "SELECT * FROM market_sma_1h WHERE symbol = ? ORDER BY timestamp"
             sma_df = pd.read_sql_query(query, conn, params=(self.symbol,))
@@ -96,15 +101,10 @@ class HistoricalDataProvider:
             sma_df.set_index("timestamp", inplace=True)
             sma_df.columns = [c.lower() for c in sma_df.columns]
 
-            # Both resampled data and market_sma_1h now use :15 timestamps (9:15, 10:15, etc.)
-            # No offset needed - they align naturally with market open at 9:15
-
-            # Merge SMAs into the 1H dataframe
             sma_cols = ["sma_5", "sma_20", "sma_50", "sma_200", "sma_5_high", "sma_5_low"]
             for col in sma_cols:
                 if col in sma_df.columns and col not in df_1h.columns:
-                    # Only align from past data; never use a future SMA row to fill the current bar.
-                    df_1h[col] = sma_df[col].reindex(df_1h.index, method="ffill", tolerance=pd.Timedelta("30min"))
+                    df_1h[col] = sma_df[col].reindex(df_1h.index)
 
             print(f"Merged pre-calculated SMAs from market_sma_1h")
         except Exception as e:
@@ -195,7 +195,11 @@ class HistoricalDataProvider:
         return filtered.copy()
 
     def fetch_vix_data(self, current_time: datetime) -> pd.DataFrame:
-        """Returns VIX data where timestamp <= current_time."""
+        """Returns VIX snapshots at or before current_time.
+
+        Unlike market_data tables, vix_data is stored as irregular point-in-time
+        snapshots rather than candle bars, so no candle-close offset is applied.
+        """
         if not self._data_loaded:
             raise RuntimeError("Data not loaded. Call load_all_data() first.")
         if self._vix_data.empty:
@@ -214,6 +218,25 @@ class HistoricalDataProvider:
         delta_snapshot = self._latest_snapshot(self._delta_cache, current_ts)
         option_snapshot = self._latest_snapshot(self._option_data, current_ts)
         return self._merge_option_snapshots(delta_snapshot, option_snapshot)
+
+    def fetch_next_delta_snapshot(self, current_time: datetime) -> Tuple[Optional[datetime], List[Dict[str, Any]]]:
+        """Returns the first full options snapshot strictly after current_time."""
+        if not self._data_loaded:
+            raise RuntimeError("Data not loaded. Call load_all_data() first.")
+
+        current_ts = pd.Timestamp(current_time)
+        option_snapshot = self._next_snapshot(self._option_data, current_ts, strict=False)
+        if not option_snapshot.empty:
+            snapshot_ts = pd.Timestamp(option_snapshot["timestamp"].iloc[0])
+            delta_snapshot = self._latest_snapshot(self._delta_cache, snapshot_ts)
+            return snapshot_ts.to_pydatetime(), self._merge_option_snapshots(delta_snapshot, option_snapshot)
+
+        delta_snapshot = self._next_snapshot(self._delta_cache, current_ts, strict=False)
+        if delta_snapshot.empty:
+            return None, []
+
+        snapshot_ts = pd.Timestamp(delta_snapshot["timestamp"].iloc[0])
+        return snapshot_ts.to_pydatetime(), self._normalize_snapshot(delta_snapshot, source="delta")
 
     def fetch_option_price(
         self,
@@ -285,6 +308,15 @@ class HistoricalDataProvider:
             return pd.DataFrame()
         latest_ts = valid_records["timestamp"].max()
         return valid_records[valid_records["timestamp"] == latest_ts].copy()
+
+    def _next_snapshot(self, df: pd.DataFrame, current_ts: pd.Timestamp, strict: bool = True) -> pd.DataFrame:
+        if df is None or df.empty:
+            return pd.DataFrame()
+        future_records = df[df["timestamp"] > current_ts]
+        if future_records.empty:
+            return pd.DataFrame()
+        next_ts = future_records["timestamp"].min()
+        return future_records[future_records["timestamp"] == next_ts].copy()
 
     def _normalize_snapshot(self, snapshot: pd.DataFrame, source: str) -> List[Dict[str, Any]]:
         if snapshot is None or snapshot.empty:
@@ -370,7 +402,12 @@ class HistoricalDataProvider:
         return [datetime.combine(d, datetime.min.time()) for d in unique_dates]
 
     def _latest_fully_available_candle_start(self, current_time: datetime, interval: str) -> pd.Timestamp:
-        """Return the latest candle timestamp that would have been closed by current_time."""
+        """Return the latest open-timestamped candle that would be closed by current_time.
+
+        Backtesting assumes market_data tables use candle-open timestamps:
+        a 5m row stamped 09:20:00 represents the candle that opened at 09:20 and
+        closes at 09:25, so it is only available once current_time >= 09:25.
+        """
         interval_duration = self.INTERVAL_DURATIONS.get(interval)
         if interval_duration is None:
             raise ValueError(f"Unsupported interval: {interval}")

@@ -388,7 +388,7 @@ def fetch_and_save_equity(symbol: str, intervals = ["1m","5m", "15m"],return_int
     """
     fetcher = EquityDataFetcher()
     if not fetcher.connect():
-        return
+        return ([], None) if return_interval else []
 
     results = []
     return_df = None
@@ -412,14 +412,14 @@ def fetch_and_save_equity(symbol: str, intervals = ["1m","5m", "15m"],return_int
             
             results.append((interval, df))
 
-        if return_interval and interval == return_interval:
+        if return_interval and interval == return_interval and df is not None:
             df.dropna(inplace=True)
             return_df = df.copy()
-            
+
     if return_interval:
         return results, return_df
     return results
 
 if __name__ == "__main__":
     print("Testing NIFTY 50 data fetcher...")
-    
+    fetch_and_save_equity("NIFTY 50")

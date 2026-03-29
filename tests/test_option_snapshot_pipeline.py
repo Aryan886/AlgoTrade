@@ -13,12 +13,15 @@ import pandas as pd
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from backtesting.backtest_strategy import BacktestableStrategy
 from core.strat_nifty import NiftyOptionsStrategy
 from utils.db_func import (
+    build_nifty_strategy_required_contracts,
     calculate_and_store_high_accuracy_delta,
     fetch_cached_options_data,
     fetch_latest_delta_data,
     fetch_latest_option_snapshot,
+    summarize_option_snapshot_coverage,
 )
 
 
@@ -177,6 +180,16 @@ class OptionSnapshotPipelineTests(unittest.TestCase):
         with patch("core.strat_nifty.setup_paper_trading_logger", return_value=self._logger_tuple()):
             return NiftyOptionsStrategy(symbol=self.SYMBOL, state_file=state_file)
 
+    def _backtest_strategy(self) -> BacktestableStrategy:
+        provider = unittest.mock.Mock()
+        with patch("core.strat_nifty.setup_paper_trading_logger", return_value=self._logger_tuple()):
+            return BacktestableStrategy(
+                data_provider=provider,
+                current_time_fn=lambda: datetime(2026, 3, 10, 14, 0, 0),
+                symbol=self.SYMBOL,
+                state_file=None,
+            )
+
     def _base_frames(self) -> dict[str, pd.DataFrame]:
         index_1m = pd.date_range("2026-03-10 09:15:00", periods=10, freq="1min")
         df_1m = make_df(
@@ -232,13 +245,34 @@ class OptionSnapshotPipelineTests(unittest.TestCase):
         legacy_rows = fetch_cached_options_data(self.SYMBOL, db_path=self.db_path)
         latest_rows = fetch_latest_option_snapshot(self.SYMBOL, db_path=self.db_path)
 
-        self.assertEqual(len(legacy_rows), 100)
+        self.assertEqual(len(legacy_rows), 300)
         self.assertEqual(len(latest_rows), self.latest_snapshot_size)
         self.assertIn(22900, {row["strike_price"] for row in latest_rows})
         self.assertEqual(
             {"strike_price", "option_type", "ltp", "iv", "expiry_date", "spot_price", "tradingsymbol", "open_interest"},
             set(latest_rows[0].keys()),
         )
+
+    def test_option_snapshot_coverage_helper_flags_missing_required_contracts(self):
+        latest_rows = fetch_latest_option_snapshot(self.SYMBOL, db_path=self.db_path)
+        required = build_nifty_strategy_required_contracts(self.SPOT_PRICE, position_type="A")
+        complete = summarize_option_snapshot_coverage(latest_rows, required_contracts=required)
+
+        self.assertTrue(complete["complete"])
+        self.assertEqual(complete["missing_required_contracts"], [])
+
+        reduced_rows = [
+            row for row in latest_rows
+            if not (
+                row["strike_price"] == 23200
+                and row["option_type"] in {"CE", "PE"}
+            )
+        ]
+        incomplete = summarize_option_snapshot_coverage(reduced_rows, required_contracts=required)
+
+        self.assertFalse(incomplete["complete"])
+        self.assertIn({"option_type": "PE", "strike_price": 23200}, incomplete["missing_required_contracts"])
+        self.assertIn({"option_type": "CE", "strike_price": 23200}, incomplete["missing_required_contracts"])
 
     def test_delta_builder_uses_full_snapshot_and_keeps_expected_strike(self):
         self._build_delta_cache()
@@ -264,6 +298,46 @@ class OptionSnapshotPipelineTests(unittest.TestCase):
         self.assertTrue({"strike_price", "option_type", "delta", "ltp", "tradingsymbol", "expiry"}.issubset(latest_delta[0].keys()))
         self.assertIn(22900, {row["strike_price"] for row in latest_delta})
 
+    def test_delta_builder_returns_coverage_metadata(self):
+        result = self._build_delta_cache()
+
+        self.assertIn("coverage", result)
+        self.assertTrue(result["coverage"]["complete"])
+        self.assertEqual(result["coverage"]["missing_required_contracts"], [])
+
+    def test_delta_builder_keeps_shared_behavior_when_latest_snapshot_is_incomplete(self):
+        latest_rows = fetch_latest_option_snapshot(self.SYMBOL, db_path=self.db_path)
+
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("""
+            DELETE FROM option_data
+            WHERE symbol = ? AND timestamp = ? AND strike_price = ? AND option_type IN ('CE', 'PE')
+        """, (self.SYMBOL, self.latest_ts.strftime("%Y-%m-%d %H:%M:%S"), 23200))
+        conn.commit()
+        conn.close()
+
+        refreshed_rows = []
+        for row in latest_rows:
+            refreshed_rows.append({
+                "strikePrice": row["strike_price"],
+                "optionType": row["option_type"],
+                "expiry": row["expiry_date"],
+                "tradingsymbol": row["tradingsymbol"],
+                "lastPrice": row["ltp"],
+                "openInterest": row["open_interest"],
+            })
+
+        fake_module = types.ModuleType("broker.zerodha_client")
+        fake_module.kite_from_saved_token = lambda: _FakeKite(self.SPOT_PRICE)
+
+        with patch.dict(sys.modules, {"broker.zerodha_client": fake_module}), \
+             patch("utils.vix_fetcher.fetch_live_option_chain", return_value=refreshed_rows) as fetch_chain:
+            result = calculate_and_store_high_accuracy_delta(self.SYMBOL, db_path=self.db_path)
+
+        self.assertIsNotNone(result)
+        self.assertFalse(fetch_chain.called)
+        self.assertFalse(result["coverage"]["complete"])
+
     def test_nifty_strategy_type_b_entry_succeeds_with_generated_delta_cache(self):
         self._build_delta_cache()
         strategy = self._strategy()
@@ -276,6 +350,7 @@ class OptionSnapshotPipelineTests(unittest.TestCase):
              patch.object(strategy, "_get_df", side_effect=get_df), \
              patch.object(strategy, "_detect_touches_and_latch", return_value=[]), \
              patch.object(strategy, "_vix_regime", return_value="B"), \
+             patch("core.strat_nifty.calculate_and_store_high_accuracy_delta", return_value=None), \
              patch("core.strat_nifty.fetch_latest_delta_data", side_effect=lambda symbol: fetch_latest_delta_data(symbol, db_path=self.db_path)):
             intent = strategy.evaluate_for_entry()
 
@@ -284,6 +359,33 @@ class OptionSnapshotPipelineTests(unittest.TestCase):
         self.assertEqual(intent["strikes"]["pe_strike"], 22900)
         self.assertEqual(len(intent["legs"]), 2)
         self.assertEqual({leg["strike_price"] for leg in intent["legs"]}, {22900, 23000})
+
+    def test_backtest_strategy_aborts_with_single_coverage_warning_when_exact_contract_missing(self):
+        self._build_delta_cache()
+        strategy = self._backtest_strategy()
+        frames = self._base_frames()
+        strategy.logger.warning = unittest.mock.Mock()
+
+        latest_delta = [
+            row for row in fetch_latest_delta_data(self.SYMBOL, db_path=self.db_path)
+            if not (row["strike_price"] == 23000 and row["option_type"] == "PE")
+        ]
+
+        def get_df(interval: str, limit: int = 300) -> pd.DataFrame:
+            return frames[interval].copy()
+
+        with patch.object(strategy, "_now", return_value=datetime(2026, 3, 10, 14, 0, 0)), \
+             patch.object(strategy, "_get_df", side_effect=get_df), \
+             patch.object(strategy, "_detect_touches_and_latch", return_value=[]), \
+             patch.object(strategy, "_vix_regime", return_value="B"), \
+             patch.object(strategy, "_fetch_options_data", return_value=latest_delta):
+            intent = strategy.evaluate_for_entry()
+
+        self.assertIsNone(intent)
+        self.assertTrue(strategy.logger.warning.called)
+        warning_text = " ".join(str(arg) for arg in strategy.logger.warning.call_args[0])
+        self.assertIn("Option snapshot incomplete", warning_text)
+        self.assertNotIn("Option not found in cache", warning_text)
 
     def test_parallel_option_strategy_refresh_paths_still_accept_latest_delta_shape(self):
         self._build_delta_cache()
