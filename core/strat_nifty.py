@@ -221,8 +221,10 @@ class NiftyOptionsStrategy:
 
     def _fetch_options_data(self) -> List[Dict[str, Any]]:
         """Override this in BacktestableStrategy to use HistoricalDataProvider."""
-        # Populate delta_cache before read (same as strat_donchian); read-only fetch misses rows
-        # if no prior snapshot job ran or cache was empty.
+        options_data = fetch_latest_delta_data(symbol=self.symbol)
+        if options_data:
+            return options_data
+
         calculate_and_store_high_accuracy_delta(symbol=self.symbol)
         return fetch_latest_delta_data(symbol=self.symbol)
 

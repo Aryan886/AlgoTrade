@@ -6,6 +6,7 @@ Fetches live option chain data from Kite API, calculates VIX, and stores in data
 import pandas as pd
 import math
 from datetime import datetime, timedelta
+from config.config import CONFIG
 from utils.db_func import (
     store_vix_data_bulk,
     fetch_vix_data,
@@ -17,6 +18,11 @@ from broker.zerodha_client import kite_from_saved_token
 import time
 import sqlite3
 from utils.iv import ProductionIVCalculator
+
+
+SNAPSHOT_STRIKE_BAND = int(CONFIG.get("STRIKE_BAND", 500))
+SNAPSHOT_STRIKE_INTERVAL = int(CONFIG.get("STRIKE_INTERVAL", 50))
+SNAPSHOT_EXTRA_STRIKES = 2
 
 
 def get_nearest_nifty_futures_price(kite=None):
@@ -59,6 +65,98 @@ def safe_expiry_to_string(expiry):
             return str(expiry)
     except:
         return str(expiry)
+
+
+def _normalize_expiry_date(expiry):
+    if isinstance(expiry, str):
+        try:
+            return datetime.strptime(expiry, "%Y-%m-%d").date()
+        except Exception:
+            return None
+    if hasattr(expiry, "date"):
+        try:
+            return expiry.date()
+        except Exception:
+            return None
+    return None
+
+
+def _normalize_strike_value(strike):
+    try:
+        return int(float(strike))
+    except Exception:
+        return None
+
+
+def _select_snapshot_instruments(option_instruments, spot_price, required_contracts=None):
+    if spot_price is None:
+        return option_instruments, required_contracts
+
+    dated_instruments = []
+    for inst in option_instruments:
+        expiry_date = _normalize_expiry_date(inst.get("expiry"))
+        if expiry_date is None:
+            continue
+        dated_instruments.append((inst, expiry_date))
+
+    if not dated_instruments:
+        return option_instruments, required_contracts
+
+    nearest_expiry = min(expiry_date for _, expiry_date in dated_instruments)
+    nearest_expiry_instruments = [
+        inst for inst, expiry_date in dated_instruments if expiry_date == nearest_expiry
+    ]
+    if not nearest_expiry_instruments:
+        return option_instruments, required_contracts
+
+    ce_strikes = sorted({
+        strike
+        for inst in nearest_expiry_instruments
+        if inst.get("instrument_type") == "CE"
+        for strike in [_normalize_strike_value(inst.get("strike"))]
+        if strike is not None
+    })
+
+    resolved_required_contracts = required_contracts
+    if resolved_required_contracts is None:
+        resolved_required_contracts = build_nifty_strategy_required_contracts(spot_price, ce_strikes)
+
+    required_strikes = [
+        strike
+        for contract in resolved_required_contracts or []
+        for strike in [_normalize_strike_value(contract.get("strike_price"))]
+        if strike is not None
+    ]
+
+    strike_buffer = SNAPSHOT_STRIKE_BAND + (SNAPSHOT_STRIKE_INTERVAL * SNAPSHOT_EXTRA_STRIKES)
+    if required_strikes:
+        lower_bound = min(required_strikes) - strike_buffer
+        upper_bound = max(required_strikes) + strike_buffer
+    else:
+        center_strike = _normalize_strike_value(spot_price)
+        if center_strike is None:
+            return nearest_expiry_instruments, resolved_required_contracts
+        lower_bound = center_strike - strike_buffer
+        upper_bound = center_strike + strike_buffer
+
+    filtered_instruments = []
+    for inst in nearest_expiry_instruments:
+        strike = _normalize_strike_value(inst.get("strike"))
+        if strike is None:
+            filtered_instruments.append(inst)
+            continue
+        if lower_bound <= strike <= upper_bound:
+            filtered_instruments.append(inst)
+
+    if filtered_instruments:
+        print(
+            f"[OPTION SNAPSHOT] Using nearest expiry {nearest_expiry} "
+            f"with strike window {lower_bound}-{upper_bound} "
+            f"across {len(filtered_instruments)} instruments"
+        )
+        return filtered_instruments, resolved_required_contracts
+
+    return nearest_expiry_instruments, resolved_required_contracts
 
 def get_nifty50_spot_price():
     """
@@ -119,24 +217,15 @@ def fetch_live_option_chain(spot_price=None, required_contracts=None):
 
         print(f"Found {len(nifty_option_symbols)} option instruments")
 
-        def expiry_sort_value(inst):
-            expiry = inst.get('expiry')
-            if isinstance(expiry, str):
-                try:
-                    return datetime.strptime(expiry, "%Y-%m-%d").date()
-                except Exception:
-                    return expiry
-            if hasattr(expiry, 'date'):
-                return expiry.date()
-            return expiry
+        filtered_option_symbols, required_contracts = _select_snapshot_instruments(
+            nifty_option_symbols,
+            spot_price,
+            required_contracts=required_contracts,
+        )
 
-        if required_contracts is None and spot_price is not None:
-            ce_strikes = [
-                int(inst.get('strike'))
-                for inst in nifty_option_symbols
-                if inst.get('instrument_type') == 'CE' and inst.get('strike') is not None
-            ]
-            required_contracts = build_nifty_strategy_required_contracts(spot_price, ce_strikes)
+        def expiry_sort_value(inst):
+            expiry = _normalize_expiry_date(inst.get('expiry'))
+            return expiry or datetime.max.date()
 
         required_quote_keys = []
         if required_contracts:
@@ -146,7 +235,7 @@ def fetch_live_option_chain(spot_price=None, required_contracts=None):
                 if strike_price is None:
                     continue
                 candidates = [
-                    inst for inst in nifty_option_symbols
+                    inst for inst in filtered_option_symbols
                     if inst.get('instrument_type') == option_type and int(inst.get('strike') or 0) == int(strike_price)
                 ]
                 if not candidates:
@@ -160,7 +249,7 @@ def fetch_live_option_chain(spot_price=None, required_contracts=None):
         batch_size = 50
         results = []
         # prepare map tradingsymbol -> instrument
-        ts_map = {f"NFO:{inst['tradingsymbol']}": inst for inst in nifty_option_symbols}
+        ts_map = {f"NFO:{inst['tradingsymbol']}": inst for inst in filtered_option_symbols}
         seen_symbols = set()
 
         def append_quotes(quote_keys, quotes):

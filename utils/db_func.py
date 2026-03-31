@@ -22,6 +22,9 @@ STRIKE_INTERVAL = CONFIG["STRIKE_INTERVAL"]
 RISK_FREE_RATE = CONFIG["RISK_FREE_RATE"]
 PRUNE_AFTER_MINUTES = CONFIG["PRUNE_AFTER_MINUTES"]
 ENABLE_DELTA_LOGGING = CONFIG["ENABLE_DELTA_LOGGING"]
+OPTION_CACHE_REFRESH_SECONDS = 60
+OPTION_CACHE_STALE_GRACE_SECONDS = 10
+OPTION_CACHE_TAIL_LIMIT = 300
 
 EXPECTED_COLUMNS = ['open', 'high', 'low', 'close', 'ao_value', 'donchian_upper', 'donchian_lower', 'donchian_mid']
 
@@ -647,8 +650,8 @@ def fetch_cached_options_data(symbol: str = 'NIFTY50', db_path=DB_PATH) -> List[
         SELECT * FROM option_data 
         WHERE symbol = ? 
         ORDER BY timestamp DESC 
-        LIMIT 100
-    """, (symbol,))
+        LIMIT ?
+    """, (symbol, OPTION_CACHE_TAIL_LIMIT))
     rows = cursor.fetchall()
     conn.close()
     return _map_option_data_rows(rows)
@@ -794,7 +797,7 @@ def calculate_and_store_high_accuracy_delta(
         # Keep the shared live path permissive so existing consumers continue to
         # see the same behavior as before; stricter completeness checks belong
         # in strategy/backtest-specific call paths.
-        STALE_THRESHOLD_SECONDS = 15
+        STALE_THRESHOLD_SECONDS = OPTION_CACHE_REFRESH_SECONDS + OPTION_CACHE_STALE_GRACE_SECONDS
         is_stale_by_age = newest_age is not None and newest_age > STALE_THRESHOLD_SECONDS
         if all_expired or not cached_options or is_stale_by_age:
             print("All cached options are expired or cache is empty. Fetching fresh option data...")
@@ -862,55 +865,60 @@ def calculate_and_store_high_accuracy_delta(
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
             timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            for strike, strike_data in delta_results.items():
-                for option_type, option_data in strike_data.items():
-                    #print(f"[DEBUG] Looking for: strike={strike}, type={option_type}")
-                    """
-                    # Find the correct tradingsymbol for this specific strike and option_type
-                    correct_tradingsymbol = 'N/A'
-                    for opt in cached_options:
-                        if opt['strike_price'] == strike and opt['option_type'] == option_type:
-                            #print(f"[DEBUG] FOUND MATCH: {opt['tradingsymbol']}")
-                            correct_tradingsymbol = opt.get('tradingsymbol', 'N/A')
-                            break
-                    
-                    if correct_tradingsymbol == 'N/A':
-                        print(f"[DEBUG] NO MATCH FOUND for strike={strike}, type={option_type}")
-                   """
-                    # Robust delta value extraction and scaling
-                    if isinstance(option_data, dict) and 'delta' in option_data and isinstance(option_data['delta'], (float, int)):
-                        delta_value = option_data['delta'] * 100
-                        ltp_value = option_data.get('ltp', None)
-                        selected_tradingsymbol = option_data.get('tradingsymbol', 'N/A')
-                        selected_expiry = option_data.get('expiry_date')
-                    elif isinstance(option_data, (float, int)):
-                        delta_value = option_data * 100
-                        ltp_value = None
-                        selected_tradingsymbol = 'N/A'
-                        selected_expiry = None
-                    else:
-                        delta_value = None  # Could not extract delta value
-                        ltp_value = None
-                        selected_tradingsymbol = 'N/A'
-                        selected_expiry = None
-                    if delta_value is not None:
+            cursor.execute("SELECT MAX(timestamp) FROM delta_cache WHERE symbol = ?", (symbol,))
+            latest_delta_timestamp = cursor.fetchone()[0]
+            if latest_delta_timestamp and str(latest_delta_timestamp).startswith(timestamp_str[:16]):
+                print(f"[DELTA CACHE] Snapshot already stored for {timestamp_str[:16]}; skipping duplicate write.")
+            else:
+                for strike, strike_data in delta_results.items():
+                    for option_type, option_data in strike_data.items():
+                        #print(f"[DEBUG] Looking for: strike={strike}, type={option_type}")
                         """
+                        # Find the correct tradingsymbol for this specific strike and option_type
                         correct_tradingsymbol = 'N/A'
                         for opt in cached_options:
                             if opt['strike_price'] == strike and opt['option_type'] == option_type:
+                                #print(f"[DEBUG] FOUND MATCH: {opt['tradingsymbol']}")
                                 correct_tradingsymbol = opt.get('tradingsymbol', 'N/A')
                                 break
-                        """
-                        cursor.execute("""
-                            INSERT INTO delta_cache (
-                                timestamp, strike_price, option_type, delta,
-                                expiry_date, spot_price, symbol, ltp, tradingsymbol
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (
-                            timestamp_str, strike, option_type, delta_value,
-                            selected_expiry, spot_price, symbol, ltp_value,
-                            selected_tradingsymbol
-                        ))
+                        
+                        if correct_tradingsymbol == 'N/A':
+                            print(f"[DEBUG] NO MATCH FOUND for strike={strike}, type={option_type}")
+                       """
+                        # Robust delta value extraction and scaling
+                        if isinstance(option_data, dict) and 'delta' in option_data and isinstance(option_data['delta'], (float, int)):
+                            delta_value = option_data['delta'] * 100
+                            ltp_value = option_data.get('ltp', None)
+                            selected_tradingsymbol = option_data.get('tradingsymbol', 'N/A')
+                            selected_expiry = option_data.get('expiry_date')
+                        elif isinstance(option_data, (float, int)):
+                            delta_value = option_data * 100
+                            ltp_value = None
+                            selected_tradingsymbol = 'N/A'
+                            selected_expiry = None
+                        else:
+                            delta_value = None  # Could not extract delta value
+                            ltp_value = None
+                            selected_tradingsymbol = 'N/A'
+                            selected_expiry = None
+                        if delta_value is not None:
+                            """
+                            correct_tradingsymbol = 'N/A'
+                            for opt in cached_options:
+                                if opt['strike_price'] == strike and opt['option_type'] == option_type:
+                                    correct_tradingsymbol = opt.get('tradingsymbol', 'N/A')
+                                    break
+                            """
+                            cursor.execute("""
+                                INSERT INTO delta_cache (
+                                    timestamp, strike_price, option_type, delta,
+                                    expiry_date, spot_price, symbol, ltp, tradingsymbol
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (
+                                timestamp_str, strike, option_type, delta_value,
+                                selected_expiry, spot_price, symbol, ltp_value,
+                                selected_tradingsymbol
+                            ))
             conn.commit()
             conn.close()
         print("Delta calculations completed and stored successfully.")
