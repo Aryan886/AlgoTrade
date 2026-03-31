@@ -233,22 +233,29 @@ class BacktestableStrategy(NiftyOptionsStrategy):
         section2_ok = False
         section2_rsi = None
         if second_flag_ok:
-            rsi_ok, section2_rsi = self._section2_rsi_ok(df_5m, threshold=40.0)
+            section2_prev_candle_ok = self._section2_prev_candle_above(df_1m)
             gate_checks.append(GateCheckResult(
-                gate_name="RSI Filter",
-                passed=rsi_ok,
-                details={"rsi_value": section2_rsi, "threshold": 40.0},
+                gate_name="Section 2 Previous Candle",
+                passed=section2_prev_candle_ok,
+                details=self._get_section2_prev_candle_values(df_1m),
             ))
-            if rsi_ok:
-                sl_filter_ok = self._sl_filter_ok(df_1m, lookback=5, threshold_pts=sl_threshold)
-                sl_filter_details = self._get_sl_filter_values(df_1m, lookback=5, threshold=sl_threshold)
+            if section2_prev_candle_ok:
+                rsi_ok, section2_rsi = self._section2_rsi_ok(df_5m, threshold=40.0)
                 gate_checks.append(GateCheckResult(
-                    gate_name="SL Filter (Section 2)",
-                    passed=sl_filter_ok,
-                    details=sl_filter_details,
+                    gate_name="RSI Filter",
+                    passed=rsi_ok,
+                    details={"rsi_value": section2_rsi, "threshold": 40.0},
                 ))
-                if sl_filter_ok:
-                    section2_ok = True
+                if rsi_ok:
+                    sl_filter_ok = self._sl_filter_ok(df_1m, lookback=5, threshold_pts=sl_threshold)
+                    sl_filter_details = self._get_sl_filter_values(df_1m, lookback=5, threshold=sl_threshold)
+                    gate_checks.append(GateCheckResult(
+                        gate_name="SL Filter (Section 2)",
+                        passed=sl_filter_ok,
+                        details=sl_filter_details,
+                    ))
+                    if sl_filter_ok:
+                        section2_ok = True
 
         # Section 3 entry check
         section3_ok = False
@@ -420,6 +427,21 @@ class BacktestableStrategy(NiftyOptionsStrategy):
             "1m_close": float(last.get("close", 0)),
             "sma_20": float(last.get("sma_20", 0)),
             "sma_5_low": float(last.get("sma_5_low", 0)),
+        }
+
+    def _get_section2_prev_candle_values(self, df_1m: pd.DataFrame) -> Dict[str, Any]:
+        """Extract values used in the Section 2 previous-candle gate for logging."""
+        if df_1m is None or df_1m.empty:
+            return {"error": "No 1m data"}
+        if len(df_1m) < 2:
+            return {"error": "Insufficient data (need 2 candles)"}
+        if not _ensure_cols(df_1m, ["close", "sma_20", "sma_5_low"]):
+            return {"error": "Missing required columns"}
+        previous = df_1m.iloc[-2]
+        return {
+            "previous_1m_close": float(previous.get("close", 0)),
+            "previous_sma_20": float(previous.get("sma_20", 0)),
+            "previous_sma_5_low": float(previous.get("sma_5_low", 0)),
         }
 
     def _get_sl_filter_values(self, df_1m: pd.DataFrame, lookback: int, threshold: float) -> Dict[str, Any]:

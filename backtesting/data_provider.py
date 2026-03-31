@@ -220,7 +220,7 @@ class HistoricalDataProvider:
         return self._merge_option_snapshots(delta_snapshot, option_snapshot)
 
     def fetch_next_delta_snapshot(self, current_time: datetime) -> Tuple[Optional[datetime], List[Dict[str, Any]]]:
-        """Returns the first full options snapshot strictly after current_time."""
+        """Returns the first full options snapshot at or after current_time."""
         if not self._data_loaded:
             raise RuntimeError("Data not loaded. Call load_all_data() first.")
 

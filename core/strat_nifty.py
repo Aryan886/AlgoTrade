@@ -534,6 +534,20 @@ class NiftyOptionsStrategy:
         except Exception:
             return False
 
+    def _section2_prev_candle_above(self, df_1m: pd.DataFrame) -> bool:
+        df_1m = self._compute_required_indicators(df_1m)
+        if df_1m is None or len(df_1m) < 2:
+            return False
+        if not _ensure_cols(df_1m, ["close", "sma_20", "sma_5_low"]):
+            return False
+        previous = df_1m.iloc[-2]
+        try:
+            return (float(previous["close"]) > float(previous["sma_20"])) and (
+                float(previous["close"]) > float(previous["sma_5_low"])
+            )
+        except Exception:
+            return False
+
     def _sl_filter_ok(self, df_1m: pd.DataFrame, lookback: int, threshold_pts: float) -> bool:
         """
         SL filter in spec:
@@ -688,7 +702,7 @@ class NiftyOptionsStrategy:
         # Section 2 entry: direct 2nd-flag trigger + 5m RSI + SL filter(7)
         section2_ok = False
         section2_rsi = None
-        if second_flag_ok:
+        if second_flag_ok and self._section2_prev_candle_above(df_1m):
             rsi_ok, section2_rsi = self._section2_rsi_ok(df_5m, threshold=40.0)
             if rsi_ok and self._sl_filter_ok(df_1m, lookback=5, threshold_pts=sl_threshold):
                 section2_ok = True

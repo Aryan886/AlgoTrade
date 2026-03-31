@@ -58,11 +58,14 @@ class NiftyStrategySectionTests(unittest.TestCase):
 
     def _base_frames(self) -> dict[str, pd.DataFrame]:
         index_1m = pd.date_range("2026-03-10 09:15:00", periods=10, freq="1min")
+        closes_1m = [100.0] * 8 + [115.0, 100.0]
+        highs_1m = [101.0] * 8 + [116.0, 101.0]
+        lows_1m = [99.0] * 8 + [114.0, 99.0]
         df_1m = make_df(
             index_1m,
-            closes=[100.0] * 10,
-            highs=[101.0] * 10,
-            lows=[99.0] * 10,
+            closes=closes_1m,
+            highs=highs_1m,
+            lows=lows_1m,
             sma_20=110.0,
             sma_50=120.0,
             sma_200=130.0,
@@ -127,6 +130,44 @@ class NiftyStrategySectionTests(unittest.TestCase):
         self.assertEqual(intent["position_type"], "A")
         self.assertGreater(intent["reason"]["rsi_5m"], 40.0)
         self.assertEqual(len(intent["legs"]), 3)
+
+    def test_section2_skips_trade_when_previous_1m_candle_is_not_above_both_levels(self):
+        strategy = self._strategy()
+        frames = self._base_frames()
+        previous_index = frames["1m"].index[-2]
+        frames["1m"].loc[previous_index, ["open", "high", "low", "close"]] = [100.0, 101.0, 99.0, 100.0]
+
+        def get_df(interval: str, limit: int = 300) -> pd.DataFrame:
+            return frames[interval].copy()
+
+        with patch.object(strategy, "_now", return_value=datetime(2026, 3, 10, 14, 0, 0)), \
+             patch.object(strategy, "_get_df", side_effect=get_df), \
+             patch.object(strategy, "_detect_touches_and_latch", return_value=[]), \
+             patch.object(strategy, "_vix_regime", return_value="A"), \
+             patch("core.strat_nifty.calculate_and_store_high_accuracy_delta", return_value=None), \
+             patch("core.strat_nifty.fetch_latest_delta_data", return_value=make_options_chain()):
+            intent = strategy.evaluate_for_entry()
+
+        self.assertIsNone(intent)
+
+    def test_section2_skips_trade_when_previous_1m_candle_is_above_only_one_level(self):
+        strategy = self._strategy()
+        frames = self._base_frames()
+        previous_index = frames["1m"].index[-2]
+        frames["1m"].loc[previous_index, ["open", "high", "low", "close"]] = [108.0, 109.0, 107.0, 108.0]
+
+        def get_df(interval: str, limit: int = 300) -> pd.DataFrame:
+            return frames[interval].copy()
+
+        with patch.object(strategy, "_now", return_value=datetime(2026, 3, 10, 14, 0, 0)), \
+             patch.object(strategy, "_get_df", side_effect=get_df), \
+             patch.object(strategy, "_detect_touches_and_latch", return_value=[]), \
+             patch.object(strategy, "_vix_regime", return_value="A"), \
+             patch("core.strat_nifty.calculate_and_store_high_accuracy_delta", return_value=None), \
+             patch("core.strat_nifty.fetch_latest_delta_data", return_value=make_options_chain()):
+            intent = strategy.evaluate_for_entry()
+
+        self.assertIsNone(intent)
 
     def test_section1_has_priority_over_section2(self):
         strategy = self._strategy()

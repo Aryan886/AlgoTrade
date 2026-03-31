@@ -232,15 +232,18 @@ class OptionSnapshotPipelineTests(unittest.TestCase):
 
     def _base_frames(self) -> dict[str, pd.DataFrame]:
         index_1m = pd.date_range("2026-03-10 09:15:00", periods=10, freq="1min")
+        closes_1m = [self.SPOT_PRICE] * 8 + [self.SPOT_PRICE + 12.0, self.SPOT_PRICE]
+        highs_1m = [self.SPOT_PRICE + 2.0] * 8 + [self.SPOT_PRICE + 13.0, self.SPOT_PRICE + 2.0]
+        lows_1m = [self.SPOT_PRICE - 2.0] * 8 + [self.SPOT_PRICE + 11.0, self.SPOT_PRICE - 2.0]
         df_1m = make_df(
             index_1m,
-            closes=[self.SPOT_PRICE] * 10,
-            highs=[self.SPOT_PRICE + 2.0] * 10,
-            lows=[self.SPOT_PRICE - 2.0] * 10,
-            sma_20=self.SPOT_PRICE + 40.0,
+            closes=closes_1m,
+            highs=highs_1m,
+            lows=lows_1m,
+            sma_20=self.SPOT_PRICE + 10.0,
             sma_50=self.SPOT_PRICE + 80.0,
             sma_200=self.SPOT_PRICE + 120.0,
-            sma_5_low=self.SPOT_PRICE + 10.0,
+            sma_5_low=self.SPOT_PRICE + 5.0,
         )
 
         index_5m = pd.date_range("2026-03-10 09:15:00", periods=15, freq="5min")
