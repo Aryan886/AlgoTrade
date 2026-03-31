@@ -799,7 +799,7 @@ def calculate_and_store_high_accuracy_delta(
         if all_expired or not cached_options or is_stale_by_age:
             print("All cached options are expired or cache is empty. Fetching fresh option data...")
             from utils.vix_fetcher import fetch_live_option_chain
-            fresh_options = fetch_live_option_chain()
+            fresh_options = fetch_live_option_chain(spot_price=spot_price)
             if not fresh_options:
                 print("Failed to fetch fresh option data.")
                 return None

@@ -583,6 +583,7 @@ class NiftyOptionsStrategy:
         return False
 
     def _section3_retest_ok(self, df_5m: pd.DataFrame) -> bool:
+        SECTION3_LATCH_EXPIRY_MINUTES = 5
         if not bool(self.state["section3"].get("break_latched")):
             return False
         df_5m = self._compute_required_indicators(df_5m)
@@ -592,6 +593,19 @@ class NiftyOptionsStrategy:
         current_ts = self._latest_ts(df_5m)
         if break_time is None or current_ts is None or current_ts <= break_time:
             return False
+        
+        # Check if break latch has expired (5-minute limit)
+        now_ts = self._now()
+        age_minutes = (now_ts - break_time).total_seconds() / 60.0
+        if age_minutes > SECTION3_LATCH_EXPIRY_MINUTES:
+            # Expire the latch
+            self.state["section3"]["break_latched"] = False
+            self.state["section3"]["break_reason"] = None
+            self.state["section3"]["break_time"] = None
+            self.save_state()
+            self.logger.info(f"Section 3 break latch expired after {age_minutes:.1f} minutes")
+            return False
+        
         last = df_5m.iloc[-1]
         high = float(last["high"])
         return (high >= float(last["sma_20"])) or (high >= float(last["donchian_mid"]))
@@ -644,8 +658,26 @@ class NiftyOptionsStrategy:
         sl_threshold = 25.0 if position_type == "A" else 35.0
 
         # Section 1 entry: requires any latched subcategory + 2nd flag + SL filter(7)
+        # Latch expiry: subcategory latches expire after 5 minutes to ensure timely entries
+        LATCH_EXPIRY_MINUTES = 5
         section1_ok = False
-        active_subcats = [k for k, v in (self.state.get("section1_flags") or {}).items() if v]
+        now_ts = self._now()
+        raw_active = [k for k, v in (self.state.get("section1_flags") or {}).items() if v]
+        active_subcats = []
+        for subcat in raw_active:
+            latch_time = _parse_ts(self.state.get("section1_last_touch", {}).get(subcat))
+            if latch_time is not None:
+                age_minutes = (now_ts - latch_time).total_seconds() / 60.0
+                if age_minutes <= LATCH_EXPIRY_MINUTES:
+                    active_subcats.append(subcat)
+                else:
+                    # Expire the latch - clear the flag
+                    self.state["section1_flags"][subcat] = False
+                    self.logger.info(f"Subcategory {subcat} latch expired after {age_minutes:.1f} minutes")
+            else:
+                # No timestamp recorded, include it (backward compatibility)
+                active_subcats.append(subcat)
+        
         second_flag_ok = self._second_flag_ok(df_1m)
         if active_subcats:
             if second_flag_ok and self._sl_filter_ok(df_1m, lookback=5, threshold_pts=sl_threshold):
