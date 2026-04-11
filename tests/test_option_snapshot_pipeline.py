@@ -6,7 +6,7 @@ import tempfile
 import types
 import unittest
 import importlib
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from unittest.mock import patch
 
 import pandas as pd
@@ -21,9 +21,11 @@ from utils.db_func import (
     fetch_cached_options_data,
     fetch_latest_delta_data,
     fetch_latest_option_snapshot,
+    store_high_accuracy_options_data,
     summarize_option_snapshot_coverage,
 )
-from utils.vix_fetcher import fetch_live_option_chain
+from utils.db_setup import create_tables
+from utils.vix_fetcher import _normalize_expiry_date, fetch_live_option_chain
 
 
 def make_df(index: pd.DatetimeIndex, closes, highs=None, lows=None, **extra_columns) -> pd.DataFrame:
@@ -276,10 +278,10 @@ class OptionSnapshotPipelineTests(unittest.TestCase):
             closes=[50.0, 50.0],
             highs=[55.0, 55.0],
             lows=[49.0, 49.0],
-            sma_20=100.0,
-            sma_50=110.0,
-            sma_200=120.0,
-            donchian_mid=95.0,
+            sma_20=self.SPOT_PRICE + 100.0,
+            sma_50=self.SPOT_PRICE + 110.0,
+            sma_200=self.SPOT_PRICE + 120.0,
+            donchian_mid=self.SPOT_PRICE + 95.0,
         )
 
         return {"1m": df_1m, "5m": df_5m, "15m": df_15m, "1h": df_1h}
@@ -316,6 +318,101 @@ class OptionSnapshotPipelineTests(unittest.TestCase):
         self.assertFalse(incomplete["complete"])
         self.assertIn({"option_type": "PE", "strike_price": 23200}, incomplete["missing_required_contracts"])
         self.assertIn({"option_type": "CE", "strike_price": 23200}, incomplete["missing_required_contracts"])
+
+    def test_store_option_data_appends_without_pruning_and_filters_far_expiry(self):
+        conn = sqlite3.connect(self.db_path)
+        existing_count = conn.execute(
+            "SELECT COUNT(*) FROM option_data WHERE symbol = ?",
+            (self.SYMBOL,),
+        ).fetchone()[0]
+        conn.close()
+
+        today = date.today()
+        rows_to_store = [
+            {
+                "strike_price": 22900,
+                "option_type": "CE",
+                "ltp": 101.0,
+                "iv": 0.2,
+                "expiry_date": today - timedelta(days=1),
+                "tradingsymbol": "NIFTY_PAST_CE",
+                "open_interest": 100,
+            },
+            {
+                "strike_price": 22950,
+                "option_type": "PE",
+                "ltp": 102.0,
+                "iv": 0.2,
+                "expiry_date": today.isoformat(),
+                "tradingsymbol": "NIFTY_TODAY_PE",
+                "open_interest": 101,
+            },
+            {
+                "strike_price": 23000,
+                "option_type": "CE",
+                "ltp": 103.0,
+                "iv": 0.2,
+                "expiry_date": today + timedelta(days=14),
+                "tradingsymbol": "NIFTY_DAY14_CE",
+                "open_interest": 102,
+            },
+            {
+                "strike_price": 23050,
+                "option_type": "PE",
+                "ltp": 104.0,
+                "iv": 0.2,
+                "expiry_date": today + timedelta(days=15),
+                "tradingsymbol": "NIFTY_DAY15_PE",
+                "open_interest": 103,
+            },
+            {
+                "strike_price": 23100,
+                "option_type": "CE",
+                "ltp": 105.0,
+                "iv": 0.2,
+                "expiry_date": "not-a-date",
+                "tradingsymbol": "NIFTY_INVALID_CE",
+                "open_interest": 104,
+            },
+        ]
+
+        store_high_accuracy_options_data(rows_to_store, self.SYMBOL, self.SPOT_PRICE, db_path=self.db_path)
+
+        conn = sqlite3.connect(self.db_path)
+        stored_symbols = {
+            row[0]
+            for row in conn.execute(
+                "SELECT tradingsymbol FROM option_data WHERE symbol = ?",
+                (self.SYMBOL,),
+            ).fetchall()
+        }
+        final_count = conn.execute(
+            "SELECT COUNT(*) FROM option_data WHERE symbol = ?",
+            (self.SYMBOL,),
+        ).fetchone()[0]
+        conn.close()
+
+        self.assertEqual(final_count, existing_count + 3)
+        self.assertIn("NIFTY_OLD_24000_CE", stored_symbols)
+        self.assertIn("NIFTY_PAST_CE", stored_symbols)
+        self.assertIn("NIFTY_TODAY_PE", stored_symbols)
+        self.assertIn("NIFTY_DAY14_CE", stored_symbols)
+        self.assertNotIn("NIFTY_DAY15_PE", stored_symbols)
+        self.assertNotIn("NIFTY_INVALID_CE", stored_symbols)
+
+    def test_db_setup_creates_option_data_symbol_timestamp_index(self):
+        schema_db_path = os.path.join(self.temp_dir.name, "schema_options.db")
+
+        create_tables(schema_db_path)
+
+        conn = sqlite3.connect(schema_db_path)
+        index_names = {
+            row[1]
+            for row in conn.execute("PRAGMA index_list(option_data)").fetchall()
+        }
+        conn.close()
+
+        self.assertIn("ix_option_data_symbol_timestamp", index_names)
 
     def test_delta_builder_uses_full_snapshot_and_keeps_expected_strike(self):
         self._build_delta_cache()
@@ -380,6 +477,13 @@ class OptionSnapshotPipelineTests(unittest.TestCase):
         expiries_seen = {str(row["expiry"]) for row in option_rows}
         self.assertEqual(expiries_seen, {"2099-03-30"})
         self.assertLess(len(option_rows), len(instruments))
+
+    def test_normalize_expiry_date_accepts_date_datetime_and_string(self):
+        expiry = date(2026, 4, 21)
+
+        self.assertEqual(_normalize_expiry_date(expiry), expiry)
+        self.assertEqual(_normalize_expiry_date(datetime(2026, 4, 21, 9, 15)), expiry)
+        self.assertEqual(_normalize_expiry_date("2026-04-21"), expiry)
 
     def test_delta_builder_uses_recent_option_snapshot_without_refetch(self):
         current_ts = datetime.now().replace(microsecond=0)

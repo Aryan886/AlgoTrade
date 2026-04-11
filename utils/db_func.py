@@ -2,8 +2,7 @@ import sqlite3
 import pandas as pd
 import os
 from typing import Any, Optional, List, Dict
-from datetime import datetime
-from datetime import date
+from datetime import date, datetime, timedelta
 from config.config import CONFIG
 from utils.black_scholes import (
     calculate_delta_for_strike_band,
@@ -592,21 +591,45 @@ def store_trade(timestamp, symbol, action, price, qty, status='pending', db_path
     conn.close()
 
 # High-accuracy options data storage
+def _parse_option_expiry_date(expiry_value: Any) -> Optional[date]:
+    """Normalize option expiry values to a local date for storage filtering."""
+    if isinstance(expiry_value, datetime):
+        return expiry_value.date()
+    if isinstance(expiry_value, date):
+        return expiry_value
+    if isinstance(expiry_value, str):
+        expiry_text = expiry_value.strip()
+        if not expiry_text:
+            return None
+        try:
+            return date.fromisoformat(expiry_text[:10])
+        except ValueError:
+            return None
+    return None
+
+
 def store_high_accuracy_options_data(options_list: List[Dict], symbol: str, spot_price: float, db_path=DB_PATH):
     """
     Store high-accuracy options data for Black-Scholes delta calculations.
-    Prunes old data based on config.
+    Appends near-expiry option-chain snapshots for historical use.
     """
     ensure_db_dir(db_path)
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # Prune old data
-    cursor.execute(f"""
-        DELETE FROM option_data 
-        WHERE symbol = ? AND timestamp < datetime('now', '-{PRUNE_AFTER_MINUTES} minutes')
-    """, (symbol,))
+    max_expiry_date = date.today() + timedelta(days=14)
+    skipped_invalid_expiry = 0
+    skipped_far_expiry = 0
+
     for option in options_list:
+        expiry_date = _parse_option_expiry_date(option.get('expiry_date'))
+        if expiry_date is None:
+            skipped_invalid_expiry += 1
+            continue
+        if expiry_date > max_expiry_date:
+            skipped_far_expiry += 1
+            continue
+
         try:
             cursor.execute("""
                 INSERT INTO option_data (
@@ -615,7 +638,7 @@ def store_high_accuracy_options_data(options_list: List[Dict], symbol: str, spot
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 timestamp_str, symbol, option['strike_price'], option['option_type'],
-                option['ltp'], option['iv'], option['expiry_date'], spot_price,
+                option['ltp'], option['iv'], expiry_date.isoformat(), spot_price,
                 option['tradingsymbol'], option.get('open_interest', 0)
             ))
         except Exception as e:
@@ -623,6 +646,10 @@ def store_high_accuracy_options_data(options_list: List[Dict], symbol: str, spot
             continue
     conn.commit()
     conn.close()
+    if skipped_invalid_expiry:
+        print(f"Skipped {skipped_invalid_expiry} option row(s) with invalid expiry_date.")
+    if skipped_far_expiry:
+        print(f"Skipped {skipped_far_expiry} option row(s) expiring after {max_expiry_date.isoformat()}.")
     print("Options data stored successfully.")
 
 def _map_option_data_rows(rows) -> List[Dict]:

@@ -307,14 +307,20 @@ class NiftyOptionsStrategy:
     # ---------------------------
     # Spec logic
     # ---------------------------
-    def main_category_a_active(self, df_1h: pd.DataFrame) -> bool:
+    def main_category_a_active(self, df_1h: pd.DataFrame, df_1m: pd.DataFrame) -> bool:
+        df_1m = self._compute_required_indicators(df_1m)
         df_1h = self._compute_required_indicators(df_1h)
-        if not _ensure_cols(df_1h, ["close", "sma_20", "sma_50", "sma_200"]):
+        if not _ensure_cols(df_1m, ["close"]) or not _ensure_cols(df_1h, ["sma_20", "sma_50", "sma_200"]):
             return False
-        last = df_1h.iloc[-1]
-        # All three must be simultaneously true
+        last_1m = df_1m.iloc[-1]
+        last_1h = df_1h.iloc[-1]
         try:
-            return (last["close"] < last["sma_20"]) and (last["close"] < last["sma_50"]) and (last["close"] < last["sma_200"])
+            close_1m = float(last_1m["close"])
+            return (
+                (close_1m < float(last_1h["sma_20"]))
+                and (close_1m < float(last_1h["sma_50"]))
+                and (close_1m < float(last_1h["sma_200"]))
+            )
         except Exception:
             return False
 
@@ -493,11 +499,23 @@ class NiftyOptionsStrategy:
         interval, indicator = self._section1_subcategory_defs()[subcat]
         return (tf_rank[interval], ind_rank[indicator])
 
-    def _detect_touches_and_latch(self, data_by_interval: Dict[str, pd.DataFrame]) -> List[str]:
+    def _detect_touches_and_latch(self, df_1m: pd.DataFrame, data_by_interval: Dict[str, pd.DataFrame]) -> List[str]:
         """
-        For each subcategory a–o, if its timeframe candle's HIGH touches the indicator level, latch its flag.
+        For each subcategory a–o, if the latest closed 1m close is at or above that
+        subcategory's latest indicator value, latch its flag.
         Returns the list of subcategories that *newly* latched on this call.
         """
+        df_1m = self._compute_required_indicators(df_1m)
+        if not _ensure_cols(df_1m, ["close"]):
+            return []
+
+        latest_1m = df_1m.iloc[-1]
+        try:
+            close_1m = float(latest_1m["close"])
+        except Exception:
+            return []
+        touch_ts = pd.Timestamp(df_1m.index[-1])
+
         newly = []
         defs = self._section1_subcategory_defs()
         for subcat, (interval, indicator) in defs.items():
@@ -505,7 +523,7 @@ class NiftyOptionsStrategy:
             if df is None or df.empty:
                 continue
             df = self._compute_required_indicators(df)
-            if not _ensure_cols(df, ["high", indicator]):
+            if not _ensure_cols(df, [indicator]):
                 continue
 
             last = df.iloc[-1]
@@ -513,10 +531,10 @@ class NiftyOptionsStrategy:
             if pd.isna(ind_val):
                 continue
 
-            touched = float(last["high"]) >= float(ind_val)
+            touched = close_1m >= float(ind_val)
             if touched and not bool(self.state["section1_flags"].get(subcat)):
                 self.state["section1_flags"][subcat] = True
-                self.state["section1_last_touch"][subcat] = _to_iso(pd.Timestamp(df.index[-1]))
+                self.state["section1_last_touch"][subcat] = _to_iso(touch_ts)
                 newly.append(subcat)
 
         if newly:
@@ -576,37 +594,40 @@ class NiftyOptionsStrategy:
     # ---------------------------
     # Section 3: break & retest
     # ---------------------------
-    def _update_section3_break_latch(self, df_5m: pd.DataFrame) -> bool:
+    def _update_section3_break_latch(self, df_1m: pd.DataFrame, df_5m: pd.DataFrame) -> bool:
+        df_1m = self._compute_required_indicators(df_1m)
         df_5m = self._compute_required_indicators(df_5m)
-        if not _ensure_cols(df_5m, ["close", "sma_20", "donchian_mid"]):
+        if not _ensure_cols(df_1m, ["close"]) or not _ensure_cols(df_5m, ["sma_20", "donchian_mid"]):
             return False
-        last = df_5m.iloc[-1]
-        close = float(last["close"])
+        last_1m = df_1m.iloc[-1]
+        last_5m = df_5m.iloc[-1]
+        close_1m = float(last_1m["close"])
         broke = False
         reason = None
-        if close < float(last["sma_20"]):
+        if close_1m < float(last_5m["sma_20"]):
             broke = True
             reason = "sma20"
-        if close < float(last["donchian_mid"]):
+        if close_1m < float(last_5m["donchian_mid"]):
             broke = True
             reason = "donchian_mid" if reason is None else reason
         if broke and not bool(self.state["section3"].get("break_latched")):
             self.state["section3"]["break_latched"] = True
             self.state["section3"]["break_reason"] = reason
-            self.state["section3"]["break_time"] = _to_iso(pd.Timestamp(df_5m.index[-1]))
+            self.state["section3"]["break_time"] = _to_iso(pd.Timestamp(df_1m.index[-1]))
             self.save_state()
             return True
         return False
 
-    def _section3_retest_ok(self, df_5m: pd.DataFrame) -> bool:
+    def _section3_retest_ok(self, df_1m: pd.DataFrame, df_5m: pd.DataFrame) -> bool:
         SECTION3_LATCH_EXPIRY_MINUTES = 5
         if not bool(self.state["section3"].get("break_latched")):
             return False
+        df_1m = self._compute_required_indicators(df_1m)
         df_5m = self._compute_required_indicators(df_5m)
-        if not _ensure_cols(df_5m, ["high", "sma_20", "donchian_mid"]):
+        if not _ensure_cols(df_1m, ["close"]) or not _ensure_cols(df_5m, ["sma_20", "donchian_mid"]):
             return False
         break_time = _parse_ts(self.state["section3"].get("break_time"))
-        current_ts = self._latest_ts(df_5m)
+        current_ts = self._latest_ts(df_1m)
         if break_time is None or current_ts is None or current_ts <= break_time:
             return False
         
@@ -622,9 +643,10 @@ class NiftyOptionsStrategy:
             self.logger.info(f"Section 3 break latch expired after {age_minutes:.1f} minutes")
             return False
         
-        last = df_5m.iloc[-1]
-        high = float(last["high"])
-        return (high >= float(last["sma_20"])) or (high >= float(last["donchian_mid"]))
+        last_1m = df_1m.iloc[-1]
+        last_5m = df_5m.iloc[-1]
+        close_1m = float(last_1m["close"])
+        return (close_1m >= float(last_5m["sma_20"])) or (close_1m >= float(last_5m["donchian_mid"]))
 
     # ---------------------------
     # Public: produce entry intent
@@ -653,17 +675,16 @@ class NiftyOptionsStrategy:
             return None
 
         # Main Category A gate
-        if not self.main_category_a_active(df_1h):
+        if not self.main_category_a_active(df_1h, df_1m):
             return None
 
         # Latch new subcategory touches (Section 1)
-        #self._detect_touches_and_latch({"1m": df_1m, "5m": df_5m, "15m": df_15m, "1h": df_1h})
-        self._detect_touches_and_latch({"5m": df_5m, "15m": df_15m, "1h": df_1h})
+        self._detect_touches_and_latch(df_1m, {"1m": df_1m, "5m": df_5m, "15m": df_15m, "1h": df_1h})
 
         # Update Section 3 break latch on new 5m candles (it is evaluated on 5m candle closes)
         latest_5m_ts = self._latest_ts(df_5m)
         if latest_5m_ts is not None and self._is_new_candle("5m", df_5m):
-            self._update_section3_break_latch(df_5m)
+            self._update_section3_break_latch(df_1m, df_5m)
             self.mark_processed("5m", latest_5m_ts)
 
         vix_regime = self._vix_regime()
@@ -709,7 +730,7 @@ class NiftyOptionsStrategy:
 
         # Section 3 entry: break latched + retest + confirmation(2nd flag) + SL filter(7)
         section3_ok = False
-        if self._section3_retest_ok(df_5m):
+        if self._section3_retest_ok(df_1m, df_5m):
             if second_flag_ok and self._sl_filter_ok(df_1m, lookback=5, threshold_pts=sl_threshold):
                 section3_ok = True
 

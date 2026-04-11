@@ -5,7 +5,7 @@ Fetches live option chain data from Kite API, calculates VIX, and stores in data
 
 import pandas as pd
 import math
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from config.config import CONFIG
 from utils.db_func import (
     store_vix_data_bulk,
@@ -73,6 +73,10 @@ def _normalize_expiry_date(expiry):
             return datetime.strptime(expiry, "%Y-%m-%d").date()
         except Exception:
             return None
+    if isinstance(expiry, datetime):
+        return expiry.date()
+    if isinstance(expiry, date):
+        return expiry
     if hasattr(expiry, "date"):
         try:
             return expiry.date()

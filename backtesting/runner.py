@@ -12,7 +12,7 @@ from typing import Optional
 
 from backtesting.data_provider import HistoricalDataProvider
 from backtesting.backtest_bot import BacktestableBot
-from backtesting.exceptions import StrictBacktestDataError
+from backtesting.exceptions import BacktestDataCoverageError, StrictBacktestDataError
 from backtesting.metrics import TradeLog, MetricsCalculator, BacktestResult
 from backtesting.trade_logger import BacktestTradeLogger, NullTradeLogger
 
@@ -105,6 +105,25 @@ class BacktestRunner:
         # Adjust start/end if needed
         effective_start = max(self.config.start_date, data_start) if data_start else self.config.start_date
         effective_end = min(self.config.end_date, data_end) if data_end else self.config.end_date
+        requested_effective_end = effective_end
+        effective_end, truncation_messages = self._truncate_effective_end_for_supporting_data(
+            effective_start,
+            effective_end,
+        )
+
+        if effective_end < effective_start:
+            joined = "\n".join(truncation_messages) if truncation_messages else "Supporting data does not cover any runnable window."
+            raise BacktestDataCoverageError(joined)
+
+        self._report_and_validate_data_coverage(effective_start, effective_end)
+
+        if effective_end < requested_effective_end:
+            print(
+                "Truncating backtest end to the latest fully supported point-in-time: "
+                f"{effective_end}"
+            )
+            for message in truncation_messages:
+                print(f"  - {message}")
 
         print(f"Running backtest from {effective_start} to {effective_end}...")
 
@@ -185,6 +204,228 @@ class BacktestRunner:
         """Compute performance metrics from trade log."""
         calculator = MetricsCalculator(self.trade_log)
         return calculator.compute()
+
+    def _report_and_validate_data_coverage(self, effective_start: datetime, effective_end: datetime) -> None:
+        coverage = self.data_provider.get_backtest_data_coverage()
+        if not coverage:
+            print("Supporting data coverage: unavailable")
+            return
+
+        print("Supporting data coverage:")
+        ordered_names = ["market_data_1m", "vix_data", "delta_cache", "option_data"]
+        issues = []
+        required_windows = self._required_coverage_windows(effective_start, effective_end)
+
+        for table_name in ordered_names:
+            info = coverage.get(table_name, {})
+            rows = int(info.get("rows") or 0)
+            start = info.get("start")
+            end = info.get("end")
+            required_start, required_end = required_windows[table_name]
+            status, warning_message, issue_message = self._evaluate_coverage_status(
+                table_name,
+                start,
+                end,
+                required_start,
+                required_end,
+            )
+            print(
+                f"  - {table_name}: rows={rows}, available={self._format_range(start, end)}, "
+                f"required={required_start} -> {required_end}, status={status}"
+            )
+            if warning_message:
+                print(f"WARNING: {warning_message}")
+            if issue_message:
+                issues.append(issue_message)
+
+        if issues:
+            raise BacktestDataCoverageError("\n".join(issues))
+
+    def _truncate_effective_end_for_supporting_data(
+        self,
+        effective_start: datetime,
+        effective_end: datetime,
+    ) -> tuple[datetime, list[str]]:
+        coverage = self.data_provider.get_backtest_data_coverage() or {}
+        fill_headroom = self.bot.TARGET_FILL_LATENCY + timedelta(minutes=1)
+
+        candidates: list[tuple[str, datetime, str]] = []
+
+        market_end = coverage.get("market_data_1m", {}).get("end")
+        if market_end is not None:
+            candidates.append((
+                "market_data_1m",
+                market_end,
+                "1m candles are only loaded through this timestamp.",
+            ))
+
+        vix_end = coverage.get("vix_data", {}).get("end")
+        if vix_end is not None:
+            candidates.append((
+                "vix_data",
+                vix_end,
+                "fresh VIX snapshots are unavailable after this timestamp.",
+            ))
+
+        for table_name in ("delta_cache", "option_data"):
+            table_end = coverage.get(table_name, {}).get("end")
+            if table_end is None:
+                continue
+            candidates.append((
+                table_name,
+                table_end - fill_headroom,
+                f"{table_name} needs post-signal fill headroom through {fill_headroom}.",
+            ))
+
+        if not candidates:
+            return effective_end, []
+
+        adjusted_end = min([effective_end] + [candidate_end for _, candidate_end, _ in candidates])
+        if adjusted_end >= effective_end:
+            return effective_end, []
+
+        messages = []
+        for table_name, candidate_end, detail in candidates:
+            if candidate_end <= adjusted_end:
+                messages.append(
+                    f"{table_name} limits execution to {candidate_end} because {detail}"
+                )
+
+        return adjusted_end, messages
+
+    def _evaluate_coverage_status(
+        self,
+        table_name: str,
+        available_start: Optional[datetime],
+        available_end: Optional[datetime],
+        required_start: datetime,
+        required_end: datetime,
+    ) -> tuple[str, Optional[str], Optional[str]]:
+        if available_start is None or available_end is None:
+            return "MISSING", None, self._coverage_issue_message(
+                table_name,
+                available_start,
+                available_end,
+                required_start,
+                required_end,
+            )
+
+        if available_end < required_end:
+            return "MISSING", None, self._coverage_issue_message(
+                table_name,
+                available_start,
+                available_end,
+                required_start,
+                required_end,
+            )
+
+        if table_name in {"vix_data", "delta_cache", "option_data"}:
+            if available_start > required_end:
+                return "MISSING", None, self._coverage_issue_message(
+                    table_name,
+                    available_start,
+                    available_end,
+                    required_start,
+                    required_end,
+                )
+            if available_start > required_start:
+                return "WARNING", self._coverage_warning_message(
+                    table_name,
+                    available_start,
+                    required_start,
+                ), None
+            return "OK", None, None
+
+        if available_start > required_start:
+            return "MISSING", None, self._coverage_issue_message(
+                table_name,
+                available_start,
+                available_end,
+                required_start,
+                required_end,
+            )
+
+        return "OK", None, None
+
+    @staticmethod
+    def _format_range(start: Optional[datetime], end: Optional[datetime]) -> str:
+        if start is None or end is None:
+            return "no data"
+        return f"{start} -> {end}"
+
+    def _required_coverage_windows(
+        self,
+        effective_start: datetime,
+        effective_end: datetime,
+    ) -> dict[str, tuple[datetime, datetime]]:
+        entry_cutoff_dt = datetime.combine(effective_end.date(), self.bot.ENTRY_CUTOFF_TIME)
+        entry_required_end = min(effective_end, entry_cutoff_dt)
+        fill_headroom = self.bot.TARGET_FILL_LATENCY + timedelta(minutes=1)
+        fill_required_end = min(effective_end, entry_required_end + fill_headroom)
+        session_open_dt = datetime.combine(effective_start.date(), self.config.trading_start)
+        earliest_entry_signal = max(effective_start, session_open_dt + timedelta(minutes=1))
+        fill_required_start = min(fill_required_end, earliest_entry_signal + self.bot.TARGET_FILL_LATENCY)
+
+        return {
+            "market_data_1m": (effective_start, effective_end),
+            "vix_data": (effective_start, max(effective_start, entry_required_end)),
+            "delta_cache": (fill_required_start, max(fill_required_start, fill_required_end)),
+            "option_data": (fill_required_start, max(fill_required_start, fill_required_end)),
+        }
+
+    def _coverage_warning_message(
+        self,
+        table_name: str,
+        available_start: datetime,
+        required_start: datetime,
+    ) -> str:
+        if table_name == "vix_data":
+            return (
+                f"{table_name} coverage starts at {available_start}, after the preferred start {required_start}. "
+                "Backtest will proceed; early entry checks may log 'VIX regime unavailable' until VIX data becomes available."
+            )
+        return (
+            f"{table_name} coverage starts at {available_start}, after the preferred start {required_start}. "
+            "Backtest will proceed; early entries may be skipped until supporting option snapshots become available."
+        )
+
+    def _coverage_issue_message(
+        self,
+        table_name: str,
+        available_start: Optional[datetime],
+        available_end: Optional[datetime],
+        required_start: datetime,
+        required_end: datetime,
+    ) -> str:
+        available_range = self._format_range(available_start, available_end)
+        if available_start is not None and available_start > required_end:
+            base = (
+                f"{table_name} does not become available until {available_start}, which is after the required backtest window "
+                f"{required_start} -> {required_end}. Available: {available_range}."
+            )
+        else:
+            base = (
+                f"{table_name} does not fully cover the required backtest window "
+                f"{required_start} -> {required_end}. Available: {available_range}."
+            )
+
+        if table_name == "vix_data":
+            return (
+                f"{base} The strategy hard-blocks entries when VIX regime cannot be determined, "
+                "so this coverage gap would otherwise show repeated "
+                "'VIX data missing; cannot determine VIX regime.' warnings and produce zero trades."
+            )
+        if table_name == "option_data":
+            return (
+                f"{base} Strict contract validation and fill snapshot logic depend on option_data, "
+                "so trades may still be blocked even after VIX coverage is restored."
+            )
+        if table_name == "delta_cache":
+            return (
+                f"{base} Strict backtest pricing and option snapshot merges depend on delta_cache, "
+                "so entries or exits can fail without it."
+            )
+        return base
 
 
 def run_backtest(

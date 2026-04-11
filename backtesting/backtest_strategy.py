@@ -153,8 +153,8 @@ class BacktestableStrategy(NiftyOptionsStrategy):
             return None
 
         # Main Category A gate
-        cat_a_active = self.main_category_a_active(df_1h)
-        cat_a_details = self._get_main_category_a_values(df_1h)
+        cat_a_active = self.main_category_a_active(df_1h, df_1m)
+        cat_a_details = self._get_main_category_a_values(df_1h, df_1m)
         gate_checks.append(GateCheckResult(
             gate_name="Main Category A",
             passed=cat_a_active,
@@ -165,13 +165,12 @@ class BacktestableStrategy(NiftyOptionsStrategy):
             return None
 
         # Latch new subcategory touches (Section 1)
-        #self._detect_touches_and_latch({"1m": df_1m, "5m": df_5m, "15m": df_15m, "1h": df_1h})
-        self._detect_touches_and_latch({"5m": df_5m, "15m": df_15m, "1h": df_1h})
+        self._detect_touches_and_latch(df_1m, {"1m": df_1m, "5m": df_5m, "15m": df_15m, "1h": df_1h})
 
         # Update Section 3 break latch
         latest_5m_ts = self._latest_ts(df_5m)
         if latest_5m_ts is not None and self._is_new_candle("5m", df_5m):
-            self._update_section3_break_latch(df_5m)
+            self._update_section3_break_latch(df_1m, df_5m)
             self.mark_processed("5m", latest_5m_ts)
 
         # VIX Regime
@@ -203,7 +202,7 @@ class BacktestableStrategy(NiftyOptionsStrategy):
 
         if active_subcats:
             # Log 1st Flag with detailed touch information
-            section1_details = self._get_section1_flag_details({"1m": df_1m, "5m": df_5m, "15m": df_15m, "1h": df_1h})
+            section1_details = self._get_section1_flag_details(df_1m, {"1m": df_1m, "5m": df_5m, "15m": df_15m, "1h": df_1h})
             gate_checks.append(GateCheckResult(
                 gate_name="1st Flag (Section 1)",
                 passed=True,
@@ -263,17 +262,14 @@ class BacktestableStrategy(NiftyOptionsStrategy):
         gate_checks.append(GateCheckResult(
             gate_name="Section 3 Break Latch",
             passed=break_latched,
-            details={
-                "break_latched": break_latched,
-                "break_reason": self.state["section3"].get("break_reason"),
-            },
+            details=self._get_section3_break_values(df_1m, df_5m),
         ))
 
-        if self._section3_retest_ok(df_5m):
+        if self._section3_retest_ok(df_1m, df_5m):
             gate_checks.append(GateCheckResult(
                 gate_name="Section 3 Retest",
                 passed=True,
-                details=self._get_section3_retest_values(df_5m),
+                details=self._get_section3_retest_values(df_1m, df_5m),
             ))
             if second_flag_ok:
                 sl_filter_ok = self._sl_filter_ok(df_1m, lookback=5, threshold_pts=sl_threshold)
@@ -350,54 +346,62 @@ class BacktestableStrategy(NiftyOptionsStrategy):
             return ts.strftime("%Y-%m-%d %H:%M:%S")
         return str(ts)
 
-    def _get_main_category_a_values(self, df_1h: pd.DataFrame) -> Dict[str, Any]:
+    def _get_main_category_a_values(self, df_1h: pd.DataFrame, df_1m: pd.DataFrame) -> Dict[str, Any]:
         """Extract values used in Main Category A check for logging."""
+        df_1m = self._compute_required_indicators(df_1m)
         df_1h = self._compute_required_indicators(df_1h)
+        if df_1m is None or df_1m.empty:
+            return {"error": "No 1m data"}
         if df_1h is None or df_1h.empty:
             return {"error": "No 1h data"}
-        if not _ensure_cols(df_1h, ["close", "sma_20", "sma_50", "sma_200"]):
+        if not _ensure_cols(df_1m, ["close"]) or not _ensure_cols(df_1h, ["sma_20", "sma_50", "sma_200"]):
             return {"error": "Missing required columns"}
-        last = df_1h.iloc[-1]
+        last_1m = df_1m.iloc[-1]
+        last_1h = df_1h.iloc[-1]
         return {
-            "1h_close": float(last.get("close", 0)),
-            "sma_20": float(last.get("sma_20", 0)),
-            "sma_50": float(last.get("sma_50", 0)),
-            "sma_200": float(last.get("sma_200", 0)),
+            "1m_close": float(last_1m.get("close", 0)),
+            "1h_sma_20": float(last_1h.get("sma_20", 0)),
+            "1h_sma_50": float(last_1h.get("sma_50", 0)),
+            "1h_sma_200": float(last_1h.get("sma_200", 0)),
         }
 
-    def _get_section1_flag_details(self, data_by_interval: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
+    def _get_section1_flag_details(self, df_1m: pd.DataFrame, data_by_interval: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
         """Extract detailed information about Section 1 flags for logging."""
         active_subcats = [k for k, v in (self.state.get("section1_flags") or {}).items() if v]
         if not active_subcats:
             return {"active_subcategories": [], "touches": []}
-        
+
+        df_1m = self._compute_required_indicators(df_1m)
+        latest_close_1m = None
+        if _ensure_cols(df_1m, ["close"]):
+            latest_close_1m = float(df_1m.iloc[-1]["close"])
+
         defs = self._section1_subcategory_defs()
         touches = []
-        
+
         for subcat in sorted(active_subcats, key=self._priority_sort_key):
             interval, indicator = defs[subcat]
             df = data_by_interval.get(interval)
-            
+
             touch_info = {
                 "subcat": subcat,
                 "interval": interval,
                 "indicator": indicator,
-                "high": None,
+                "1m_close": latest_close_1m,
                 "indicator_value": None,
                 "touch_time": self.state.get("section1_last_touch", {}).get(subcat),
             }
-            
+
             if df is not None and not df.empty:
                 df = self._compute_required_indicators(df)
-                if _ensure_cols(df, ["high", indicator]):
+                if _ensure_cols(df, [indicator]):
                     last = df.iloc[-1]
-                    touch_info["high"] = float(last["high"])
                     ind_val = last.get(indicator)
                     if pd.notna(ind_val):
                         touch_info["indicator_value"] = float(ind_val)
-            
+
             touches.append(touch_info)
-        
+
         return {
             "active_subcategories": active_subcats,
             "touches": touches,
@@ -462,14 +466,36 @@ class BacktestableStrategy(NiftyOptionsStrategy):
             "lookback": lookback,
         }
 
-    def _get_section3_retest_values(self, df_5m: pd.DataFrame) -> Dict[str, Any]:
-        """Extract values used in Section 3 retest check for logging."""
+    def _get_section3_break_values(self, df_1m: pd.DataFrame, df_5m: pd.DataFrame) -> Dict[str, Any]:
+        """Extract values used in Section 3 break-latch check for logging."""
+        df_1m = self._compute_required_indicators(df_1m)
         df_5m = self._compute_required_indicators(df_5m)
+        if df_1m is None or df_1m.empty:
+            return {"error": "No 1m data"}
         if df_5m is None or df_5m.empty:
             return {"error": "No 5m data"}
-        last = df_5m.iloc[-1]
+        last_1m = df_1m.iloc[-1]
+        last_5m = df_5m.iloc[-1]
         return {
-            "high": float(last.get("high", 0)),
-            "sma_20": float(last.get("sma_20", 0)),
-            "donchian_mid": float(last.get("donchian_mid", 0)) if "donchian_mid" in last else None,
+            "break_latched": bool(self.state["section3"].get("break_latched")),
+            "break_reason": self.state["section3"].get("break_reason"),
+            "1m_close": float(last_1m.get("close", 0)),
+            "5m_sma_20": float(last_5m.get("sma_20", 0)),
+            "5m_donchian_mid": float(last_5m.get("donchian_mid", 0)) if "donchian_mid" in last_5m else None,
+        }
+
+    def _get_section3_retest_values(self, df_1m: pd.DataFrame, df_5m: pd.DataFrame) -> Dict[str, Any]:
+        """Extract values used in Section 3 retest check for logging."""
+        df_1m = self._compute_required_indicators(df_1m)
+        df_5m = self._compute_required_indicators(df_5m)
+        if df_1m is None or df_1m.empty:
+            return {"error": "No 1m data"}
+        if df_5m is None or df_5m.empty:
+            return {"error": "No 5m data"}
+        last_1m = df_1m.iloc[-1]
+        last_5m = df_5m.iloc[-1]
+        return {
+            "1m_close": float(last_1m.get("close", 0)),
+            "5m_sma_20": float(last_5m.get("sma_20", 0)),
+            "5m_donchian_mid": float(last_5m.get("donchian_mid", 0)) if "donchian_mid" in last_5m else None,
         }

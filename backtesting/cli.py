@@ -4,7 +4,7 @@ Command-line interface for backtesting.
 Usage:
     python -m backtesting.cli --start 2025-11-03 --end 2026-03-15 --output results.html
     # Run backtest with debug logging enabled
-    python -m backtesting.cli --start 2025-11-03 --end 2025-11-05 --debug-log logs/debug_test.log -v
+    python -m backtesting.cli --start 2025-11-03 --end 2025-11-05 --debug-log logs/name of file.log -v
     python -m backtesting.cli --start YYYY-MM-DD --end YYYY-MM-DD --output report.html
     
 """
@@ -614,8 +614,8 @@ Examples:
         return 1
 
     # Validate date range
-    if end_date <= start_date:
-        print("Error: End date must be after start date")
+    if end_date < start_date:
+        print("Error: End date must be after or equal to start date")
         return 1
 
     # Create config

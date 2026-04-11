@@ -102,13 +102,147 @@ class NiftyStrategySectionTests(unittest.TestCase):
             closes=[50.0, 50.0],
             highs=[55.0, 55.0],
             lows=[49.0, 49.0],
-            sma_20=100.0,
-            sma_50=110.0,
-            sma_200=120.0,
-            donchian_mid=95.0,
+            sma_20=130.0,
+            sma_50=140.0,
+            sma_200=150.0,
+            donchian_mid=125.0,
         )
 
         return {"1m": df_1m, "5m": df_5m, "15m": df_15m, "1h": df_1h}
+
+    def test_main_category_a_passes_when_latest_1m_close_is_below_all_1h_indicators(self):
+        strategy = self._strategy()
+        frames = self._base_frames()
+
+        self.assertTrue(strategy.main_category_a_active(frames["1h"], frames["1m"]))
+
+    def test_main_category_a_uses_latest_1m_close_instead_of_1h_close(self):
+        strategy = self._strategy()
+        frames = self._base_frames()
+        latest_index = frames["1m"].index[-1]
+        frames["1m"].loc[latest_index, ["open", "high", "low", "close"]] = [155.0, 156.0, 154.0, 155.0]
+
+        self.assertFalse(strategy.main_category_a_active(frames["1h"], frames["1m"]))
+
+    def test_section1_latches_higher_timeframe_indicator_when_1m_close_crosses_it(self):
+        strategy = self._strategy()
+        frames = self._base_frames()
+        latest_1m_index = frames["1m"].index[-1]
+        frames["1m"].loc[latest_1m_index, ["open", "high", "low", "close"]] = [91.0, 92.0, 90.0, 91.0]
+
+        frames["5m"]["sma_20"] = 200.0
+        frames["5m"]["donchian_mid"] = 205.0
+        frames["5m"]["sma_50"] = 210.0
+        frames["5m"]["sma_200"] = 220.0
+
+        frames["15m"]["sma_20"] = 90.0
+        frames["15m"]["donchian_mid"] = 205.0
+        frames["15m"]["sma_50"] = 210.0
+        frames["15m"]["sma_200"] = 220.0
+
+        frames["1h"]["sma_20"] = 300.0
+        frames["1h"]["donchian_mid"] = 305.0
+        frames["1h"]["sma_50"] = 310.0
+        frames["1h"]["sma_200"] = 320.0
+
+        newly_latched = strategy._detect_touches_and_latch(frames["1m"], frames)
+
+        self.assertEqual(newly_latched, ["h"])
+        self.assertTrue(strategy.state["section1_flags"]["h"])
+        self.assertEqual(
+            strategy.state["section1_last_touch"]["h"],
+            latest_1m_index.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+
+    def test_section1_does_not_latch_from_higher_timeframe_high_without_1m_close_touch(self):
+        strategy = self._strategy()
+        frames = self._base_frames()
+        latest_1m_index = frames["1m"].index[-1]
+        frames["1m"].loc[latest_1m_index, ["open", "high", "low", "close"]] = [89.0, 90.0, 88.0, 89.0]
+
+        frames["5m"]["sma_20"] = 200.0
+        frames["5m"]["donchian_mid"] = 205.0
+        frames["5m"]["sma_50"] = 210.0
+        frames["5m"]["sma_200"] = 220.0
+
+        last_15m_index = frames["15m"].index[-1]
+        frames["15m"].loc[last_15m_index, "high"] = 95.0
+        frames["15m"]["sma_20"] = 90.0
+        frames["15m"]["donchian_mid"] = 205.0
+        frames["15m"]["sma_50"] = 210.0
+        frames["15m"]["sma_200"] = 220.0
+
+        frames["1h"]["sma_20"] = 300.0
+        frames["1h"]["donchian_mid"] = 305.0
+        frames["1h"]["sma_50"] = 310.0
+        frames["1h"]["sma_200"] = 320.0
+
+        newly_latched = strategy._detect_touches_and_latch(frames["1m"], frames)
+
+        self.assertNotIn("h", newly_latched)
+        self.assertFalse(strategy.state["section1_flags"]["h"])
+
+    def test_section3_break_latches_from_1m_close_against_5m_indicator(self):
+        strategy = self._strategy()
+        frames = self._base_frames()
+        latest_1m_index = frames["1m"].index[-1]
+        frames["1m"].loc[latest_1m_index, ["open", "high", "low", "close"]] = [69.0, 70.0, 68.0, 69.0]
+        latest_5m_index = frames["5m"].index[-1]
+        frames["5m"].loc[latest_5m_index, ["open", "high", "low", "close"]] = [75.0, 76.0, 74.0, 75.0]
+        frames["5m"]["sma_20"] = 70.0
+        frames["5m"]["donchian_mid"] = 68.0
+
+        triggered = strategy._update_section3_break_latch(frames["1m"], frames["5m"])
+
+        self.assertTrue(triggered)
+        self.assertTrue(strategy.state["section3"]["break_latched"])
+        self.assertEqual(strategy.state["section3"]["break_reason"], "sma20")
+        self.assertEqual(
+            strategy.state["section3"]["break_time"],
+            latest_1m_index.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+
+    def test_section3_retest_passes_when_1m_close_recovers_without_5m_high_touch(self):
+        strategy = self._strategy()
+        frames = self._base_frames()
+        latest_1m_index = frames["1m"].index[-1]
+        previous_1m_index = frames["1m"].index[-2]
+        frames["1m"].loc[latest_1m_index, ["open", "high", "low", "close"]] = [71.0, 72.0, 70.0, 71.0]
+        latest_5m_index = frames["5m"].index[-1]
+        frames["5m"].loc[latest_5m_index, ["open", "high", "low", "close"]] = [68.0, 69.0, 67.0, 68.0]
+        frames["5m"]["sma_20"] = 70.0
+        frames["5m"]["donchian_mid"] = 72.0
+        strategy.state["section3"] = {
+            "break_latched": True,
+            "break_reason": "sma20",
+            "break_time": previous_1m_index.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+        with patch.object(strategy, "_now", return_value=latest_1m_index.to_pydatetime()):
+            retest_ok = strategy._section3_retest_ok(frames["1m"], frames["5m"])
+
+        self.assertTrue(retest_ok)
+
+    def test_section3_retest_does_not_use_5m_high_without_1m_close_recovery(self):
+        strategy = self._strategy()
+        frames = self._base_frames()
+        latest_1m_index = frames["1m"].index[-1]
+        previous_1m_index = frames["1m"].index[-2]
+        frames["1m"].loc[latest_1m_index, ["open", "high", "low", "close"]] = [69.0, 70.0, 68.0, 69.0]
+        latest_5m_index = frames["5m"].index[-1]
+        frames["5m"].loc[latest_5m_index, ["open", "high", "low", "close"]] = [70.0, 72.0, 69.0, 70.0]
+        frames["5m"]["sma_20"] = 70.0
+        frames["5m"]["donchian_mid"] = 71.0
+        strategy.state["section3"] = {
+            "break_latched": True,
+            "break_reason": "sma20",
+            "break_time": previous_1m_index.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+        with patch.object(strategy, "_now", return_value=latest_1m_index.to_pydatetime()):
+            retest_ok = strategy._section3_retest_ok(frames["1m"], frames["5m"])
+
+        self.assertFalse(retest_ok)
 
     def test_section2_entry_uses_closed_5m_rsi_filter(self):
         strategy = self._strategy()
