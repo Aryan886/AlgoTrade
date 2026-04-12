@@ -34,6 +34,7 @@ class HistoricalDataProvider:
     _vix_data: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
     _delta_cache: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
     _option_data: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
+    _open_interest_data: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
     _data_loaded: bool = field(default=False, repr=False)
 
     def load_all_data(self, start_date: datetime, end_date: datetime) -> None:
@@ -60,6 +61,7 @@ class HistoricalDataProvider:
             self._vix_data = self._load_vix_data(conn, warmup_start, end_date)
             self._delta_cache = self._load_delta_cache(conn, warmup_start, end_date)
             self._option_data = self._load_option_data(conn, start_date, end_date)
+            self._open_interest_data = self._load_open_interest_data(conn, warmup_start, end_date)
             self._data_loaded = True
         finally:
             conn.close()
@@ -176,6 +178,29 @@ class HistoricalDataProvider:
         if df.empty:
             return df
         df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df.columns = [c.lower() for c in df.columns]
+        return df
+
+    def _load_open_interest_data(self, conn: sqlite3.Connection, start: datetime, end: datetime) -> pd.DataFrame:
+        try:
+            query = """
+                SELECT *
+                FROM option_open_interest
+                WHERE symbol = ? AND timestamp >= ? AND timestamp <= ?
+                ORDER BY timestamp, expiry_date, strike_price, option_type
+            """
+            df = pd.read_sql_query(query, conn, params=(
+                self.symbol, start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")
+            ))
+        except Exception as e:
+            print(f"Warning: Could not load option_open_interest: {e}")
+            return pd.DataFrame()
+        if df.empty:
+            return df
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        for col in ["quote_timestamp", "last_trade_time"]:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
         df.columns = [c.lower() for c in df.columns]
         return df
 
@@ -299,6 +324,25 @@ class HistoricalDataProvider:
             if pd.notna(price):
                 return float(price)
         return None
+
+    def fetch_open_interest_snapshot(self, current_time: datetime) -> List[Dict[str, Any]]:
+        """Return the most recent OI snapshot at or before current_time."""
+        if not self._data_loaded:
+            raise RuntimeError("Data not loaded. Call load_all_data() first.")
+        current_ts = pd.Timestamp(current_time)
+        snapshot = self._latest_snapshot(self._open_interest_data, current_ts)
+        if snapshot.empty:
+            return []
+        return snapshot.to_dict("records")
+
+    def fetch_open_interest_history(self, current_time: datetime) -> pd.DataFrame:
+        """Return all persisted OI rows at or before current_time."""
+        if not self._data_loaded:
+            raise RuntimeError("Data not loaded. Call load_all_data() first.")
+        if self._open_interest_data.empty:
+            return pd.DataFrame()
+        current_ts = pd.Timestamp(current_time)
+        return self._open_interest_data[self._open_interest_data["timestamp"] <= current_ts].copy()
 
     def _latest_snapshot(self, df: pd.DataFrame, current_ts: pd.Timestamp) -> pd.DataFrame:
         if df is None or df.empty:

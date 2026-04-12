@@ -22,6 +22,10 @@ STRIKE_INTERVAL = CONFIG["STRIKE_INTERVAL"]
 RISK_FREE_RATE = CONFIG["RISK_FREE_RATE"]
 PRUNE_AFTER_MINUTES = CONFIG["PRUNE_AFTER_MINUTES"]
 ENABLE_DELTA_LOGGING = CONFIG["ENABLE_DELTA_LOGGING"]
+OI_STRIKE_BAND = CONFIG.get("OI_STRIKE_BAND", 300)
+OI_STRIKE_INTERVAL = CONFIG.get("OI_STRIKE_INTERVAL", 50)
+OI_EXPIRY_MODE = CONFIG.get("OI_EXPIRY_MODE", "nearest_only")
+OI_FETCH_INTERVAL_SECONDS = CONFIG.get("OI_FETCH_INTERVAL_SECONDS", 60)
 
 EXPECTED_COLUMNS = ['open', 'high', 'low', 'close', 'ao_value', 'donchian_upper', 'donchian_lower', 'donchian_mid']
 
@@ -553,6 +557,216 @@ def fetch_vix_data(symbol: str = 'NIFTY50', start=None, end=None, db_path=DB_PAT
     #df = standardize_column_names(df)
     conn.close()
     return df
+
+
+def _safe_db_timestamp(value) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    return str(value)
+
+
+def _safe_db_date(value) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d")
+    return str(value)
+
+
+def _safe_float(value) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _safe_int(value) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+        return int(float(value))
+    except Exception:
+        return None
+
+
+def _first_non_none(*values):
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _ensure_open_interest_schema(conn: sqlite3.Connection) -> None:
+    from utils.db_setup import create_open_interest_table
+
+    create_open_interest_table(conn)
+
+
+def store_open_interest_snapshot(rows: List[Dict[str, Any]], db_path=DB_PATH) -> int:
+    """Store append-only NIFTY option open-interest snapshot rows."""
+    if not rows:
+        return 0
+
+    ensure_db_dir(db_path)
+    conn = sqlite3.connect(db_path, timeout=20)
+    try:
+        _ensure_open_interest_schema(conn)
+        cursor = conn.cursor()
+        prepared_rows = []
+
+        for row in rows:
+            timestamp_str = _safe_db_timestamp(row.get("timestamp") or datetime.now())
+            tradingsymbol = row.get("tradingsymbol")
+            expiry_date = _safe_db_date(row.get("expiry_date") or row.get("expiry"))
+            option_type = str(row.get("option_type") or row.get("instrument_type") or "").upper()
+            strike_price = _safe_float(row.get("strike_price") or row.get("strike"))
+
+            if not timestamp_str or not tradingsymbol or not expiry_date or not option_type or strike_price is None:
+                continue
+
+            prepared_rows.append((
+                timestamp_str,
+                str(row.get("symbol") or "NIFTY50"),
+                str(row.get("exchange") or "NFO"),
+                str(tradingsymbol),
+                _safe_int(row.get("instrument_token")),
+                expiry_date,
+                strike_price,
+                option_type,
+                _safe_float(row.get("spot_price")),
+                _safe_float(_first_non_none(row.get("last_price"), row.get("ltp"))),
+                _safe_int(_first_non_none(row.get("open_interest"), row.get("oi"))),
+                _safe_int(row.get("oi_day_high")),
+                _safe_int(row.get("oi_day_low")),
+                _safe_db_timestamp(row.get("quote_timestamp")),
+                _safe_db_timestamp(row.get("last_trade_time")),
+                _safe_int(row.get("volume")),
+            ))
+
+        if not prepared_rows:
+            return 0
+
+        cursor.executemany("""
+            INSERT INTO option_open_interest (
+                timestamp, symbol, exchange, tradingsymbol, instrument_token,
+                expiry_date, strike_price, option_type, spot_price, last_price,
+                open_interest, oi_day_high, oi_day_low, quote_timestamp,
+                last_trade_time, volume
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(timestamp, symbol, tradingsymbol) DO UPDATE SET
+                exchange = excluded.exchange,
+                instrument_token = excluded.instrument_token,
+                expiry_date = excluded.expiry_date,
+                strike_price = excluded.strike_price,
+                option_type = excluded.option_type,
+                spot_price = excluded.spot_price,
+                last_price = excluded.last_price,
+                open_interest = excluded.open_interest,
+                oi_day_high = excluded.oi_day_high,
+                oi_day_low = excluded.oi_day_low,
+                quote_timestamp = excluded.quote_timestamp,
+                last_trade_time = excluded.last_trade_time,
+                volume = excluded.volume;
+        """, prepared_rows)
+        conn.commit()
+        return len(prepared_rows)
+    finally:
+        conn.close()
+
+
+def _open_interest_rows_to_dicts(rows: List[sqlite3.Row]) -> List[Dict[str, Any]]:
+    return [dict(row) for row in rows]
+
+
+def fetch_latest_open_interest_snapshot(
+    symbol: str = "NIFTY50",
+    current_time=None,
+    db_path=DB_PATH,
+) -> List[Dict[str, Any]]:
+    """Return all OI rows for the latest snapshot at or before current_time."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.cursor()
+        try:
+            if current_time is None:
+                cursor.execute(
+                    "SELECT MAX(timestamp) FROM option_open_interest WHERE symbol = ?",
+                    (symbol,),
+                )
+            else:
+                cursor.execute(
+                    "SELECT MAX(timestamp) FROM option_open_interest WHERE symbol = ? AND timestamp <= ?",
+                    (symbol, _safe_db_timestamp(current_time)),
+                )
+            latest_timestamp = cursor.fetchone()[0]
+        except sqlite3.OperationalError:
+            return []
+
+        if not latest_timestamp:
+            return []
+
+        cursor.execute("""
+            SELECT *
+            FROM option_open_interest
+            WHERE symbol = ? AND timestamp = ?
+            ORDER BY expiry_date, strike_price, option_type
+        """, (symbol, latest_timestamp))
+        return _open_interest_rows_to_dicts(cursor.fetchall())
+    finally:
+        conn.close()
+
+
+def fetch_open_interest_data(
+    symbol: str = "NIFTY50",
+    start=None,
+    end=None,
+    db_path=DB_PATH,
+) -> pd.DataFrame:
+    """Fetch persisted option open-interest rows as a timestamp-indexed DataFrame."""
+    conn = sqlite3.connect(db_path)
+    try:
+        query = "SELECT * FROM option_open_interest WHERE symbol = ?"
+        params = [symbol]
+
+        if start:
+            query += " AND timestamp >= ?"
+            params.append(_safe_db_timestamp(start))
+        if end:
+            query += " AND timestamp <= ?"
+            params.append(_safe_db_timestamp(end))
+
+        query += " ORDER BY timestamp, expiry_date, strike_price, option_type"
+        try:
+            df = pd.read_sql_query(query, conn, params=params, parse_dates=["timestamp", "quote_timestamp", "last_trade_time"])
+        except (sqlite3.OperationalError, ValueError):
+            return pd.DataFrame()
+    finally:
+        conn.close()
+
+    if df.empty:
+        return df
+    df.set_index("timestamp", inplace=True)
+    return df
+
 
 #Logs trading signals with reasons and confidence scores.
 def store_signal(timestamp, symbol, signal, reason=None, confidence_score=None, db_path=DB_PATH):

@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timedelta
 from utils.data_fetcher import fetch_and_save_data, fetch_and_save_equity 
 from utils.vix_fetcher import calculate_and_store_vix
+from utils.open_interest_fetcher import fetch_and_store_open_interest
 from utils.db_func import store_market_data, store_signal
 from utils.db_func import  calculate_and_store_high_accuracy_delta
 from core.indicators import compute_indicators, generate_signals
@@ -161,7 +162,8 @@ class MarketDataAutomation:
             '1m': None,
             '5m': None,
             '15m': None,
-            '1h': None
+            '1h': None,
+            'oi': None
         }
         
         # Minimum intervals between fetches to avoid API rate limits
@@ -169,7 +171,8 @@ class MarketDataAutomation:
             '1m': 60,    # 1 minute
             '5m': 300,   # 5 minutes
             '15m': 900,  # 15 minutes
-            '1h': 3600   # 1 hour
+            '1h': 3600,  # 1 hour
+            'oi': 60     # 1 minute
         }
     
     def is_market_holiday(self, date=None):
@@ -265,6 +268,32 @@ class MarketDataAutomation:
         logger.error(f"Failed to fetch {interval} equity data after {max_retries} attempts")
         return None
 
+    def fetch_open_interest_with_retry(self, max_retries=3):
+        """Fetch NIFTY option open-interest snapshots without blocking other jobs."""
+        if not self.is_market_open():
+            logger.info("Market is closed, skipping NIFTY OI fetch")
+            return None
+
+        if not self.should_fetch_data('oi'):
+            logger.debug("Skipping OI fetch - too soon since last fetch")
+            return None
+
+        for attempt in range(max_retries):
+            try:
+                stored = fetch_and_store_open_interest("NIFTY50")
+                if stored:
+                    self.last_fetch_times['oi'] = datetime.now()
+                    logger.info(f"Successfully stored {stored} NIFTY OI rows")
+                    return stored
+                logger.warning("NIFTY OI fetch returned no stored rows")
+            except Exception as e:
+                logger.error(f"Error fetching NIFTY OI (attempt {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(5 * (attempt + 1))
+
+        logger.error(f"Failed to fetch NIFTY OI after {max_retries} attempts")
+        return None
+
     def fetch_1m_data(self):
         """Fetch 1-minute data"""
         return self.fetch_data_with_retry('1m')
@@ -292,6 +321,10 @@ class MarketDataAutomation:
     def fetch_15m_equity_data(self):
         """Fetch 15minute equity data"""
         return self.fetch_equity_with_retry('15m')
+
+    def fetch_open_interest_data(self):
+        """Fetch NIFTY option open-interest snapshot."""
+        return self.fetch_open_interest_with_retry()
     
     def run_paper_trading_cycle(self):
         """Run one cycle of paper trading logic"""
@@ -546,6 +579,9 @@ class MarketDataAutomation:
         
         # High-accuracy delta calculation (for delta neutral strategies)
         schedule.every().minute.do(calculate_high_accuracy_delta)
+
+        # NIFTY option open interest snapshots (independent append-only stream)
+        schedule.every().minute.do(self.fetch_open_interest_data)
         
         # Run the main trading strategy
         schedule.every().minute.do(run_trading_strategy)
@@ -569,6 +605,7 @@ class MarketDataAutomation:
         logger.info("- 1h data: Every hour at :15 (during market hours)")
         logger.info("- VIX calculation: Every 5 minutes (independent)")
         logger.info("- High-accuracy delta: Every minute (Black-Scholes)")
+        logger.info("- NIFTY option OI: Every minute (nearest expiry, ATM +/- 300)")
         logger.info("- Trading Strategy: Every minute")
         logger.info("- Donchian Paper Trading: Every minute")
         logger.info("- SMA Paper Trading: Every minute")
