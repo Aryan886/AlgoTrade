@@ -137,6 +137,10 @@ def create_tables(db_path='db/trading_bot.db'):
             open_interest INTEGER
         );
     """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS ix_option_data_symbol_timestamp
+        ON option_data (symbol, timestamp);
+    """)
 
     #9. Delta Cache Table (for historical delta tracking)
     cursor.execute("""

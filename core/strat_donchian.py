@@ -294,8 +294,10 @@ def donchian_ao_strategy(symbol="NIFTY50"):
         paper_logger.info(f"Using delta limit : {delta_limit} for today..")
 
         # Fetching necessary deltas
-        calculate_and_store_high_accuracy_delta(symbol=symbol)
         options_data = fetch_latest_delta_data(symbol=symbol)
+        if not options_data:
+            calculate_and_store_high_accuracy_delta(symbol=symbol)
+            options_data = fetch_latest_delta_data(symbol=symbol)
 
         if not options_data:
             paper_logger.info("No options data with delta available..")

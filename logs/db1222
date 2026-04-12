@@ -1,0 +1,13 @@
+================================================================================
+BACKTEST TRADE DEBUG LOG
+================================================================================
+Generated: 2026-04-09 00:32:37 IST
+
+This log captures every decision point during backtesting:
+  - Trade entries with all gate checks and calculations
+  - Stop loss trail events
+  - Exit checks and triggers
+  - P&L breakdowns
+
+================================================================================
+

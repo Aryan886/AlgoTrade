@@ -408,12 +408,12 @@ class BacktestTradeLogger:
             return f"current_time={current} {'<' if gate.passed else '>='} cutoff={cutoff}"
 
         if gate.gate_name == "Main Category A":
-            close = self._format_float(d.get("1h_close"))
-            sma20 = self._format_float(d.get("sma_20"))
-            sma50 = self._format_float(d.get("sma_50"))
-            sma200 = self._format_float(d.get("sma_200"))
+            close = self._format_float(d.get("1m_close"))
+            sma20 = self._format_float(d.get("1h_sma_20"))
+            sma50 = self._format_float(d.get("1h_sma_50"))
+            sma200 = self._format_float(d.get("1h_sma_200"))
             op = "<" if gate.passed else ">="
-            return f"1h close ({close}) {op} SMA20 ({sma20}), SMA50 ({sma50}), SMA200 ({sma200})"
+            return f"1m close ({close}) {op} 1h SMA20 ({sma20}), SMA50 ({sma50}), SMA200 ({sma200})"
 
         if gate.gate_name == "VIX Regime":
             vix = self._format_float(d.get("vix_value"))
@@ -427,15 +427,15 @@ class BacktestTradeLogger:
             # Handle detailed format with touches array
             touches = d.get("touches")
             if touches and len(touches) > 0:
-                # Format each touch: "d (5m HIGH 22950.00 >= sma_20 22920.50)"
+                # Format each touch: "d (1m close 22950.00 >= 5m sma_20 22920.50)"
                 touch_strs = []
                 for t in touches[:3]:  # Show first 3 touches to avoid too long output
                     subcat = t.get("subcat", "?")
                     interval = t.get("interval", "?")
                     indicator = t.get("indicator", "?")
-                    high = self._format_float(t.get("high"))
+                    close_1m = self._format_float(t.get("1m_close"))
                     ind_val = self._format_float(t.get("indicator_value"))
-                    touch_strs.append(f"{subcat} ({interval} HIGH {high} >= {indicator} {ind_val})")
+                    touch_strs.append(f"{subcat} (1m close {close_1m} >= {interval} {indicator} {ind_val})")
                 
                 result = " | ".join(touch_strs)
                 if len(touches) > 3:
@@ -449,11 +449,11 @@ class BacktestTradeLogger:
                 return f"Active subcategories: [{subcats_str}]"
             
             # Legacy format
-            high = self._format_float(d.get("high"))
+            close_1m = self._format_float(d.get("1m_close"))
             indicator = d.get("indicator", "?")
             ind_val = self._format_float(d.get("indicator_value"))
             touched = d.get("touched", False)
-            return f"HIGH ({high}) {'touched' if touched else 'did not touch'} {indicator} ({ind_val})"
+            return f"1m close ({close_1m}) {'touched' if touched else 'did not touch'} {indicator} ({ind_val})"
 
         if gate.gate_name == "2nd Flag":
             close = self._format_float(d.get("1m_close"))
@@ -478,13 +478,16 @@ class BacktestTradeLogger:
         if gate.gate_name == "Section 3 Break Latch":
             latched = d.get("break_latched", False)
             reason = d.get("break_reason", "N/A")
-            return f"break_latched={latched}, reason={reason}"
+            close_1m = self._format_float(d.get("1m_close"))
+            sma20 = self._format_float(d.get("5m_sma_20"))
+            donch = self._format_float(d.get("5m_donchian_mid"))
+            return f"break_latched={latched}, reason={reason}, 1m close ({close_1m}) vs 5m SMA20 ({sma20}) / Donchian ({donch})"
 
         if gate.gate_name == "Section 3 Retest":
-            high = self._format_float(d.get("high"))
-            sma20 = self._format_float(d.get("sma_20"))
-            donch = self._format_float(d.get("donchian_mid"))
-            return f"5m HIGH ({high}) touched SMA20 ({sma20}) or Donchian ({donch})"
+            close_1m = self._format_float(d.get("1m_close"))
+            sma20 = self._format_float(d.get("5m_sma_20"))
+            donch = self._format_float(d.get("5m_donchian_mid"))
+            return f"1m close ({close_1m}) reached 5m SMA20 ({sma20}) or Donchian ({donch})"
 
         # Default: just stringify the details
         return str(d) if d else ""

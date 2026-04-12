@@ -59,7 +59,7 @@ class HistoricalDataProvider:
 
             self._vix_data = self._load_vix_data(conn, warmup_start, end_date)
             self._delta_cache = self._load_delta_cache(conn, warmup_start, end_date)
-            self._option_data = self._load_option_data(conn, start_date, end_date)
+            self._option_data = self._load_option_data(conn, warmup_start, end_date)
             self._data_loaded = True
         finally:
             conn.close()
@@ -220,7 +220,7 @@ class HistoricalDataProvider:
         return self._merge_option_snapshots(delta_snapshot, option_snapshot)
 
     def fetch_next_delta_snapshot(self, current_time: datetime) -> Tuple[Optional[datetime], List[Dict[str, Any]]]:
-        """Returns the first full options snapshot strictly after current_time."""
+        """Returns the first full options snapshot at or after current_time."""
         if not self._data_loaded:
             raise RuntimeError("Data not loaded. Call load_all_data() first.")
 
@@ -390,6 +390,19 @@ class HistoricalDataProvider:
             return None, None
         return min(all_starts).to_pydatetime(), max(all_ends).to_pydatetime()
 
+    def get_backtest_data_coverage(self) -> Dict[str, Dict[str, Any]]:
+        """Return loaded coverage windows for required backtest tables."""
+        if not self._data_loaded:
+            return {}
+
+        coverage = {
+            "market_data_1m": self._describe_loaded_frame(self._market_data.get("1m")),
+            "vix_data": self._describe_loaded_frame(self._vix_data),
+            "delta_cache": self._describe_loaded_snapshot_frame(self._delta_cache),
+            "option_data": self._describe_loaded_snapshot_frame(self._option_data),
+        }
+        return coverage
+
     def get_trading_days(self, start: datetime, end: datetime) -> List[datetime]:
         if not self._data_loaded or self._market_data.get("1m") is None:
             return []
@@ -412,3 +425,26 @@ class HistoricalDataProvider:
         if interval_duration is None:
             raise ValueError(f"Unsupported interval: {interval}")
         return pd.Timestamp(current_time) - interval_duration
+
+    def _describe_loaded_frame(self, df: Optional[pd.DataFrame]) -> Dict[str, Any]:
+        if df is None or df.empty:
+            return {"rows": 0, "start": None, "end": None}
+
+        start = pd.Timestamp(df.index.min()).to_pydatetime()
+        end = pd.Timestamp(df.index.max()).to_pydatetime()
+        return {"rows": int(len(df)), "start": start, "end": end}
+
+    def _describe_loaded_snapshot_frame(self, df: Optional[pd.DataFrame]) -> Dict[str, Any]:
+        if df is None or df.empty:
+            return {"rows": 0, "start": None, "end": None}
+
+        if "timestamp" not in df.columns:
+            return {"rows": int(len(df)), "start": None, "end": None}
+
+        timestamps = pd.to_datetime(df["timestamp"], errors="coerce").dropna()
+        if timestamps.empty:
+            return {"rows": int(len(df)), "start": None, "end": None}
+
+        start = pd.Timestamp(timestamps.min()).to_pydatetime()
+        end = pd.Timestamp(timestamps.max()).to_pydatetime()
+        return {"rows": int(len(df)), "start": start, "end": end}
