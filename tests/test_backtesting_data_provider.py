@@ -330,10 +330,10 @@ class HistoricalDataProviderTests(unittest.TestCase):
             pd.Timestamp("2026-03-27 15:21:12"),
         ])
 
-    def test_fetch_next_delta_snapshot_returns_first_snapshot_after_signal(self):
+    def test_fetch_next_delta_snapshot_returns_first_delta_cache_snapshot_after_signal(self):
         provider = HistoricalDataProvider(db_path=":memory:")
         provider._data_loaded = True
-        provider._option_data = pd.DataFrame(
+        provider._delta_cache = pd.DataFrame(
             [
                 {
                     "timestamp": pd.Timestamp("2026-03-27 12:42:06"),
@@ -343,6 +343,32 @@ class HistoricalDataProviderTests(unittest.TestCase):
                     "expiry_date": "2026-03-30",
                     "ltp": 205.50,
                 },
+                {
+                    "timestamp": pd.Timestamp("2026-03-27 12:42:09"),
+                    "tradingsymbol": "NIFTY26MAR22900PE",
+                    "strike_price": 22900,
+                    "option_type": "PE",
+                    "expiry_date": "2026-03-30",
+                    "ltp": 207.25,
+                },
+            ]
+        )
+
+        snapshot_time, options = provider.fetch_next_delta_snapshot(datetime(2026, 3, 27, 12, 42, 7))
+
+        self.assertEqual(snapshot_time, datetime(2026, 3, 27, 12, 42, 9))
+        self.assertEqual(len(options), 1)
+        self.assertEqual(options[0]["ltp"], 207.25)
+
+        equal_time, equal_options = provider.fetch_next_delta_snapshot(datetime(2026, 3, 27, 12, 42, 9))
+        self.assertEqual(equal_time, datetime(2026, 3, 27, 12, 42, 9))
+        self.assertEqual(equal_options[0]["ltp"], 207.25)
+
+    def test_fetch_next_delta_snapshot_falls_back_to_option_data_when_delta_cache_is_empty(self):
+        provider = HistoricalDataProvider(db_path=":memory:")
+        provider._data_loaded = True
+        provider._option_data = pd.DataFrame(
+            [
                 {
                     "timestamp": pd.Timestamp("2026-03-27 12:42:09"),
                     "tradingsymbol": "NIFTY26MAR22900PE",
@@ -394,7 +420,31 @@ class HistoricalDataProviderTests(unittest.TestCase):
 
         self.assertEqual(price, 235.65)
 
-    def test_fetch_delta_data_merges_full_option_snapshot_with_delta_cache(self):
+    def test_fetch_delta_data_returns_delta_cache_when_option_data_is_empty(self):
+        provider = HistoricalDataProvider(db_path=":memory:")
+        provider._data_loaded = True
+        provider._delta_cache = pd.DataFrame(
+            [
+                {
+                    "timestamp": pd.Timestamp("2026-03-27 12:42:07"),
+                    "tradingsymbol": "NIFTY26MAR22950PE",
+                    "strike_price": 22950,
+                    "option_type": "PE",
+                    "expiry_date": "2026-03-30",
+                    "ltp": 226.95,
+                    "delta": -25.0,
+                },
+            ]
+        )
+
+        options = provider.fetch_delta_data(datetime(2026, 3, 27, 12, 42, 8))
+
+        self.assertEqual(len(options), 1)
+        self.assertEqual(options[0]["tradingsymbol"], "NIFTY26MAR22950PE")
+        self.assertEqual(options[0]["ltp"], 226.95)
+        self.assertEqual(options[0]["delta"], -25.0)
+
+    def test_fetch_delta_data_enriches_delta_cache_with_matching_option_snapshot(self):
         provider = HistoricalDataProvider(db_path=":memory:")
         provider._data_loaded = True
         provider._delta_cache = pd.DataFrame(
@@ -436,6 +486,8 @@ class HistoricalDataProviderTests(unittest.TestCase):
                     "option_type": "PE",
                     "expiry_date": "2026-03-30",
                     "ltp": 226.95,
+                    "iv": 0.22,
+                    "open_interest": 125000,
                 },
                 {
                     "timestamp": pd.Timestamp("2026-03-27 12:42:06"),
@@ -450,11 +502,13 @@ class HistoricalDataProviderTests(unittest.TestCase):
 
         options = provider.fetch_delta_data(datetime(2026, 3, 27, 12, 42, 8))
 
-        self.assertEqual({row["strike_price"] for row in options}, {22900, 22950, 23000})
+        self.assertEqual({row["strike_price"] for row in options}, {22950, 23000})
         delta_by_strike = {row["strike_price"]: row.get("delta") for row in options}
-        self.assertIsNone(delta_by_strike[22900])
         self.assertEqual(delta_by_strike[22950], -25.0)
         self.assertEqual(delta_by_strike[23000], -27.5)
+        enriched = {row["strike_price"]: row for row in options}
+        self.assertEqual(enriched[22950]["iv"], 0.22)
+        self.assertEqual(enriched[22950]["open_interest"], 125000)
 
     def test_fetch_option_price_falls_back_to_option_data_when_delta_cache_misses_contract(self):
         provider = HistoricalDataProvider(db_path=":memory:")

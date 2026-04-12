@@ -211,32 +211,32 @@ class HistoricalDataProvider:
         return filtered.copy()
 
     def fetch_delta_data(self, current_time: datetime) -> List[Dict[str, Any]]:
-        """Returns options data for the most recent timestamp <= current_time."""
+        """Returns canonical backtest option data from delta_cache up to current_time."""
         if not self._data_loaded:
             raise RuntimeError("Data not loaded. Call load_all_data() first.")
         current_ts = pd.Timestamp(current_time)
         delta_snapshot = self._latest_snapshot(self._delta_cache, current_ts)
         option_snapshot = self._latest_snapshot(self._option_data, current_ts)
-        return self._merge_option_snapshots(delta_snapshot, option_snapshot)
+        return self._merge_delta_with_option_enrichment(delta_snapshot, option_snapshot)
 
     def fetch_next_delta_snapshot(self, current_time: datetime) -> Tuple[Optional[datetime], List[Dict[str, Any]]]:
-        """Returns the first full options snapshot at or after current_time."""
+        """Returns the first canonical delta_cache option snapshot after current_time."""
         if not self._data_loaded:
             raise RuntimeError("Data not loaded. Call load_all_data() first.")
 
         current_ts = pd.Timestamp(current_time)
-        option_snapshot = self._next_snapshot(self._option_data, current_ts, strict=False)
-        if not option_snapshot.empty:
-            snapshot_ts = pd.Timestamp(option_snapshot["timestamp"].iloc[0])
-            delta_snapshot = self._latest_snapshot(self._delta_cache, snapshot_ts)
-            return snapshot_ts.to_pydatetime(), self._merge_option_snapshots(delta_snapshot, option_snapshot)
-
         delta_snapshot = self._next_snapshot(self._delta_cache, current_ts, strict=False)
-        if delta_snapshot.empty:
+        if not delta_snapshot.empty:
+            snapshot_ts = pd.Timestamp(delta_snapshot["timestamp"].iloc[0])
+            option_snapshot = self._latest_snapshot(self._option_data, snapshot_ts)
+            return snapshot_ts.to_pydatetime(), self._merge_delta_with_option_enrichment(delta_snapshot, option_snapshot)
+
+        option_snapshot = self._next_snapshot(self._option_data, current_ts, strict=False)
+        if option_snapshot.empty:
             return None, []
 
-        snapshot_ts = pd.Timestamp(delta_snapshot["timestamp"].iloc[0])
-        return snapshot_ts.to_pydatetime(), self._normalize_snapshot(delta_snapshot, source="delta")
+        snapshot_ts = pd.Timestamp(option_snapshot["timestamp"].iloc[0])
+        return snapshot_ts.to_pydatetime(), self._normalize_snapshot(option_snapshot, source="option")
 
     def fetch_option_price(
         self,
@@ -312,7 +312,10 @@ class HistoricalDataProvider:
     def _next_snapshot(self, df: pd.DataFrame, current_ts: pd.Timestamp, strict: bool = True) -> pd.DataFrame:
         if df is None or df.empty:
             return pd.DataFrame()
-        future_records = df[df["timestamp"] > current_ts]
+        if strict:
+            future_records = df[df["timestamp"] > current_ts]
+        else:
+            future_records = df[df["timestamp"] >= current_ts]
         if future_records.empty:
             return pd.DataFrame()
         next_ts = future_records["timestamp"].min()
@@ -332,43 +335,38 @@ class HistoricalDataProvider:
             result.append(record)
         return result
 
-    def _merge_option_snapshots(
+    def _merge_delta_with_option_enrichment(
         self,
         delta_snapshot: pd.DataFrame,
         option_snapshot: pd.DataFrame,
     ) -> List[Dict[str, Any]]:
-        option_records = self._normalize_snapshot(option_snapshot, source="option")
-        if not option_records:
-            return self._normalize_snapshot(delta_snapshot, source="delta")
-
         delta_records = self._normalize_snapshot(delta_snapshot, source="delta")
-        delta_by_key = {}
-        for record in delta_records:
-            key = (
-                record.get("tradingsymbol"),
-                record.get("strike_price"),
-                (record.get("option_type") or "").upper(),
-                str(record.get("expiry_date") or record.get("expiry") or ""),
-            )
-            delta_by_key[key] = record
+        option_records = self._normalize_snapshot(option_snapshot, source="option")
+        if not delta_records:
+            return option_records
+        if not option_records:
+            return delta_records
 
-        merged = []
-        for record in option_records:
-            key = (
-                record.get("tradingsymbol"),
-                record.get("strike_price"),
-                (record.get("option_type") or "").upper(),
-                str(record.get("expiry_date") or record.get("expiry") or ""),
-            )
-            merged_record = dict(record)
-            delta_record = delta_by_key.get(key)
-            if delta_record:
-                merged_record.update({
-                    "delta": delta_record.get("delta"),
-                    "timestamp": delta_record.get("timestamp", merged_record.get("timestamp")),
-                })
+        option_by_key = {self._snapshot_contract_key(record): record for record in option_records}
+        merged: List[Dict[str, Any]] = []
+        for delta_record in delta_records:
+            merged_record = dict(delta_record)
+            option_record = option_by_key.get(self._snapshot_contract_key(delta_record))
+            if option_record:
+                for key, value in option_record.items():
+                    if key not in merged_record or pd.isna(merged_record.get(key)):
+                        merged_record[key] = value
             merged.append(merged_record)
         return merged
+
+    @staticmethod
+    def _snapshot_contract_key(record: Dict[str, Any]) -> tuple[Any, Any, str, str]:
+        return (
+            record.get("tradingsymbol"),
+            record.get("strike_price"),
+            (record.get("option_type") or "").upper(),
+            str(record.get("expiry_date") or record.get("expiry") or ""),
+        )
 
     def _build_tradingsymbol(self, record: Dict[str, Any]) -> str:
         strike = record.get("strike_price", 0)
