@@ -6,7 +6,7 @@ import tempfile
 import types
 import unittest
 import importlib
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from unittest.mock import patch
 
 import pandas as pd
@@ -21,8 +21,11 @@ from utils.db_func import (
     fetch_cached_options_data,
     fetch_latest_delta_data,
     fetch_latest_option_snapshot,
+    store_high_accuracy_options_data,
     summarize_option_snapshot_coverage,
 )
+from utils.db_setup import create_tables
+from utils.vix_fetcher import _normalize_expiry_date, fetch_live_option_chain
 
 
 def make_df(index: pd.DatetimeIndex, closes, highs=None, lows=None, **extra_columns) -> pd.DataFrame:
@@ -52,6 +55,45 @@ class _FakeKite:
 
     def quote(self, symbol: str):
         return {symbol: {"last_price": self.spot_price}}
+
+
+class _FakeOptionChainKite:
+    def __init__(self, spot_price: float, instruments: list[dict[str, object]]):
+        self.spot_price = spot_price
+        self._instruments = instruments
+
+    def instruments(self, exchange: str):
+        self.assert_exchange(exchange)
+        return list(self._instruments)
+
+    def quote(self, symbols):
+        if isinstance(symbols, str):
+            return {symbols: {"last_price": self.spot_price}}
+
+        quotes = {}
+        for symbol in symbols:
+            quotes[symbol] = {
+                "last_price": float(len(symbol) + 10),
+                "oi": 1000,
+            }
+        return quotes
+
+    @staticmethod
+    def assert_exchange(exchange: str):
+        if exchange != "NFO":
+            raise AssertionError(f"Unexpected exchange requested: {exchange}")
+
+
+class _FrozenDateTime(datetime):
+    frozen_now = None
+
+    @classmethod
+    def now(cls, tz=None):
+        if cls.frozen_now is None:
+            return super().now(tz=tz)
+        if tz is not None:
+            return cls.frozen_now.astimezone(tz)
+        return cls.frozen_now
 
 
 class OptionSnapshotPipelineTests(unittest.TestCase):
@@ -192,15 +234,18 @@ class OptionSnapshotPipelineTests(unittest.TestCase):
 
     def _base_frames(self) -> dict[str, pd.DataFrame]:
         index_1m = pd.date_range("2026-03-10 09:15:00", periods=10, freq="1min")
+        closes_1m = [self.SPOT_PRICE] * 8 + [self.SPOT_PRICE + 12.0, self.SPOT_PRICE]
+        highs_1m = [self.SPOT_PRICE + 2.0] * 8 + [self.SPOT_PRICE + 13.0, self.SPOT_PRICE + 2.0]
+        lows_1m = [self.SPOT_PRICE - 2.0] * 8 + [self.SPOT_PRICE + 11.0, self.SPOT_PRICE - 2.0]
         df_1m = make_df(
             index_1m,
-            closes=[self.SPOT_PRICE] * 10,
-            highs=[self.SPOT_PRICE + 2.0] * 10,
-            lows=[self.SPOT_PRICE - 2.0] * 10,
-            sma_20=self.SPOT_PRICE + 40.0,
+            closes=closes_1m,
+            highs=highs_1m,
+            lows=lows_1m,
+            sma_20=self.SPOT_PRICE + 10.0,
             sma_50=self.SPOT_PRICE + 80.0,
             sma_200=self.SPOT_PRICE + 120.0,
-            sma_5_low=self.SPOT_PRICE + 10.0,
+            sma_5_low=self.SPOT_PRICE + 5.0,
         )
 
         index_5m = pd.date_range("2026-03-10 09:15:00", periods=15, freq="5min")
@@ -233,10 +278,10 @@ class OptionSnapshotPipelineTests(unittest.TestCase):
             closes=[50.0, 50.0],
             highs=[55.0, 55.0],
             lows=[49.0, 49.0],
-            sma_20=100.0,
-            sma_50=110.0,
-            sma_200=120.0,
-            donchian_mid=95.0,
+            sma_20=self.SPOT_PRICE + 100.0,
+            sma_50=self.SPOT_PRICE + 110.0,
+            sma_200=self.SPOT_PRICE + 120.0,
+            donchian_mid=self.SPOT_PRICE + 95.0,
         )
 
         return {"1m": df_1m, "5m": df_5m, "15m": df_15m, "1h": df_1h}
@@ -274,6 +319,101 @@ class OptionSnapshotPipelineTests(unittest.TestCase):
         self.assertIn({"option_type": "PE", "strike_price": 23200}, incomplete["missing_required_contracts"])
         self.assertIn({"option_type": "CE", "strike_price": 23200}, incomplete["missing_required_contracts"])
 
+    def test_store_option_data_appends_without_pruning_and_filters_far_expiry(self):
+        conn = sqlite3.connect(self.db_path)
+        existing_count = conn.execute(
+            "SELECT COUNT(*) FROM option_data WHERE symbol = ?",
+            (self.SYMBOL,),
+        ).fetchone()[0]
+        conn.close()
+
+        today = date.today()
+        rows_to_store = [
+            {
+                "strike_price": 22900,
+                "option_type": "CE",
+                "ltp": 101.0,
+                "iv": 0.2,
+                "expiry_date": today - timedelta(days=1),
+                "tradingsymbol": "NIFTY_PAST_CE",
+                "open_interest": 100,
+            },
+            {
+                "strike_price": 22950,
+                "option_type": "PE",
+                "ltp": 102.0,
+                "iv": 0.2,
+                "expiry_date": today.isoformat(),
+                "tradingsymbol": "NIFTY_TODAY_PE",
+                "open_interest": 101,
+            },
+            {
+                "strike_price": 23000,
+                "option_type": "CE",
+                "ltp": 103.0,
+                "iv": 0.2,
+                "expiry_date": today + timedelta(days=14),
+                "tradingsymbol": "NIFTY_DAY14_CE",
+                "open_interest": 102,
+            },
+            {
+                "strike_price": 23050,
+                "option_type": "PE",
+                "ltp": 104.0,
+                "iv": 0.2,
+                "expiry_date": today + timedelta(days=15),
+                "tradingsymbol": "NIFTY_DAY15_PE",
+                "open_interest": 103,
+            },
+            {
+                "strike_price": 23100,
+                "option_type": "CE",
+                "ltp": 105.0,
+                "iv": 0.2,
+                "expiry_date": "not-a-date",
+                "tradingsymbol": "NIFTY_INVALID_CE",
+                "open_interest": 104,
+            },
+        ]
+
+        store_high_accuracy_options_data(rows_to_store, self.SYMBOL, self.SPOT_PRICE, db_path=self.db_path)
+
+        conn = sqlite3.connect(self.db_path)
+        stored_symbols = {
+            row[0]
+            for row in conn.execute(
+                "SELECT tradingsymbol FROM option_data WHERE symbol = ?",
+                (self.SYMBOL,),
+            ).fetchall()
+        }
+        final_count = conn.execute(
+            "SELECT COUNT(*) FROM option_data WHERE symbol = ?",
+            (self.SYMBOL,),
+        ).fetchone()[0]
+        conn.close()
+
+        self.assertEqual(final_count, existing_count + 3)
+        self.assertIn("NIFTY_OLD_24000_CE", stored_symbols)
+        self.assertIn("NIFTY_PAST_CE", stored_symbols)
+        self.assertIn("NIFTY_TODAY_PE", stored_symbols)
+        self.assertIn("NIFTY_DAY14_CE", stored_symbols)
+        self.assertNotIn("NIFTY_DAY15_PE", stored_symbols)
+        self.assertNotIn("NIFTY_INVALID_CE", stored_symbols)
+
+    def test_db_setup_creates_option_data_symbol_timestamp_index(self):
+        schema_db_path = os.path.join(self.temp_dir.name, "schema_options.db")
+
+        create_tables(schema_db_path)
+
+        conn = sqlite3.connect(schema_db_path)
+        index_names = {
+            row[1]
+            for row in conn.execute("PRAGMA index_list(option_data)").fetchall()
+        }
+        conn.close()
+
+        self.assertIn("ix_option_data_symbol_timestamp", index_names)
+
     def test_delta_builder_uses_full_snapshot_and_keeps_expected_strike(self):
         self._build_delta_cache()
 
@@ -304,6 +444,120 @@ class OptionSnapshotPipelineTests(unittest.TestCase):
         self.assertIn("coverage", result)
         self.assertTrue(result["coverage"]["complete"])
         self.assertEqual(result["coverage"]["missing_required_contracts"], [])
+
+    def test_fetch_live_option_chain_limits_spot_snapshots_to_nearest_expiry_band(self):
+        instruments = []
+        expiries = ["2099-03-30", "2099-04-30"]
+        for expiry in expiries:
+            for strike in range(22000, 24050, 50):
+                for option_type in ("CE", "PE"):
+                    instruments.append({
+                        "name": "NIFTY",
+                        "instrument_type": option_type,
+                        "expiry": expiry,
+                        "strike": strike,
+                        "tradingsymbol": f"NIFTY{expiry.replace('-', '')}{strike}{option_type}",
+                    })
+
+        fake_kite = _FakeOptionChainKite(self.SPOT_PRICE, instruments)
+        required = build_nifty_strategy_required_contracts(
+            self.SPOT_PRICE,
+            available_ce_strikes=list(range(22000, 24050, 50)),
+        )
+
+        with patch("utils.vix_fetcher.kite_from_saved_token", return_value=fake_kite), \
+             patch("utils.vix_fetcher.time.sleep", return_value=None):
+            option_rows = fetch_live_option_chain(spot_price=self.SPOT_PRICE)
+
+        self.assertTrue(option_rows)
+        returned_pairs = {(row["optionType"], row["strikePrice"]) for row in option_rows}
+        for contract in required:
+            self.assertIn((contract["option_type"], contract["strike_price"]), returned_pairs)
+
+        expiries_seen = {str(row["expiry"]) for row in option_rows}
+        self.assertEqual(expiries_seen, {"2099-03-30"})
+        self.assertLess(len(option_rows), len(instruments))
+
+    def test_normalize_expiry_date_accepts_date_datetime_and_string(self):
+        expiry = date(2026, 4, 21)
+
+        self.assertEqual(_normalize_expiry_date(expiry), expiry)
+        self.assertEqual(_normalize_expiry_date(datetime(2026, 4, 21, 9, 15)), expiry)
+        self.assertEqual(_normalize_expiry_date("2026-04-21"), expiry)
+
+    def test_delta_builder_uses_recent_option_snapshot_without_refetch(self):
+        current_ts = datetime.now().replace(microsecond=0)
+        recent_ts = (current_ts - timedelta(seconds=30)).strftime("%Y-%m-%d %H:%M:%S")
+        old_ts = (current_ts - timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")
+
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "UPDATE option_data SET timestamp = ? WHERE symbol = ? AND timestamp = ?",
+            (recent_ts, self.SYMBOL, self.latest_ts.strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        conn.execute(
+            "UPDATE option_data SET timestamp = ? WHERE symbol = ? AND timestamp = ?",
+            (old_ts, self.SYMBOL, (self.latest_ts - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        conn.commit()
+        conn.close()
+
+        fake_module = types.ModuleType("broker.zerodha_client")
+        fake_module.kite_from_saved_token = lambda: _FakeKite(self.SPOT_PRICE)
+
+        with patch.dict(sys.modules, {"broker.zerodha_client": fake_module}), \
+             patch("utils.vix_fetcher.fetch_live_option_chain") as fetch_chain:
+            result = calculate_and_store_high_accuracy_delta(self.SYMBOL, db_path=self.db_path)
+
+        self.assertIsNotNone(result)
+        self.assertFalse(fetch_chain.called)
+
+    def test_delta_builder_skips_duplicate_delta_write_in_same_minute(self):
+        frozen_now = self.latest_ts.replace(second=25, microsecond=0)
+        _FrozenDateTime.frozen_now = frozen_now
+
+        fake_module = types.ModuleType("broker.zerodha_client")
+        fake_module.kite_from_saved_token = lambda: _FakeKite(self.SPOT_PRICE)
+
+        with patch.dict(sys.modules, {"broker.zerodha_client": fake_module}), \
+             patch("utils.db_func.datetime", _FrozenDateTime):
+            first = calculate_and_store_high_accuracy_delta(self.SYMBOL, db_path=self.db_path)
+            second = calculate_and_store_high_accuracy_delta(self.SYMBOL, db_path=self.db_path)
+
+        conn = sqlite3.connect(self.db_path)
+        row_count = conn.execute(
+            "SELECT COUNT(*) FROM delta_cache WHERE symbol = ?",
+            (self.SYMBOL,),
+        ).fetchone()[0]
+        timestamp_count = conn.execute(
+            "SELECT COUNT(DISTINCT timestamp) FROM delta_cache WHERE symbol = ?",
+            (self.SYMBOL,),
+        ).fetchone()[0]
+        conn.close()
+        _FrozenDateTime.frozen_now = None
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertGreater(row_count, 0)
+        self.assertEqual(timestamp_count, 1)
+
+    def test_strategy_fetch_options_uses_existing_delta_snapshot_before_rebuilding(self):
+        strategy = self._strategy()
+        cached_snapshot = [{
+            "strike_price": 22900,
+            "option_type": "PE",
+            "delta": -42.0,
+            "ltp": 120.0,
+            "tradingsymbol": "NIFTY2099033022900PE",
+            "expiry": "2099-03-30",
+        }]
+
+        with patch("core.strat_nifty.fetch_latest_delta_data", return_value=cached_snapshot), \
+             patch("core.strat_nifty.calculate_and_store_high_accuracy_delta") as calculate_delta:
+            result = strategy._fetch_options_data()
+
+        self.assertEqual(result, cached_snapshot)
+        self.assertFalse(calculate_delta.called)
 
     def test_delta_builder_keeps_shared_behavior_when_latest_snapshot_is_incomplete(self):
         latest_rows = fetch_latest_option_snapshot(self.SYMBOL, db_path=self.db_path)

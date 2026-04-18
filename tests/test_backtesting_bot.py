@@ -74,9 +74,8 @@ class BacktestableBotStrictFillTests(unittest.TestCase):
         bot._open_two_lots(intent)
 
         lot1 = bot.position["lots"]["lot1"]
-        self.assertEqual(lot1["opened_at"], "2026-03-20 09:20:11")
-        #provider.fetch_next_delta_snapshot.assert_called_once_with(signal_time + timedelta(seconds=30))
-        #self.assertEqual(lot1["opened_at"], "2026-03-20 09:20:31")
+        provider.fetch_next_delta_snapshot.assert_called_once_with(signal_time + timedelta(seconds=5))
+        self.assertEqual(lot1["opened_at"], "2026-03-20 09:20:31")
         self.assertEqual(lot1["legs"][0]["entry_price"], 101.0)
         self.assertEqual(lot1["legs"][1]["entry_price"], 51.0)
         self.assertEqual(bot.trade_log._skipped_entries, 0)
@@ -109,7 +108,7 @@ class BacktestableBotStrictFillTests(unittest.TestCase):
 
         bot._open_two_lots(intent)
 
-       # provider.fetch_next_delta_snapshot.assert_called_once_with(signal_time + timedelta(seconds=30))
+    provider.fetch_next_delta_snapshot.assert_called_once_with(signal_time + timedelta(seconds=5))
         self.assertEqual(bot.position["lots"], {})
         self.assertEqual(bot.trade_log._skipped_entries, 1)
         self.assertEqual(len(bot.trade_log.trades), 0)
@@ -128,7 +127,7 @@ class BacktestableBotStrictFillTests(unittest.TestCase):
             "lot1": {
                 "status": "OPEN",
                 "timeframe": "1m",
-                "opened_at": "2026-03-20 09:20:11",
+                "opened_at": "2026-03-20 09:20:31",
                 "sl_current_level": 110.0,
                 "legs": [
                     {
@@ -147,9 +146,9 @@ class BacktestableBotStrictFillTests(unittest.TestCase):
         bot.trade_log.record_entry(
             Trade(
                 trade_id="trade1",
-                entry_time=datetime(2026, 3, 20, 9, 20, 11),
+                entry_time=datetime(2026, 3, 20, 9, 20, 31),
                 entry_signal_time=datetime(2026, 3, 20, 9, 20, 0),
-                entry_fill_time=datetime(2026, 3, 20, 9, 20, 11),
+                entry_fill_time=datetime(2026, 3, 20, 9, 20, 31),
                 lot_id="lot1",
                 position_type="A",
                 entry_price_total=-5000.0,
@@ -160,9 +159,8 @@ class BacktestableBotStrictFillTests(unittest.TestCase):
 
         lot1 = bot.position["lots"]["lot1"]
         closed_trade = bot.trade_log.get_closed_trades()[0]
+    provider.fetch_next_delta_snapshot.assert_called_once_with(signal_time + timedelta(seconds=5))
         self.assertEqual(lot1["closed_at"], "2026-03-20 09:45:09")
-        #provider.fetch_next_delta_snapshot.assert_called_once_with(signal_time + timedelta(seconds=30))
-        #self.assertEqual(lot1["closed_at"], "2026-03-20 09:45:35")
         self.assertEqual(lot1["legs"][0]["exit_price"], 120.0)
         self.assertEqual(closed_trade.exit_signal_time, signal_time)
         self.assertEqual(closed_trade.exit_fill_time, fill_time)
@@ -178,7 +176,7 @@ class BacktestableBotStrictFillTests(unittest.TestCase):
             "lot1": {
                 "status": "OPEN",
                 "timeframe": "1m",
-                "opened_at": "2026-03-20 09:20:11",
+                "opened_at": "2026-03-20 09:20:31",
                 "sl_current_level": 110.0,
                 "legs": [
                     {
@@ -196,7 +194,7 @@ class BacktestableBotStrictFillTests(unittest.TestCase):
 
         with self.assertRaises(StrictBacktestDataError):
             bot._close_lot("lot1", exit_time="2026-03-20 09:45:00")
-        provider.fetch_next_delta_snapshot.assert_called_once_with(signal_time + timedelta(seconds=30))
+        provider.fetch_next_delta_snapshot.assert_called_once_with(signal_time + timedelta(seconds=5))
 
 
 if __name__ == "__main__":

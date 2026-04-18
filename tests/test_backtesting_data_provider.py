@@ -175,6 +175,140 @@ class HistoricalDataProviderTests(unittest.TestCase):
         self.assertEqual(float(hourly.iloc[-1]["close"]), 505.0)
         self.assertEqual(float(hourly.iloc[-1]["sma_20"]), 999.0)
 
+    def test_load_all_data_uses_warmup_window_for_option_data_coverage(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = os.path.join(temp_dir, "test.db")
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE market_data_1m (
+                        timestamp TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        open REAL,
+                        high REAL,
+                        low REAL,
+                        close REAL
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE market_data_5m (
+                        timestamp TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        open REAL,
+                        high REAL,
+                        low REAL,
+                        close REAL
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE market_data_15m (
+                        timestamp TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        open REAL,
+                        high REAL,
+                        low REAL,
+                        close REAL
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE market_data_1h (
+                        timestamp TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        open REAL,
+                        high REAL,
+                        low REAL,
+                        close REAL
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE option_data (
+                        timestamp TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        strike_price INTEGER,
+                        option_type TEXT,
+                        ltp REAL,
+                        expiry_date TEXT,
+                        tradingsymbol TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE delta_cache (
+                        timestamp TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        strike_price INTEGER,
+                        option_type TEXT,
+                        ltp REAL,
+                        expiry_date TEXT,
+                        tradingsymbol TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE vix_data (
+                        timestamp TEXT NOT NULL,
+                        vix_value REAL
+                    )
+                    """
+                )
+
+                market_rows = [
+                    ("2026-03-05 09:15:00", "NIFTY50", 1, 2, 0, 1.5),
+                    ("2026-03-05 09:16:00", "NIFTY50", 2, 3, 1, 2.5),
+                ]
+                conn.executemany(
+                    "INSERT INTO market_data_1m (timestamp, symbol, open, high, low, close) VALUES (?, ?, ?, ?, ?, ?)",
+                    market_rows,
+                )
+                conn.execute(
+                    "INSERT INTO market_data_5m (timestamp, symbol, open, high, low, close) VALUES (?, ?, ?, ?, ?, ?)",
+                    ("2026-03-05 09:15:00", "NIFTY50", 10, 11, 9, 10.5),
+                )
+                conn.execute(
+                    "INSERT INTO market_data_15m (timestamp, symbol, open, high, low, close) VALUES (?, ?, ?, ?, ?, ?)",
+                    ("2026-03-05 09:15:00", "NIFTY50", 20, 21, 19, 20.5),
+                )
+                conn.execute(
+                    "INSERT INTO market_data_1h (timestamp, symbol, open, high, low, close) VALUES (?, ?, ?, ?, ?, ?)",
+                    ("2026-03-05 09:15:00", "NIFTY50", 30, 31, 29, 30.5),
+                )
+                conn.execute(
+                    "INSERT INTO vix_data (timestamp, vix_value) VALUES (?, ?)",
+                    ("2026-03-05 09:26:45", 15.5),
+                )
+                conn.execute(
+                    "INSERT INTO delta_cache (timestamp, symbol, strike_price, option_type, ltp, expiry_date, tradingsymbol) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    ("2026-03-05 08:44:07", "NIFTY50", 22400, "PE", 101.0, "2026-03-26", "OPTPE"),
+                )
+                conn.executemany(
+                    "INSERT INTO option_data (timestamp, symbol, strike_price, option_type, ltp, expiry_date, tradingsymbol) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        ("2026-03-05 08:44:07", "NIFTY50", 22400, "PE", 101.0, "2026-03-26", "OPTPE"),
+                        ("2026-03-05 09:18:14", "NIFTY50", 22400, "PE", 102.0, "2026-03-26", "OPTPE"),
+                    ],
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            provider = HistoricalDataProvider(db_path=db_path)
+            provider.load_all_data(datetime(2026, 3, 5, 9, 15), datetime(2026, 3, 5, 15, 30))
+            coverage = provider.get_backtest_data_coverage()
+
+        self.assertEqual(coverage["option_data"]["start"], datetime(2026, 3, 5, 8, 44, 7))
+        self.assertEqual(coverage["option_data"]["end"], datetime(2026, 3, 5, 9, 18, 14))
+
     def test_fetch_vix_data_is_snapshot_based(self):
         provider = HistoricalDataProvider(db_path=":memory:")
         provider._data_loaded = True
@@ -359,6 +493,41 @@ class HistoricalDataProviderTests(unittest.TestCase):
         )
 
         self.assertEqual(price, 205.50)
+
+    def test_get_backtest_data_coverage_reports_loaded_ranges_for_required_tables(self):
+        provider = HistoricalDataProvider(db_path=":memory:")
+        provider._data_loaded = True
+        provider._market_data["1m"] = make_market_df("2026-04-07 09:15:00", periods=3, freq="1min")
+        provider._vix_data = pd.DataFrame(
+            {"vix_value": [13.1, 13.4]},
+            index=pd.DatetimeIndex([
+                pd.Timestamp("2026-04-07 09:20:00"),
+                pd.Timestamp("2026-04-07 15:20:00"),
+            ]),
+        )
+        provider._delta_cache = pd.DataFrame(
+            [
+                {"timestamp": pd.Timestamp("2026-04-07 09:16:00"), "ltp": 100.0},
+                {"timestamp": pd.Timestamp("2026-04-07 15:25:00"), "ltp": 110.0},
+            ]
+        )
+        provider._option_data = pd.DataFrame(
+            [
+                {"timestamp": pd.Timestamp("2026-04-07 09:17:00"), "ltp": 101.0},
+                {"timestamp": pd.Timestamp("2026-04-07 15:26:00"), "ltp": 111.0},
+            ]
+        )
+
+        coverage = provider.get_backtest_data_coverage()
+
+        self.assertEqual(coverage["market_data_1m"]["start"], datetime(2026, 4, 7, 9, 15))
+        self.assertEqual(coverage["market_data_1m"]["end"], datetime(2026, 4, 7, 9, 17))
+        self.assertEqual(coverage["vix_data"]["start"], datetime(2026, 4, 7, 9, 20))
+        self.assertEqual(coverage["vix_data"]["end"], datetime(2026, 4, 7, 15, 20))
+        self.assertEqual(coverage["delta_cache"]["start"], datetime(2026, 4, 7, 9, 16))
+        self.assertEqual(coverage["delta_cache"]["end"], datetime(2026, 4, 7, 15, 25))
+        self.assertEqual(coverage["option_data"]["start"], datetime(2026, 4, 7, 9, 17))
+        self.assertEqual(coverage["option_data"]["end"], datetime(2026, 4, 7, 15, 26))
 
 
 if __name__ == "__main__":
