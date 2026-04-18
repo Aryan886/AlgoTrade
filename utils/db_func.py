@@ -734,7 +734,6 @@ def fetch_latest_open_interest_snapshot(
     finally:
         conn.close()
 
-
 def fetch_open_interest_data(
     symbol: str = "NIFTY50",
     start=None,
@@ -766,7 +765,6 @@ def fetch_open_interest_data(
         return df
     df.set_index("timestamp", inplace=True)
     return df
-
 
 #Logs trading signals with reasons and confidence scores.
 def store_signal(timestamp, symbol, signal, reason=None, confidence_score=None, db_path=DB_PATH):

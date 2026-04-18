@@ -570,9 +570,9 @@ class MarketDataAutomation:
         schedule.every().hour.at(":15").do(self.fetch_1h_data)
         
         # Equity data fetching (every minute/5min/15min)
-        schedule.every().minute.do(self.fetch_1m_equity_data)   
-        schedule.every(5).minutes.do(self.fetch_5m_equity_data)
-        schedule.every(15).minutes.do(self.fetch_15m_equity_data)
+        #schedule.every().minute.do(self.fetch_1m_equity_data)   
+        #schedule.every(5).minutes.do(self.fetch_5m_equity_data)
+        #schedule.every(15).minutes.do(self.fetch_15m_equity_data)
         
         # VIX calculation (every 5 minutes, independent of market data)
         schedule.every(5).minutes.do(calculate_vix_separately)
@@ -590,10 +590,10 @@ class MarketDataAutomation:
         schedule.every().minute.do(self.run_paper_trading_cycle)
         
         #SMA PAPER TRADING - Run every minute during market hours
-        schedule.every().minute.do(self.run_sma_paper_trading_cycle)
+        #schedule.every().minute.do(self.run_sma_paper_trading_cycle)
 
         #Equity PAPER TRADING - Run every minute during market hours
-        schedule.every().minute.do(self.run_equity_paper_trading_cycle)
+        #schedule.every().minute.do(self.run_equity_paper_trading_cycle)
 
         #Nifty Options PAPER TRADING - Run every minute during market hours
         schedule.every().minute.do(self.run_nifty_paper_trading_cycle)
@@ -608,7 +608,7 @@ class MarketDataAutomation:
         logger.info("- NIFTY option OI: Every minute (nearest expiry, ATM +/- 300)")
         logger.info("- Trading Strategy: Every minute")
         logger.info("- Donchian Paper Trading: Every minute")
-        logger.info("- SMA Paper Trading: Every minute")
+        #logger.info("- SMA Paper Trading: Every minute")
         logger.info("- Nifty Options Paper Trading: Every minute")
         logger.info("- Signal generation: Integrated with data fetching")
     
