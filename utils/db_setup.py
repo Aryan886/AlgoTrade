@@ -54,9 +54,7 @@ def create_market_data_table(conn: sqlite3.Connection, interval: str) -> None:
     conn.commit()
 
 
-def create_open_interest_table(conn: sqlite3.Connection) -> None:
-    """Create or backfill the append-only NIFTY option OI snapshot table."""
-    cursor = conn.cursor()
+def _create_open_interest_table(cursor: sqlite3.Cursor) -> None:
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS option_open_interest (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,9 +71,39 @@ def create_open_interest_table(conn: sqlite3.Connection) -> None:
             open_interest INTEGER,
             oi_day_high INTEGER,
             oi_day_low INTEGER,
-            quote_timestamp TEXT,
+            vwap REAL,
             last_trade_time TEXT,
             volume INTEGER
+        );
+    """)
+
+
+def create_open_interest_5m_table(conn: sqlite3.Connection) -> None:
+    """Create or backfill the derived 5-minute option OI/VWAP table."""
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS option_open_interest_5m (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            exchange TEXT NOT NULL,
+            tradingsymbol TEXT NOT NULL,
+            instrument_token INTEGER,
+            expiry_date TEXT NOT NULL,
+            strike_price REAL NOT NULL,
+            option_type TEXT NOT NULL,
+            spot_price REAL,
+            last_price REAL,
+            open_interest INTEGER,
+            oi_day_high INTEGER,
+            oi_day_low INTEGER,
+            vwap REAL,
+            bucket_volume INTEGER,
+            is_carry_forward INTEGER NOT NULL DEFAULT 0,
+            source_start_timestamp TEXT,
+            source_end_timestamp TEXT,
+            source_snapshot_count INTEGER,
+            last_trade_time TEXT
         );
     """)
 
@@ -93,13 +121,118 @@ def create_open_interest_table(conn: sqlite3.Connection) -> None:
         "open_interest": "INTEGER",
         "oi_day_high": "INTEGER",
         "oi_day_low": "INTEGER",
-        "quote_timestamp": "TEXT",
+        "vwap": "REAL",
+        "bucket_volume": "INTEGER",
+        "is_carry_forward": "INTEGER NOT NULL DEFAULT 0",
+        "source_start_timestamp": "TEXT",
+        "source_end_timestamp": "TEXT",
+        "source_snapshot_count": "INTEGER",
+        "last_trade_time": "TEXT",
+    }
+
+    cursor.execute("PRAGMA table_info(option_open_interest_5m)")
+    existing_columns = {column[1] for column in cursor.fetchall()}
+    for column_name, column_type in required_columns.items():
+        if column_name not in existing_columns:
+            cursor.execute(f"ALTER TABLE option_open_interest_5m ADD COLUMN {column_name} {column_type}")
+
+    cursor.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_option_oi_5m_timestamp_symbol_tradingsymbol
+        ON option_open_interest_5m (timestamp, symbol, tradingsymbol);
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_option_oi_5m_symbol_timestamp
+        ON option_open_interest_5m (symbol, timestamp);
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_option_oi_5m_contract_replay
+        ON option_open_interest_5m (symbol, expiry_date, strike_price, option_type, timestamp);
+    """)
+    conn.commit()
+
+
+def _rebuild_open_interest_without_quote_timestamp(
+    cursor: sqlite3.Cursor,
+    existing_columns: set[str],
+) -> None:
+    """Drop the removed quote_timestamp column while preserving existing rows."""
+    cursor.execute("DROP INDEX IF EXISTS ux_option_oi_timestamp_symbol_tradingsymbol")
+    cursor.execute("DROP INDEX IF EXISTS idx_option_oi_symbol_timestamp")
+    cursor.execute("DROP INDEX IF EXISTS idx_option_oi_contract_replay")
+    cursor.execute("ALTER TABLE option_open_interest RENAME TO option_open_interest_old")
+    _create_open_interest_table(cursor)
+
+    insert_columns = [
+        "id",
+        "timestamp",
+        "symbol",
+        "exchange",
+        "tradingsymbol",
+        "instrument_token",
+        "expiry_date",
+        "strike_price",
+        "option_type",
+        "spot_price",
+        "last_price",
+        "open_interest",
+        "oi_day_high",
+        "oi_day_low",
+        "vwap",
+        "last_trade_time",
+        "volume",
+    ]
+    defaults = {
+        "exchange": "'NFO'",
+        "tradingsymbol": "''",
+        "expiry_date": "''",
+        "strike_price": "0",
+        "option_type": "''",
+    }
+    select_columns = [
+        column_name if column_name in existing_columns else defaults.get(column_name, "NULL")
+        for column_name in insert_columns
+    ]
+
+    cursor.execute(f"""
+        INSERT INTO option_open_interest ({", ".join(insert_columns)})
+        SELECT {", ".join(select_columns)}
+        FROM option_open_interest_old;
+    """)
+    cursor.execute("DROP TABLE option_open_interest_old")
+
+
+def create_open_interest_table(conn: sqlite3.Connection) -> None:
+    """Create or backfill the append-only NIFTY option OI snapshot table."""
+    cursor = conn.cursor()
+    _create_open_interest_table(cursor)
+
+    required_columns = {
+        "timestamp": "TEXT",
+        "symbol": "TEXT",
+        "exchange": "TEXT NOT NULL DEFAULT 'NFO'",
+        "tradingsymbol": "TEXT",
+        "instrument_token": "INTEGER",
+        "expiry_date": "TEXT NOT NULL DEFAULT ''",
+        "strike_price": "REAL NOT NULL DEFAULT 0",
+        "option_type": "TEXT NOT NULL DEFAULT ''",
+        "spot_price": "REAL",
+        "last_price": "REAL",
+        "open_interest": "INTEGER",
+        "oi_day_high": "INTEGER",
+        "oi_day_low": "INTEGER",
+        "vwap": "REAL",
         "last_trade_time": "TEXT",
         "volume": "INTEGER",
     }
 
     cursor.execute("PRAGMA table_info(option_open_interest)")
     existing_columns = {column[1] for column in cursor.fetchall()}
+
+    if "quote_timestamp" in existing_columns:
+        _rebuild_open_interest_without_quote_timestamp(cursor, existing_columns)
+        cursor.execute("PRAGMA table_info(option_open_interest)")
+        existing_columns = {column[1] for column in cursor.fetchall()}
+
     for column_name, column_type in required_columns.items():
         if column_name not in existing_columns:
             cursor.execute(f"ALTER TABLE option_open_interest ADD COLUMN {column_name} {column_type}")
@@ -202,6 +335,9 @@ def create_tables(db_path='db/trading_bot.db'):
             open_interest INTEGER
         );
     """)
+
+    create_open_interest_table(conn)
+    create_open_interest_5m_table(conn)
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS ix_option_data_symbol_timestamp
         ON option_data (symbol, timestamp);

@@ -13,7 +13,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from broker.zerodha_client import kite_from_saved_token
 from config.config import CONFIG
-from utils.db_func import DB_PATH, store_open_interest_snapshot
+from utils.db_func import DB_PATH, rebuild_open_interest_5m_for_rows, store_open_interest_snapshot
 
 
 logger = logging.getLogger(__name__)
@@ -204,7 +204,7 @@ class NiftyOpenInterestFetcher:
                 "open_interest": _first_present(quote, "oi", "open_interest", "openInterest"),
                 "oi_day_high": quote.get("oi_day_high"),
                 "oi_day_low": quote.get("oi_day_low"),
-                "quote_timestamp": quote.get("timestamp"),
+                "vwap": _first_present(quote, "average_price", "averagePrice", "vwap"),
                 "last_trade_time": quote.get("last_trade_time"),
                 "volume": quote.get("volume"),
             })
@@ -227,6 +227,7 @@ def fetch_and_store_open_interest(
     rows = fetcher.fetch_snapshot(band=band, interval=interval)
     stored = store_open_interest_snapshot(rows, db_path=db_path)
     if stored:
+        rebuild_open_interest_5m_for_rows(rows, db_path=db_path)
         logger.info("Stored %d NIFTY OI rows", stored)
     else:
         logger.warning("No NIFTY OI rows stored")

@@ -1,0 +1,33 @@
+EQUITY TRADING : 
+
+1. For buying condition : 
+	a. Check for 15min
+	b. If close price above mid-donchian
+	c. Price above v-wap
+	d. AO is +ve OR price above 20 sma 
+
+	If above conditions are satisfied then move to point 2
+
+2. Check for 5 min : 
+	a. Price above mid-donchian
+	b. Price above v-wap
+	c. AO +ve 
+
+	IF above conditions are satisfied  then TAKE POSITION. 
+For 1min price action :- 
+ 	Price above vwap or price above mid donchian or AO is positive or price above 20sma then in next candle BUY at market price. 
+		
+
+				OR
+
+
+	When 1min price closes above 5 SMA then in next candle BUY at market
+
+after buying put stopLoss to 1min skipping low.
+
+When price close above 5 sma high then check previous 7 candles low including the high candle, within 7 candles whichever is lowest is our 1st skipping low.
+
+
+1 min AO => if continuous 5 AO candles become red then move 50% of BUY equity to below 5 sma low with filter 0.25% and remaining 50% will follow skipping low stop loss
+
+

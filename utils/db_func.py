@@ -619,6 +619,232 @@ def _ensure_open_interest_schema(conn: sqlite3.Connection) -> None:
     create_open_interest_table(conn)
 
 
+def _ensure_open_interest_5m_schema(conn: sqlite3.Connection) -> None:
+    from utils.db_setup import create_open_interest_5m_table
+
+    create_open_interest_5m_table(conn)
+
+
+def _floor_to_5m_bucket(timestamp_value: Any) -> Optional[pd.Timestamp]:
+    timestamp = pd.Timestamp(timestamp_value) if timestamp_value is not None else None
+    if timestamp is None or pd.isna(timestamp):
+        return None
+    return timestamp.floor("5min")
+
+
+def rebuild_open_interest_5m_for_day(
+    symbol: str = "NIFTY50",
+    trading_day: Any = None,
+    db_path=DB_PATH,
+) -> int:
+    """Rebuild derived 5-minute OI/VWAP rows for one symbol and trading day."""
+    if trading_day is None:
+        trading_day = datetime.now().date()
+    if isinstance(trading_day, datetime):
+        trading_day = trading_day.date()
+    elif isinstance(trading_day, str):
+        trading_day = pd.Timestamp(trading_day).date()
+
+    day_start = datetime.combine(trading_day, datetime.min.time())
+    day_end = day_start + timedelta(days=1)
+
+    conn = sqlite3.connect(db_path, timeout=20)
+    try:
+        _ensure_open_interest_schema(conn)
+        _ensure_open_interest_5m_schema(conn)
+        raw_df = pd.read_sql_query(
+            """
+            SELECT *
+            FROM option_open_interest
+            WHERE symbol = ? AND timestamp >= ? AND timestamp < ?
+            ORDER BY timestamp, expiry_date, strike_price, option_type
+            """,
+            conn,
+            params=(
+                symbol,
+                _safe_db_timestamp(day_start),
+                _safe_db_timestamp(day_end),
+            ),
+        )
+
+        conn.execute(
+            """
+            DELETE FROM option_open_interest_5m
+            WHERE symbol = ? AND timestamp >= ? AND timestamp < ?
+            """,
+            (symbol, _safe_db_timestamp(day_start), _safe_db_timestamp(day_end)),
+        )
+
+        if raw_df.empty:
+            conn.commit()
+            return 0
+
+        raw_df["timestamp"] = pd.to_datetime(raw_df["timestamp"], errors="coerce")
+        if "last_trade_time" in raw_df.columns:
+            raw_df["last_trade_time"] = pd.to_datetime(raw_df["last_trade_time"], errors="coerce")
+        raw_df = raw_df.dropna(subset=["timestamp"]).copy()
+        if raw_df.empty:
+            conn.commit()
+            return 0
+
+        raw_df["bucket_timestamp"] = raw_df["timestamp"].dt.floor("5min")
+        contract_columns = [
+            "symbol",
+            "exchange",
+            "tradingsymbol",
+            "instrument_token",
+            "expiry_date",
+            "strike_price",
+            "option_type",
+        ]
+        derived_rows: List[tuple] = []
+
+        grouped = raw_df.groupby(contract_columns, dropna=False, sort=False)
+        for contract_key, contract_df in grouped:
+            contract_df = contract_df.sort_values("timestamp").reset_index(drop=True)
+            bucket_state: Dict[pd.Timestamp, Dict[str, Any]] = {}
+            previous_volume = None
+            previous_vwap = None
+
+            for _, row in contract_df.iterrows():
+                bucket_ts = row["bucket_timestamp"]
+                current_volume = _safe_int(row.get("volume"))
+                delta_volume = 0
+                if current_volume is not None:
+                    if previous_volume is not None and current_volume >= previous_volume:
+                        delta_volume = current_volume - previous_volume
+                    previous_volume = current_volume
+
+                state = bucket_state.setdefault(bucket_ts, {
+                    "row": row,
+                    "bucket_volume": 0,
+                    "traded_value": 0.0,
+                    "source_start_timestamp": row["timestamp"],
+                    "source_end_timestamp": row["timestamp"],
+                    "source_snapshot_count": 0,
+                })
+                state["row"] = row
+                state["bucket_volume"] += int(max(delta_volume, 0))
+                if delta_volume > 0 and row.get("last_price") is not None and not pd.isna(row.get("last_price")):
+                    state["traded_value"] += float(row["last_price"]) * float(delta_volume)
+                state["source_start_timestamp"] = min(state["source_start_timestamp"], row["timestamp"])
+                state["source_end_timestamp"] = max(state["source_end_timestamp"], row["timestamp"])
+                state["source_snapshot_count"] += 1
+
+            bucket_timestamps = pd.date_range(
+                start=contract_df["bucket_timestamp"].min(),
+                end=contract_df["bucket_timestamp"].max(),
+                freq="5min",
+            )
+
+            for bucket_ts in bucket_timestamps:
+                state = bucket_state.get(bucket_ts)
+                if state is None:
+                    template_row = contract_df[contract_df["bucket_timestamp"] < bucket_ts].iloc[-1]
+                    bucket_volume = 0
+                    vwap = previous_vwap
+                    is_carry_forward = 1 if previous_vwap is not None else 0
+                    source_start_timestamp = None
+                    source_end_timestamp = None
+                    source_snapshot_count = 0
+                else:
+                    template_row = state["row"]
+                    bucket_volume = int(state["bucket_volume"])
+                    if bucket_volume > 0:
+                        vwap = float(state["traded_value"]) / float(bucket_volume)
+                        previous_vwap = vwap
+                        is_carry_forward = 0
+                    else:
+                        vwap = previous_vwap
+                        is_carry_forward = 1 if previous_vwap is not None else 0
+                    source_start_timestamp = state["source_start_timestamp"]
+                    source_end_timestamp = state["source_end_timestamp"]
+                    source_snapshot_count = state["source_snapshot_count"]
+
+                derived_rows.append((
+                    _safe_db_timestamp(bucket_ts),
+                    str(template_row.get("symbol") or symbol),
+                    str(template_row.get("exchange") or "NFO"),
+                    str(template_row.get("tradingsymbol") or ""),
+                    _safe_int(template_row.get("instrument_token")),
+                    _safe_db_date(template_row.get("expiry_date")),
+                    _safe_float(template_row.get("strike_price")),
+                    str(template_row.get("option_type") or "").upper(),
+                    _safe_float(template_row.get("spot_price")),
+                    _safe_float(template_row.get("last_price")),
+                    _safe_int(template_row.get("open_interest")),
+                    _safe_int(template_row.get("oi_day_high")),
+                    _safe_int(template_row.get("oi_day_low")),
+                    _safe_float(vwap),
+                    bucket_volume,
+                    int(is_carry_forward),
+                    _safe_db_timestamp(source_start_timestamp),
+                    _safe_db_timestamp(source_end_timestamp),
+                    _safe_int(source_snapshot_count),
+                    _safe_db_timestamp(template_row.get("last_trade_time")),
+                ))
+
+        if not derived_rows:
+            conn.commit()
+            return 0
+
+        conn.executemany(
+            """
+            INSERT INTO option_open_interest_5m (
+                timestamp, symbol, exchange, tradingsymbol, instrument_token,
+                expiry_date, strike_price, option_type, spot_price, last_price,
+                open_interest, oi_day_high, oi_day_low, vwap, bucket_volume,
+                is_carry_forward, source_start_timestamp, source_end_timestamp,
+                source_snapshot_count, last_trade_time
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(timestamp, symbol, tradingsymbol) DO UPDATE SET
+                exchange = excluded.exchange,
+                instrument_token = excluded.instrument_token,
+                expiry_date = excluded.expiry_date,
+                strike_price = excluded.strike_price,
+                option_type = excluded.option_type,
+                spot_price = excluded.spot_price,
+                last_price = excluded.last_price,
+                open_interest = excluded.open_interest,
+                oi_day_high = excluded.oi_day_high,
+                oi_day_low = excluded.oi_day_low,
+                vwap = excluded.vwap,
+                bucket_volume = excluded.bucket_volume,
+                is_carry_forward = excluded.is_carry_forward,
+                source_start_timestamp = excluded.source_start_timestamp,
+                source_end_timestamp = excluded.source_end_timestamp,
+                source_snapshot_count = excluded.source_snapshot_count,
+                last_trade_time = excluded.last_trade_time;
+            """,
+            derived_rows,
+        )
+        conn.commit()
+        return len(derived_rows)
+    finally:
+        conn.close()
+
+
+def rebuild_open_interest_5m_for_rows(
+    rows: List[Dict[str, Any]],
+    db_path=DB_PATH,
+) -> int:
+    """Rebuild derived 5-minute OI/VWAP rows for trading days present in raw rows."""
+    rebuild_targets = []
+    for row in rows or []:
+        timestamp_value = row.get("timestamp")
+        if timestamp_value is None:
+            continue
+        timestamp = pd.Timestamp(timestamp_value)
+        if pd.isna(timestamp):
+            continue
+        rebuild_targets.append((str(row.get("symbol") or "NIFTY50"), timestamp.date()))
+
+    total_rows = 0
+    for symbol, trading_day in sorted(set(rebuild_targets)):
+        total_rows += rebuild_open_interest_5m_for_day(symbol=symbol, trading_day=trading_day, db_path=db_path)
+    return total_rows
+
+
 def store_open_interest_snapshot(rows: List[Dict[str, Any]], db_path=DB_PATH) -> int:
     """Store append-only NIFTY option open-interest snapshot rows."""
     if not rows:
@@ -655,7 +881,7 @@ def store_open_interest_snapshot(rows: List[Dict[str, Any]], db_path=DB_PATH) ->
                 _safe_int(_first_non_none(row.get("open_interest"), row.get("oi"))),
                 _safe_int(row.get("oi_day_high")),
                 _safe_int(row.get("oi_day_low")),
-                _safe_db_timestamp(row.get("quote_timestamp")),
+                _safe_float(_first_non_none(row.get("vwap"), row.get("average_price"), row.get("averagePrice"))),
                 _safe_db_timestamp(row.get("last_trade_time")),
                 _safe_int(row.get("volume")),
             ))
@@ -667,7 +893,7 @@ def store_open_interest_snapshot(rows: List[Dict[str, Any]], db_path=DB_PATH) ->
             INSERT INTO option_open_interest (
                 timestamp, symbol, exchange, tradingsymbol, instrument_token,
                 expiry_date, strike_price, option_type, spot_price, last_price,
-                open_interest, oi_day_high, oi_day_low, quote_timestamp,
+                open_interest, oi_day_high, oi_day_low, vwap,
                 last_trade_time, volume
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(timestamp, symbol, tradingsymbol) DO UPDATE SET
@@ -681,7 +907,7 @@ def store_open_interest_snapshot(rows: List[Dict[str, Any]], db_path=DB_PATH) ->
                 open_interest = excluded.open_interest,
                 oi_day_high = excluded.oi_day_high,
                 oi_day_low = excluded.oi_day_low,
-                quote_timestamp = excluded.quote_timestamp,
+                vwap = excluded.vwap,
                 last_trade_time = excluded.last_trade_time,
                 volume = excluded.volume;
         """, prepared_rows)
@@ -704,6 +930,7 @@ def fetch_latest_open_interest_snapshot(
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
+        _ensure_open_interest_schema(conn)
         cursor = conn.cursor()
         try:
             if current_time is None:
@@ -742,6 +969,7 @@ def fetch_open_interest_data(
     """Fetch persisted option open-interest rows as a timestamp-indexed DataFrame."""
     conn = sqlite3.connect(db_path)
     try:
+        _ensure_open_interest_schema(conn)
         query = "SELECT * FROM option_open_interest WHERE symbol = ?"
         params = [symbol]
 
@@ -754,7 +982,81 @@ def fetch_open_interest_data(
 
         query += " ORDER BY timestamp, expiry_date, strike_price, option_type"
         try:
-            df = pd.read_sql_query(query, conn, params=params, parse_dates=["timestamp", "quote_timestamp", "last_trade_time"])
+            df = pd.read_sql_query(query, conn, params=params, parse_dates=["timestamp", "last_trade_time"])
+        except (sqlite3.OperationalError, ValueError):
+            return pd.DataFrame()
+    finally:
+        conn.close()
+
+    if df.empty:
+        return df
+    df.set_index("timestamp", inplace=True)
+    return df
+
+
+def fetch_latest_open_interest_5m_snapshot(
+    symbol: str = "NIFTY50",
+    current_time=None,
+    db_path=DB_PATH,
+) -> List[Dict[str, Any]]:
+    """Return all derived 5-minute OI rows for the latest bucket at or before current_time."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        _ensure_open_interest_5m_schema(conn)
+        cursor = conn.cursor()
+        if current_time is None:
+            cursor.execute(
+                "SELECT MAX(timestamp) FROM option_open_interest_5m WHERE symbol = ?",
+                (symbol,),
+            )
+        else:
+            current_bucket = _floor_to_5m_bucket(current_time)
+            cursor.execute(
+                "SELECT MAX(timestamp) FROM option_open_interest_5m WHERE symbol = ? AND timestamp <= ?",
+                (symbol, _safe_db_timestamp(current_bucket)),
+            )
+        latest_timestamp = cursor.fetchone()[0]
+        if not latest_timestamp:
+            return []
+
+        cursor.execute(
+            """
+            SELECT *
+            FROM option_open_interest_5m
+            WHERE symbol = ? AND timestamp = ?
+            ORDER BY expiry_date, strike_price, option_type
+            """,
+            (symbol, latest_timestamp),
+        )
+        return _open_interest_rows_to_dicts(cursor.fetchall())
+    finally:
+        conn.close()
+
+
+def fetch_open_interest_5m_data(
+    symbol: str = "NIFTY50",
+    start=None,
+    end=None,
+    db_path=DB_PATH,
+) -> pd.DataFrame:
+    """Fetch derived 5-minute OI/VWAP rows as a timestamp-indexed DataFrame."""
+    conn = sqlite3.connect(db_path)
+    try:
+        _ensure_open_interest_5m_schema(conn)
+        query = "SELECT * FROM option_open_interest_5m WHERE symbol = ?"
+        params = [symbol]
+
+        if start:
+            query += " AND timestamp >= ?"
+            params.append(_safe_db_timestamp(_floor_to_5m_bucket(start) or start))
+        if end:
+            query += " AND timestamp <= ?"
+            params.append(_safe_db_timestamp(_floor_to_5m_bucket(end) or end))
+
+        query += " ORDER BY timestamp, expiry_date, strike_price, option_type"
+        try:
+            df = pd.read_sql_query(query, conn, params=params, parse_dates=["timestamp", "last_trade_time", "source_start_timestamp", "source_end_timestamp"])
         except (sqlite3.OperationalError, ValueError):
             return pd.DataFrame()
     finally:
@@ -886,8 +1188,8 @@ def fetch_cached_options_data(symbol: str = 'NIFTY50', db_path=DB_PATH) -> List[
         SELECT * FROM option_data 
         WHERE symbol = ? 
         ORDER BY timestamp DESC 
-        LIMIT ?
-    """, (symbol, OPTION_CACHE_TAIL_LIMIT))
+        LIMIT 100
+    """, (symbol,))
     rows = cursor.fetchall()
     conn.close()
     return _map_option_data_rows(rows)
@@ -1033,7 +1335,8 @@ def calculate_and_store_high_accuracy_delta(
         # Keep the shared live path permissive so existing consumers continue to
         # see the same behavior as before; stricter completeness checks belong
         # in strategy/backtest-specific call paths.
-        STALE_THRESHOLD_SECONDS = OPTION_CACHE_REFRESH_SECONDS + OPTION_CACHE_STALE_GRACE_SECONDS
+        #STALE_THRESHOLD_SECONDS = OPTION_CACHE_REFRESH_SECONDS + OPTION_CACHE_STALE_GRACE_SECONDS
+        STALE_THRESHOLD_SECONDS = 60  # 1 minute freshness threshold for option data
         is_stale_by_age = newest_age is not None and newest_age > STALE_THRESHOLD_SECONDS
         if all_expired or not cached_options or is_stale_by_age:
             print("All cached options are expired or cache is empty. Fetching fresh option data...")

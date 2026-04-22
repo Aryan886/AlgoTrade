@@ -35,6 +35,7 @@ class HistoricalDataProvider:
     _delta_cache: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
     _option_data: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
     _open_interest_data: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
+    _open_interest_5m_data: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
     _data_loaded: bool = field(default=False, repr=False)
 
     def load_all_data(self, start_date: datetime, end_date: datetime) -> None:
@@ -62,6 +63,7 @@ class HistoricalDataProvider:
             self._delta_cache = self._load_delta_cache(conn, warmup_start, end_date)
             self._option_data = self._load_option_data(conn, start_date, end_date)
             self._open_interest_data = self._load_open_interest_data(conn, warmup_start, end_date)
+            self._open_interest_5m_data = self._load_open_interest_5m_data(conn, warmup_start, end_date)
             self._data_loaded = True
         finally:
             conn.close()
@@ -183,6 +185,9 @@ class HistoricalDataProvider:
 
     def _load_open_interest_data(self, conn: sqlite3.Connection, start: datetime, end: datetime) -> pd.DataFrame:
         try:
+            from utils.db_setup import create_open_interest_table
+
+            create_open_interest_table(conn)
             query = """
                 SELECT *
                 FROM option_open_interest
@@ -198,7 +203,32 @@ class HistoricalDataProvider:
         if df.empty:
             return df
         df["timestamp"] = pd.to_datetime(df["timestamp"])
-        for col in ["quote_timestamp", "last_trade_time"]:
+        for col in ["last_trade_time"]:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
+        df.columns = [c.lower() for c in df.columns]
+        return df
+
+    def _load_open_interest_5m_data(self, conn: sqlite3.Connection, start: datetime, end: datetime) -> pd.DataFrame:
+        try:
+            from utils.db_setup import create_open_interest_5m_table
+
+            create_open_interest_5m_table(conn)
+            query = """
+                SELECT *
+                FROM option_open_interest_5m
+                WHERE symbol = ? AND timestamp >= ? AND timestamp <= ?
+                ORDER BY timestamp, expiry_date, strike_price, option_type
+            """
+            df = pd.read_sql_query(query, conn, params=(
+                self.symbol, start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")
+            ))
+        except Exception as e:
+            print(f"Warning: Could not load option_open_interest_5m: {e}")
+            return pd.DataFrame()
+        if df.empty:
+            return df
+        for col in ["timestamp", "last_trade_time", "source_start_timestamp", "source_end_timestamp"]:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce")
         df.columns = [c.lower() for c in df.columns]
@@ -343,6 +373,27 @@ class HistoricalDataProvider:
             return pd.DataFrame()
         current_ts = pd.Timestamp(current_time)
         return self._open_interest_data[self._open_interest_data["timestamp"] <= current_ts].copy()
+
+    def fetch_open_interest_5m_snapshot(self, current_time: datetime) -> List[Dict[str, Any]]:
+        """Return the latest derived 5-minute OI snapshot at or before current_time."""
+        if not self._data_loaded:
+            raise RuntimeError("Data not loaded. Call load_all_data() first.")
+        if self._open_interest_5m_data.empty:
+            return []
+        current_bucket = pd.Timestamp(current_time).floor("5min")
+        snapshot = self._latest_snapshot(self._open_interest_5m_data, current_bucket)
+        if snapshot.empty:
+            return []
+        return snapshot.to_dict("records")
+
+    def fetch_open_interest_5m_history(self, current_time: datetime) -> pd.DataFrame:
+        """Return all derived 5-minute OI rows at or before the requested bucket."""
+        if not self._data_loaded:
+            raise RuntimeError("Data not loaded. Call load_all_data() first.")
+        if self._open_interest_5m_data.empty:
+            return pd.DataFrame()
+        current_bucket = pd.Timestamp(current_time).floor("5min")
+        return self._open_interest_5m_data[self._open_interest_5m_data["timestamp"] <= current_bucket].copy()
 
     def _latest_snapshot(self, df: pd.DataFrame, current_ts: pd.Timestamp) -> pd.DataFrame:
         if df is None or df.empty:

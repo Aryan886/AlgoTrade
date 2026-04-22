@@ -557,7 +557,6 @@ class MarketDataAutomation:
         except Exception as e:
             return {'error': f'Error getting paper trading status: {e}'}
         
-
     def setup_schedule(self):
         """Setup the schedule for data fetching"""
         # Clear any existing schedules
@@ -590,7 +589,7 @@ class MarketDataAutomation:
         schedule.every().minute.do(self.run_paper_trading_cycle)
         
         #SMA PAPER TRADING - Run every minute during market hours
-        #schedule.every().minute.do(self.run_sma_paper_trading_cycle)
+        schedule.every().minute.do(self.run_sma_paper_trading_cycle)
 
         #Equity PAPER TRADING - Run every minute during market hours
         #schedule.every().minute.do(self.run_equity_paper_trading_cycle)
@@ -608,7 +607,7 @@ class MarketDataAutomation:
         logger.info("- NIFTY option OI: Every minute (nearest expiry, ATM +/- 300)")
         logger.info("- Trading Strategy: Every minute")
         logger.info("- Donchian Paper Trading: Every minute")
-        #logger.info("- SMA Paper Trading: Every minute")
+        logger.info("- SMA Paper Trading: Every minute")
         logger.info("- Nifty Options Paper Trading: Every minute")
         logger.info("- Signal generation: Integrated with data fetching")
     
