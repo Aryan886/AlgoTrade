@@ -2005,6 +2005,229 @@ def fetch_latest_option_price(
     finally:
         conn.close()
 
+
+def floor_to_100_strike(value: float) -> int:
+    """Floor spot price to the nearest 100-point strike."""
+    return int(float(value) // 100.0) * 100
+
+
+def _resolve_nearest_expiry_value(
+    rows: Optional[List[Dict[str, Any]]],
+    current_date: Optional[date] = None,
+) -> Optional[str]:
+    current_date = current_date or date.today()
+    valid_expiries: List[date] = []
+
+    for row in rows or []:
+        expiry_value = _parse_option_expiry_date(row.get("expiry_date") or row.get("expiry"))
+        if expiry_value is None or expiry_value < current_date:
+            continue
+        valid_expiries.append(expiry_value)
+
+    if not valid_expiries:
+        return None
+    return min(valid_expiries).isoformat()
+
+
+def _match_exact_contract_from_rows(
+    rows: Optional[List[Dict[str, Any]]],
+    strike_price: int,
+    option_type: str,
+    expiry_date: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    option_type = str(option_type or "").upper()
+    target_expiry = str(expiry_date)[:10] if expiry_date else None
+    candidates: List[Dict[str, Any]] = []
+
+    for row in rows or []:
+        row_type = str(row.get("option_type") or "").upper()
+        if row_type != option_type:
+            continue
+
+        row_strike = row.get("strike_price")
+        try:
+            row_strike_int = int(float(row_strike))
+        except Exception:
+            continue
+        if row_strike_int != int(strike_price):
+            continue
+
+        row_expiry = str(row.get("expiry_date") or row.get("expiry") or "")[:10]
+        if target_expiry and row_expiry != target_expiry:
+            continue
+
+        candidates.append(dict(row))
+
+    if not candidates:
+        return None
+
+    def _candidate_sort_key(row: Dict[str, Any]) -> tuple:
+        return (
+            str(row.get("expiry_date") or row.get("expiry") or ""),
+            str(row.get("tradingsymbol") or ""),
+        )
+
+    chosen = dict(sorted(candidates, key=_candidate_sort_key)[0])
+    if chosen.get("strike_price") is not None:
+        try:
+            chosen["strike_price"] = int(float(chosen["strike_price"]))
+        except Exception:
+            pass
+    return chosen
+
+
+def find_nearest_expiry_option_contract(
+    strike_price: int,
+    option_type: str,
+    symbol: str = "NIFTY50",
+    option_rows: Optional[List[Dict[str, Any]]] = None,
+    current_date: Optional[date] = None,
+    db_path=DB_PATH,
+) -> Optional[Dict[str, Any]]:
+    """Return the exact nearest-expiry option snapshot row for a strike/type."""
+    rows = option_rows if option_rows is not None else fetch_latest_option_snapshot(symbol=symbol, db_path=db_path)
+    nearest_expiry = _resolve_nearest_expiry_value(rows, current_date=current_date)
+    if not nearest_expiry:
+        return None
+    return _match_exact_contract_from_rows(rows, strike_price=int(strike_price), option_type=option_type, expiry_date=nearest_expiry)
+
+
+def find_nearest_expiry_open_interest_contract(
+    strike_price: int,
+    option_type: str,
+    symbol: str = "NIFTY50",
+    oi_rows: Optional[List[Dict[str, Any]]] = None,
+    current_time=None,
+    current_date: Optional[date] = None,
+    db_path=DB_PATH,
+) -> Optional[Dict[str, Any]]:
+    """Return the exact nearest-expiry OI snapshot row for a strike/type."""
+    rows = oi_rows if oi_rows is not None else fetch_latest_open_interest_snapshot(
+        symbol=symbol,
+        current_time=current_time,
+        db_path=db_path,
+    )
+    nearest_expiry = _resolve_nearest_expiry_value(rows, current_date=current_date)
+    if not nearest_expiry:
+        return None
+    return _match_exact_contract_from_rows(rows, strike_price=int(strike_price), option_type=option_type, expiry_date=nearest_expiry)
+
+
+def fetch_latest_oi_vwap_5m_for_contract(
+    strike_price: int,
+    option_type: str,
+    symbol: str = "NIFTY50",
+    oi_5m_rows: Optional[List[Dict[str, Any]]] = None,
+    current_time=None,
+    current_date: Optional[date] = None,
+    db_path=DB_PATH,
+) -> Optional[float]:
+    """Return the latest completed 5m OI VWAP for the exact nearest-expiry contract."""
+    rows = oi_5m_rows if oi_5m_rows is not None else fetch_latest_open_interest_5m_snapshot(
+        symbol=symbol,
+        current_time=current_time,
+        db_path=db_path,
+    )
+    row = find_nearest_expiry_open_interest_contract(
+        strike_price=strike_price,
+        option_type=option_type,
+        symbol=symbol,
+        oi_rows=rows,
+        current_time=current_time,
+        current_date=current_date,
+        db_path=db_path,
+    )
+    if not row:
+        return None
+    vwap = row.get("vwap")
+    try:
+        return float(vwap) if vwap is not None else None
+    except Exception:
+        return None
+
+
+def scan_first_lower_pe_contract_below_ltp(
+    buy_strike_price: int,
+    max_ltp: float,
+    symbol: str = "NIFTY50",
+    option_rows: Optional[List[Dict[str, Any]]] = None,
+    current_date: Optional[date] = None,
+    db_path=DB_PATH,
+) -> Optional[Dict[str, Any]]:
+    """Scan downward in 100-point PE strikes and return the first contract below max_ltp."""
+    rows = option_rows if option_rows is not None else fetch_latest_option_snapshot(symbol=symbol, db_path=db_path)
+    nearest_expiry = _resolve_nearest_expiry_value(rows, current_date=current_date)
+    if not nearest_expiry:
+        return None
+
+    pe_candidates: List[Dict[str, Any]] = []
+    for row in rows or []:
+        if str(row.get("option_type") or "").upper() != "PE":
+            continue
+        row_expiry = str(row.get("expiry_date") or row.get("expiry") or "")[:10]
+        if row_expiry != nearest_expiry:
+            continue
+        try:
+            strike_int = int(float(row.get("strike_price")))
+            ltp_value = float(row.get("ltp"))
+        except Exception:
+            continue
+        if strike_int >= int(buy_strike_price):
+            continue
+        pe_candidates.append(dict(row, strike_price=strike_int, ltp=ltp_value))
+
+    pe_candidates.sort(key=lambda row: row["strike_price"], reverse=True)
+    for row in pe_candidates:
+        if float(row["ltp"]) < float(max_ltp):
+            return row
+    return None
+
+
+def fetch_current_exact_option_ltp(
+    symbol: str = "NIFTY50",
+    tradingsymbol: Optional[str] = None,
+    strike_price: Optional[int] = None,
+    option_type: Optional[str] = None,
+    expiry: Optional[str] = None,
+    option_rows: Optional[List[Dict[str, Any]]] = None,
+    db_path=DB_PATH,
+) -> Optional[float]:
+    """Resolve the latest LTP for an exact option contract from the latest snapshot with DB fallback."""
+    rows = option_rows if option_rows is not None else fetch_latest_option_snapshot(symbol=symbol, db_path=db_path)
+
+    if tradingsymbol:
+        for row in rows or []:
+            if str(row.get("tradingsymbol") or "") != str(tradingsymbol):
+                continue
+            try:
+                ltp_value = row.get("ltp")
+                return float(ltp_value) if ltp_value is not None else None
+            except Exception:
+                break
+
+    if strike_price is not None and option_type:
+        contract = _match_exact_contract_from_rows(
+            rows,
+            strike_price=int(strike_price),
+            option_type=str(option_type).upper(),
+            expiry_date=str(expiry)[:10] if expiry else None,
+        )
+        if contract:
+            try:
+                ltp_value = contract.get("ltp")
+                return float(ltp_value) if ltp_value is not None else None
+            except Exception:
+                pass
+
+    return fetch_latest_option_price(
+        symbol=symbol,
+        tradingsymbol=tradingsymbol,
+        strike_price=strike_price,
+        option_type=option_type,
+        expiry=expiry,
+        db_path=db_path,
+    )
+
 def sma_table_name(interval : str) -> str:
     # Replace any characters not letters/numbers with underscore
     safe_interval = re.sub(r'[^0-9a-zA-Z]+', '_', str(interval))
