@@ -20,6 +20,7 @@ from utils.db_func import (
     calculate_and_store_high_accuracy_delta,
     fetch_cached_options_data,
     fetch_latest_delta_data,
+    fetch_latest_delta_snapshot,
     fetch_latest_option_snapshot,
     store_high_accuracy_options_data,
     summarize_option_snapshot_coverage,
@@ -290,12 +291,26 @@ class OptionSnapshotPipelineTests(unittest.TestCase):
         legacy_rows = fetch_cached_options_data(self.SYMBOL, db_path=self.db_path)
         latest_rows = fetch_latest_option_snapshot(self.SYMBOL, db_path=self.db_path)
 
-        self.assertEqual(len(legacy_rows), 300)
+        self.assertEqual(len(legacy_rows), 100)
         self.assertEqual(len(latest_rows), self.latest_snapshot_size)
         self.assertIn(22900, {row["strike_price"] for row in latest_rows})
         self.assertEqual(
             {"strike_price", "option_type", "ltp", "iv", "expiry_date", "spot_price", "tradingsymbol", "open_interest"},
             set(latest_rows[0].keys()),
+        )
+        self.assertEqual(
+            [
+                (row["expiry_date"], row["strike_price"], row["option_type"])
+                for row in latest_rows[:6]
+            ],
+            [
+                ("2099-03-30", 22450, "CE"),
+                ("2099-03-30", 22450, "PE"),
+                ("2099-03-30", 22500, "CE"),
+                ("2099-03-30", 22500, "PE"),
+                ("2099-03-30", 22550, "CE"),
+                ("2099-03-30", 22550, "PE"),
+            ],
         )
 
     def test_option_snapshot_coverage_helper_flags_missing_required_contracts(self):
@@ -478,6 +493,45 @@ class OptionSnapshotPipelineTests(unittest.TestCase):
         self.assertEqual(expiries_seen, {"2099-03-30"})
         self.assertLess(len(option_rows), len(instruments))
 
+    def test_fetch_live_option_chain_preserves_explicit_required_contract_outside_nearest_expiry(self):
+        instruments = []
+        today = date.today()
+        expiries = [
+            (today + timedelta(days=7)).isoformat(),
+            (today + timedelta(days=20)).isoformat(),
+        ]
+        for expiry in expiries:
+            for strike in range(22000, 24050, 50):
+                for option_type in ("CE", "PE"):
+                    instruments.append({
+                        "name": "NIFTY",
+                        "instrument_type": option_type,
+                        "expiry": expiry,
+                        "strike": strike,
+                        "tradingsymbol": f"NIFTY{expiry.replace('-', '')}{strike}{option_type}",
+                    })
+
+        fake_kite = _FakeOptionChainKite(self.SPOT_PRICE, instruments)
+        required_contract = {
+            "tradingsymbol": f"NIFTY{expiries[1].replace('-', '')}23900CE",
+            "option_type": "CE",
+            "strike_price": 23900,
+            "expiry_date": expiries[1],
+        }
+
+        with patch("utils.vix_fetcher.kite_from_saved_token", return_value=fake_kite), \
+             patch("utils.vix_fetcher.time.sleep", return_value=None):
+            option_rows = fetch_live_option_chain(
+                spot_price=self.SPOT_PRICE,
+                required_contracts=[required_contract],
+            )
+
+        tradingsymbols = {row["tradingsymbol"] for row in option_rows}
+        expiries_seen = {str(row["expiry"]) for row in option_rows}
+        self.assertIn(required_contract["tradingsymbol"], tradingsymbols)
+        self.assertIn(expiries[0], expiries_seen)
+        self.assertIn(expiries[1], expiries_seen)
+
     def test_normalize_expiry_date_accepts_date_datetime_and_string(self):
         expiry = date(2026, 4, 21)
 
@@ -540,6 +594,57 @@ class OptionSnapshotPipelineTests(unittest.TestCase):
         self.assertIsNotNone(second)
         self.assertGreater(row_count, 0)
         self.assertEqual(timestamp_count, 1)
+
+    def test_fetch_latest_delta_snapshot_refreshes_when_required_contract_missing(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("DELETE FROM option_data")
+        conn.execute("DELETE FROM delta_cache")
+        conn.commit()
+        conn.close()
+
+        today = date.today()
+        expiries = [
+            (today + timedelta(days=7)).isoformat(),
+            (today + timedelta(days=20)).isoformat(),
+        ]
+        instruments = []
+        for expiry in expiries:
+            for strike in (22850, 22900, 22950, 23000, 23900):
+                for option_type in ("CE", "PE"):
+                    instruments.append({
+                        "name": "NIFTY",
+                        "instrument_type": option_type,
+                        "expiry": expiry,
+                        "strike": strike,
+                        "tradingsymbol": f"NIFTY{expiry.replace('-', '')}{strike}{option_type}",
+                    })
+
+        required_contract = {
+            "tradingsymbol": f"NIFTY{expiries[1].replace('-', '')}23900CE",
+            "option_type": "CE",
+            "strike_price": 23900,
+            "expiry_date": expiries[1],
+        }
+        fake_module = types.ModuleType("broker.zerodha_client")
+        fake_module.kite_from_saved_token = lambda: _FakeKite(self.SPOT_PRICE)
+        fake_option_kite = _FakeOptionChainKite(self.SPOT_PRICE, instruments)
+
+        with patch.dict(sys.modules, {"broker.zerodha_client": fake_module}), \
+             patch("utils.vix_fetcher.kite_from_saved_token", return_value=fake_option_kite), \
+             patch("utils.vix_fetcher.time.sleep", return_value=None):
+            snapshot = fetch_latest_delta_snapshot(
+                self.SYMBOL,
+                db_path=self.db_path,
+                required_contracts=[required_contract],
+                refresh_if_missing=True,
+            )
+
+        self.assertTrue(snapshot["options_data"])
+        self.assertEqual(snapshot["missing_required_contracts"], [])
+        self.assertIn(
+            required_contract["tradingsymbol"],
+            {row["tradingsymbol"] for row in snapshot["options_data"]},
+        )
 
     def test_strategy_fetch_options_uses_existing_delta_snapshot_before_rebuilding(self):
         strategy = self._strategy()
@@ -653,7 +758,11 @@ class OptionSnapshotPipelineTests(unittest.TestCase):
 
         with patch.object(paper_trades, "setup_paper_trading_logger", return_value=self._logger_tuple()), \
              patch.object(paper_trades.os.path, "exists", return_value=False), \
-             patch.object(paper_trades, "fetch_latest_delta_data", return_value=latest_delta):
+             patch.object(paper_trades, "fetch_latest_delta_snapshot", return_value={
+                 "timestamp": self.latest_ts.strftime("%Y-%m-%d %H:%M:%S"),
+                 "options_data": latest_delta,
+                 "missing_required_contracts": [],
+             }):
             donchian = paper_trades.PaperTraderDonchian(self.SYMBOL)
             self.assertTrue(donchian.refresh_all_data())
 

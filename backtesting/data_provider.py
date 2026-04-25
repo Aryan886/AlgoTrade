@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from utils.db_func import _canonical_option_order_by, _sort_option_like_dataframe
 from utils.market_data_1h import build_1h_market_data_from_15m
 
 
@@ -170,7 +171,11 @@ class HistoricalDataProvider:
 
     def _load_option_data(self, conn: sqlite3.Connection, start: datetime, end: datetime) -> pd.DataFrame:
         try:
-            query = "SELECT * FROM option_data WHERE symbol = ? AND timestamp >= ? AND timestamp <= ? ORDER BY timestamp"
+            query = (
+                "SELECT * FROM option_data "
+                "WHERE symbol = ? AND timestamp >= ? AND timestamp <= ? "
+                f"ORDER BY {_canonical_option_order_by(include_timestamp=True)}"
+            )
             df = pd.read_sql_query(query, conn, params=(
                 self.symbol, start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")
             ))
@@ -181,7 +186,7 @@ class HistoricalDataProvider:
             return df
         df["timestamp"] = pd.to_datetime(df["timestamp"])
         df.columns = [c.lower() for c in df.columns]
-        return df
+        return _sort_option_like_dataframe(df)
 
     def _load_open_interest_data(self, conn: sqlite3.Connection, start: datetime, end: datetime) -> pd.DataFrame:
         try:
@@ -192,8 +197,7 @@ class HistoricalDataProvider:
                 SELECT *
                 FROM option_open_interest
                 WHERE symbol = ? AND timestamp >= ? AND timestamp <= ?
-                ORDER BY timestamp, expiry_date, strike_price, option_type
-            """
+                ORDER BY """ + _canonical_option_order_by(include_timestamp=True)
             df = pd.read_sql_query(query, conn, params=(
                 self.symbol, start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")
             ))
@@ -207,7 +211,7 @@ class HistoricalDataProvider:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce")
         df.columns = [c.lower() for c in df.columns]
-        return df
+        return _sort_option_like_dataframe(df)
 
     def _load_open_interest_5m_data(self, conn: sqlite3.Connection, start: datetime, end: datetime) -> pd.DataFrame:
         try:
@@ -218,8 +222,7 @@ class HistoricalDataProvider:
                 SELECT *
                 FROM option_open_interest_5m
                 WHERE symbol = ? AND timestamp >= ? AND timestamp <= ?
-                ORDER BY timestamp, expiry_date, strike_price, option_type
-            """
+                ORDER BY """ + _canonical_option_order_by(include_timestamp=True)
             df = pd.read_sql_query(query, conn, params=(
                 self.symbol, start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")
             ))
@@ -232,7 +235,7 @@ class HistoricalDataProvider:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce")
         df.columns = [c.lower() for c in df.columns]
-        return df
+        return _sort_option_like_dataframe(df)
 
     def fetch_market_data(self, current_time: datetime, interval: str, limit: int = 300) -> pd.DataFrame:
         """Returns last `limit` fully known candles for the requested interval."""
@@ -372,7 +375,8 @@ class HistoricalDataProvider:
         if self._open_interest_data.empty:
             return pd.DataFrame()
         current_ts = pd.Timestamp(current_time)
-        return self._open_interest_data[self._open_interest_data["timestamp"] <= current_ts].copy()
+        history = self._open_interest_data[self._open_interest_data["timestamp"] <= current_ts].copy()
+        return _sort_option_like_dataframe(history)
 
     def fetch_open_interest_5m_snapshot(self, current_time: datetime) -> List[Dict[str, Any]]:
         """Return the latest derived 5-minute OI snapshot at or before current_time."""
@@ -393,7 +397,8 @@ class HistoricalDataProvider:
         if self._open_interest_5m_data.empty:
             return pd.DataFrame()
         current_bucket = pd.Timestamp(current_time).floor("5min")
-        return self._open_interest_5m_data[self._open_interest_5m_data["timestamp"] <= current_bucket].copy()
+        history = self._open_interest_5m_data[self._open_interest_5m_data["timestamp"] <= current_bucket].copy()
+        return _sort_option_like_dataframe(history)
 
     def _latest_snapshot(self, df: pd.DataFrame, current_ts: pd.Timestamp) -> pd.DataFrame:
         if df is None or df.empty:
@@ -402,7 +407,8 @@ class HistoricalDataProvider:
         if valid_records.empty:
             return pd.DataFrame()
         latest_ts = valid_records["timestamp"].max()
-        return valid_records[valid_records["timestamp"] == latest_ts].copy()
+        snapshot = valid_records[valid_records["timestamp"] == latest_ts].copy()
+        return _sort_option_like_dataframe(snapshot)
 
     def _next_snapshot(self, df: pd.DataFrame, current_ts: pd.Timestamp, strict: bool = True) -> pd.DataFrame:
         if df is None or df.empty:
