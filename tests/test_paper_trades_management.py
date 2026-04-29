@@ -130,6 +130,61 @@ class PaperTradesManagementTests(unittest.TestCase):
         trader.last_signal_attempt = None
         self.assertTrue(trader.should_attempt_new_signal())
 
+    def test_parse_expiry_from_monthly_symbol_does_not_consume_strike_digits(self):
+        module, logger = self._load_module()
+
+        with patch.object(module, "setup_paper_trading_logger", return_value=_logger_tuple(logger)), \
+             patch.object(module.os.path, "exists", return_value=False):
+            trader = module.PaperTraderDonchian("NIFTY50")
+
+        self.assertEqual(
+            trader.parse_expiry_from_symbol("NIFTY26APR24100CE"),
+            datetime(2026, 4, 28).date(),
+        )
+        self.assertEqual(
+            trader.parse_expiry_from_symbol("NIFTY26APR23950PE"),
+            datetime(2026, 4, 28).date(),
+        )
+
+    def test_execute_paper_trade_persists_explicit_expiry_fields(self):
+        module, logger = self._load_module()
+
+        with patch.object(module, "setup_paper_trading_logger", return_value=_logger_tuple(logger)), \
+             patch.object(module.os.path, "exists", return_value=False):
+            trader = module.PaperTraderDonchian("NIFTY50")
+
+        signal = {
+            "ce_option": {
+                "tradingsymbol": "NIFTY26APR24100CE",
+                "last_price": 14.95,
+                "expiry_date": "2026-04-28",
+            },
+            "pe_option": {
+                "tradingsymbol": "NIFTY26APR23950PE",
+                "last_price": 10.10,
+                "expiry_date": "2026-04-28",
+            },
+        }
+
+        self.assertTrue(trader.execute_paper_trade(signal))
+        self.assertEqual(trader.position.get("ce_expiry"), "2026-04-28")
+        self.assertEqual(trader.position.get("pe_expiry"), "2026-04-28")
+
+    def test_is_position_expired_prefers_persisted_expiry_over_symbol_fallback(self):
+        module, logger = self._load_module()
+
+        with patch.object(module, "setup_paper_trading_logger", return_value=_logger_tuple(logger)), \
+             patch.object(module.os.path, "exists", return_value=False):
+            trader = module.PaperTraderDonchian("NIFTY50")
+
+        trader.position = self._build_position()
+        trader.position["ce_symbol"] = "NIFTY26APR24100CE"
+        trader.position["pe_symbol"] = "NIFTY26APR23950PE"
+        trader.position["ce_expiry"] = "2099-04-30"
+        trader.position["pe_expiry"] = "2099-04-30"
+
+        self.assertFalse(trader.is_position_expired())
+
 
 if __name__ == "__main__":
     unittest.main()

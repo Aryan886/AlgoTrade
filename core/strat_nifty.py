@@ -13,6 +13,7 @@ import pandas as pd
 from utils.db_func import (
     calculate_and_store_high_accuracy_delta,
     fetch_latest_delta_data,
+    fetch_latest_delta_snapshot,
     fetch_market_data,
     fetch_vix_data,
 )
@@ -130,6 +131,7 @@ class NiftyOptionsStrategy:
         self.position_logger = nifty_logger
 
         self.state: Dict[str, Any] = self._load_state()
+        self._last_options_snapshot_timestamp: Optional[str] = None
 
     def _now(self) -> datetime:
         return datetime.now()
@@ -223,10 +225,20 @@ class NiftyOptionsStrategy:
         """Override this in BacktestableStrategy to use HistoricalDataProvider."""
         options_data = fetch_latest_delta_data(symbol=self.symbol)
         if options_data:
+            snapshot = fetch_latest_delta_snapshot(symbol=self.symbol)
+            self._last_options_snapshot_timestamp = snapshot.get("timestamp")
+            return options_data
+
+        snapshot = fetch_latest_delta_snapshot(symbol=self.symbol)
+        options_data = snapshot.get("options_data") or []
+        self._last_options_snapshot_timestamp = snapshot.get("timestamp")
+        if options_data:
             return options_data
 
         calculate_and_store_high_accuracy_delta(symbol=self.symbol)
-        return fetch_latest_delta_data(symbol=self.symbol)
+        snapshot = fetch_latest_delta_snapshot(symbol=self.symbol)
+        self._last_options_snapshot_timestamp = snapshot.get("timestamp")
+        return snapshot.get("options_data") or []
 
     def _get_df(self, interval: str, limit: Optional[int] = 300) -> pd.DataFrame:
         df = self._fetch_market_data(interval, limit)
@@ -433,12 +445,23 @@ class NiftyOptionsStrategy:
                 return 0.0
 
         chosen = min(candidates, key=lambda x: (x.get("expiry") or "", -ltp_key(x)))
+        candidate_expiries = sorted({str(c.get("expiry") or c.get("expiry_date") or "")[:10] for c in candidates})
         # standardize fields for downstream code
         chosen = dict(chosen)
         chosen["tradingsymbol"] = chosen.get("tradingsymbol")
         chosen["last_price"] = chosen.get("ltp")
         chosen["option_type"] = option_type
         chosen["strike_price"] = int(strike)
+        self.logger.info(
+            "STANDARD_NIFTY option pick: type=%s strike=%s candidates=%s expiries=%s chosen=%s chosen_expiry=%s snapshot_ts=%s",
+            option_type,
+            strike,
+            len(candidates),
+            candidate_expiries,
+            chosen.get("tradingsymbol"),
+            str(chosen.get("expiry") or chosen.get("expiry_date") or "")[:10],
+            self._last_options_snapshot_timestamp,
+        )
         return chosen
 
     def _build_legs(self, position_type: Literal["A", "B"], strikes: StrikePlan, options_data: List[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
@@ -755,6 +778,14 @@ class NiftyOptionsStrategy:
             self.logger.warning("Options cache missing; cannot form legs.")
             return None
 
+        distinct_expiries = sorted({str(o.get("expiry") or o.get("expiry_date") or "")[:10] for o in options_data if o.get("expiry") or o.get("expiry_date")})
+        self.logger.info(
+            "STANDARD_NIFTY entry evaluation using delta snapshot ts=%s with %s rows and expiries=%s",
+            self._last_options_snapshot_timestamp,
+            len(options_data),
+            distinct_expiries,
+        )
+
         spot = self._spot_price(df_1m)
         if spot is None:
             return None
@@ -765,6 +796,17 @@ class NiftyOptionsStrategy:
         legs = self._build_legs(position_type, strikes, options_data)
         if not legs:
             return None
+
+        for leg in legs:
+            self.logger.info(
+                "STANDARD_NIFTY selected leg: symbol=%s strike=%s type=%s expiry=%s last_price=%s snapshot_ts=%s",
+                leg.get("tradingsymbol"),
+                leg.get("strike_price"),
+                leg.get("option_type"),
+                leg.get("expiry"),
+                leg.get("last_price"),
+                self._last_options_snapshot_timestamp,
+            )
 
         now_ts = self._latest_ts(df_1m) or pd.Timestamp(now)
         reason = {

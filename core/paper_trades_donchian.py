@@ -1,5 +1,5 @@
 import pandas as pd 
-from datetime import datetime 
+from datetime import date, datetime, timedelta 
 import time
 from utils.utility import setup_paper_trading_logger
 from utils.db_func import (
@@ -48,6 +48,43 @@ class PaperTraderDonchian:
 
         #Load up position if available...
         self.load_position()
+
+    def _normalize_expiry_value(self, expiry_value) -> Optional[str]:
+        if expiry_value is None:
+            return None
+        if isinstance(expiry_value, datetime):
+            return expiry_value.date().isoformat()
+        if isinstance(expiry_value, date):
+            return expiry_value.isoformat()
+        expiry_text = str(expiry_value).strip()
+        if not expiry_text:
+            return None
+        try:
+            return date.fromisoformat(expiry_text[:10]).isoformat()
+        except ValueError:
+            return None
+
+    def _monthly_contract_expiry(self, year: int, month: int) -> date:
+        next_month = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+        cursor = next_month - timedelta(days=1)
+        while cursor.weekday() != 1:  # Tuesday
+            cursor -= timedelta(days=1)
+        return cursor
+
+    def _resolve_position_expiry(self, leg_key: str) -> Optional[date]:
+        if not self.position:
+            return None
+
+        expiry_field = f"{leg_key.lower()}_expiry"
+        stored_expiry = self._normalize_expiry_value(self.position.get(expiry_field))
+        if stored_expiry:
+            try:
+                return date.fromisoformat(stored_expiry)
+            except ValueError:
+                return None
+
+        symbol_field = f"{leg_key.lower()}_symbol"
+        return self.parse_expiry_from_symbol(self.position.get(symbol_field))
 
     def save_position(self):
         """Save current position and related data to JSON file"""
@@ -105,6 +142,18 @@ class PaperTraderDonchian:
                         self.position['ce_effectively_closed'] = False
                     if 'pe_effectively_closed' not in self.position:
                         self.position['pe_effectively_closed'] = False
+                    if 'ce_expiry' not in self.position:
+                        self.position['ce_expiry'] = self._normalize_expiry_value(
+                            self.parse_expiry_from_symbol(self.position.get('ce_symbol'))
+                        )
+                    else:
+                        self.position['ce_expiry'] = self._normalize_expiry_value(self.position.get('ce_expiry'))
+                    if 'pe_expiry' not in self.position:
+                        self.position['pe_expiry'] = self._normalize_expiry_value(
+                            self.parse_expiry_from_symbol(self.position.get('pe_symbol'))
+                        )
+                    else:
+                        self.position['pe_expiry'] = self._normalize_expiry_value(self.position.get('pe_expiry'))
                 
                 # Restore datetime objects
                 if data.get('entry_time'):
@@ -142,23 +191,26 @@ class PaperTraderDonchian:
 
     def parse_expiry_from_symbol(self, symbol: str):
         try:
-            m = re.search(r"(NIFTY|BANKNIFTY)(\d{2}[A-Z]{3}\d{0,2})", symbol)
-            if not m:
+            symbol_text = str(symbol or "").strip().upper()
+            if not symbol_text:
                 return None
 
-            expiry_str = m.group(2)  # e.g. "24JUN" or "24AUG01"
+            weekly_match = re.search(r"(?:NIFTY|BANKNIFTY)(\d{2}[A-Z]{3}\d{2})(?=\d{3,5}(?:CE|PE)$)", symbol_text)
+            if weekly_match:
+                try:
+                    weekly_expiry = datetime.strptime(weekly_match.group(1), "%y%b%d").date()
+                    if weekly_expiry.weekday() == 1:
+                        return weekly_expiry
+                except ValueError:
+                    pass
 
-            # Try weekly (YYMMMDD)
-            try:
-                return datetime.strptime(expiry_str, "%y%b%d").date()
-            except ValueError:
-                pass
-
-            # Try monthly (YYMMM)
-            try:
-                return datetime.strptime(expiry_str, "%y%b").date()
-            except ValueError:
-                pass
+            monthly_match = re.search(r"(?:NIFTY|BANKNIFTY)(\d{2}[A-Z]{3})(?=\d{3,5}(?:CE|PE)$)", symbol_text)
+            if monthly_match:
+                try:
+                    parsed_month = datetime.strptime(monthly_match.group(1), "%y%b")
+                    return self._monthly_contract_expiry(parsed_month.year, parsed_month.month)
+                except ValueError:
+                    pass
 
             return None
         except Exception as e:
@@ -174,13 +226,13 @@ class PaperTraderDonchian:
             pe_sym = self.position.get('pe_symbol')
 
             if ce_sym:
-                ce_expiry = self.parse_expiry_from_symbol(ce_sym)
+                ce_expiry = self._resolve_position_expiry("ce")
                 if ce_expiry and ce_expiry < current_date:
                     self.logger.info(f"CE option {ce_sym} expired on {ce_expiry}")
                     return True
 
             if pe_sym:
-                pe_expiry = self.parse_expiry_from_symbol(pe_sym)
+                pe_expiry = self._resolve_position_expiry("pe")
                 if pe_expiry and pe_expiry < current_date:
                     self.logger.info(f"PE option {pe_sym} expired on {pe_expiry}")
                     return True
@@ -199,12 +251,12 @@ class PaperTraderDonchian:
             pe_sym = self.position.get('pe_symbol')
 
             if ce_sym:
-                ce_expiry = self.parse_expiry_from_symbol(ce_sym)
+                ce_expiry = self._resolve_position_expiry("ce")
                 if ce_expiry and ce_expiry == current_date:
                     return True
 
             if pe_sym:
-                pe_expiry = self.parse_expiry_from_symbol(pe_sym)
+                pe_expiry = self._resolve_position_expiry("pe")
                 if pe_expiry and pe_expiry == current_date:
                     return True
 
@@ -714,20 +766,27 @@ class PaperTraderDonchian:
             # best candidate
             best = min(candidates, key=lambda x: abs(abs(x["delta"]) - abs(remaining_delta)))
             best_sym, best_price = best["tradingsymbol"], best.get("last_price") or best.get("ltp")
+            best_expiry = self._normalize_expiry_value(best.get("expiry") or best.get("expiry_date"))
             self.logger.info(f"Best replacement: {best_sym} price={best_price}, delta={best['delta']}")
 
             if target_type == "CE":
                 self.position["ce_symbol"] = best_sym
+                self.position["ce_expiry"] = best_expiry
                 self.position["ce_closed"] = False
                 self.position["ce_effectively_closed"] = False  # Clear effectively closed flag
                 self.position["entry_prices"]["ce"] = best_price
+                self.position["entry_prices"]["CE"] = best_price
                 self.position["current_prices"]["ce"] = best_price
+                self.position["current_prices"]["CE"] = best_price
             else:
                 self.position["pe_symbol"] = best_sym
+                self.position["pe_expiry"] = best_expiry
                 self.position["pe_closed"] = False
                 self.position["pe_effectively_closed"] = False  # Clear effectively closed flag
                 self.position["entry_prices"]["pe"] = best_price
+                self.position["entry_prices"]["PE"] = best_price
                 self.position["current_prices"]["pe"] = best_price
+                self.position["current_prices"]["PE"] = best_price
 
             # Reset waiting state when replacement is successful
             self.position["waiting_for_replacement"] = False
@@ -1220,6 +1279,8 @@ class PaperTraderDonchian:
             pe_sym = pe_opt.get("tradingsymbol")
             ce_price = ce_opt.get("last_price")
             pe_price = pe_opt.get("last_price")
+            ce_expiry = self._normalize_expiry_value(ce_opt.get("expiry_date") or ce_opt.get("expiry"))
+            pe_expiry = self._normalize_expiry_value(pe_opt.get("expiry_date") or pe_opt.get("expiry"))
 
             if not ce_sym or not pe_sym or ce_price is None or pe_price is None:
                 self.logger.error("Signal CE/PE missing 'tradingsymbol' or 'last_price' fields.")
@@ -1245,6 +1306,8 @@ class PaperTraderDonchian:
                 "id": str(uuid.uuid4()),
                 "ce_symbol": ce_sym,
                 "pe_symbol": pe_sym,
+                "ce_expiry": ce_expiry,
+                "pe_expiry": pe_expiry,
                 "entry_prices": {"ce": float(ce_price), "CE": float(ce_price), "pe": float(pe_price), "PE": float(pe_price)},
                 "current_prices": {"ce": float(ce_price), "CE": float(ce_price), "pe": float(pe_price), "PE": float(pe_price)},
                 "entry_time": now_iso,

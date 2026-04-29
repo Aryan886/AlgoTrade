@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Literal, Optional
 import pandas as pd
 
 from core.strat_nifty import NiftyOptionsStrategy
-from utils.db_func import fetch_latest_delta_data, fetch_latest_option_price, fetch_market_data
+from utils.db_func import fetch_latest_delta_data, fetch_latest_delta_snapshot, fetch_latest_option_price, fetch_market_data
 from utils.utility import setup_paper_trading_logger
 
 
@@ -138,6 +138,7 @@ class NiftyPaperBot:
 
         self.strategy = strategy or NiftyOptionsStrategy(symbol=self.symbol, state_file=state_file)
         self.position: Dict[str, Any] = self._load_position()
+        self._last_options_snapshot_timestamp: Optional[str] = None
 
         self.lots = [
             LotSpec(lot_id="lot1", timeframe="1m", sl_lookback=7),
@@ -160,7 +161,18 @@ class NiftyPaperBot:
 
     def _fetch_options_data(self) -> List[Dict[str, Any]]:
         """Override this in BacktestableBot to use HistoricalDataProvider."""
-        return fetch_latest_delta_data(symbol=self.symbol)
+        options_data = fetch_latest_delta_data(symbol=self.symbol)
+        if options_data:
+            snapshot = fetch_latest_delta_snapshot(symbol=self.symbol)
+            self._last_options_snapshot_timestamp = snapshot.get("timestamp")
+            return options_data
+
+        snapshot = fetch_latest_delta_snapshot(symbol=self.symbol)
+        self._last_options_snapshot_timestamp = snapshot.get("timestamp")
+        options_data = snapshot.get("options_data") or []
+        if options_data:
+            return options_data
+        return []
 
     # ---------------------------
     # Persistence
@@ -251,6 +263,13 @@ class NiftyPaperBot:
         # Build entry price map from option cache for mark-to-market
         options_data = self._fetch_options_data()
         price_map = _mark_to_market_price_map(options_data or [])
+        distinct_expiries = sorted({str(o.get("expiry") or o.get("expiry_date") or "")[:10] for o in options_data if o.get("expiry") or o.get("expiry_date")})
+        self.logger.info(
+            "STANDARD_NIFTY bot entry snapshot ts=%s rows=%s expiries=%s",
+            self._last_options_snapshot_timestamp,
+            len(options_data or []),
+            distinct_expiries,
+        )
 
         def normalize_leg(l: Dict[str, Any]) -> Dict[str, Any]:
             sym = l.get("tradingsymbol")
@@ -310,6 +329,16 @@ class NiftyPaperBot:
         self.trade_logger.info(msg)
         for leg in norm_legs:
             self.trade_logger.info(f"  {leg['side']} {leg['tradingsymbol']} @ {leg['entry_price']}")
+            self.logger.info(
+                "STANDARD_NIFTY persisted leg: side=%s symbol=%s strike=%s type=%s expiry=%s entry_price=%s snapshot_ts=%s",
+                leg.get("side"),
+                leg.get("tradingsymbol"),
+                leg.get("strike_price"),
+                leg.get("option_type"),
+                leg.get("expiry"),
+                leg.get("entry_price"),
+                self._last_options_snapshot_timestamp,
+            )
 
         self.save_position()
 
@@ -506,11 +535,25 @@ class NiftyPaperBot:
         if sym in price_map:
             current = float(price_map[sym])
             leg["last_price"] = current
+            self.position_logger.info(
+                "STANDARD_NIFTY mark-to-market from snapshot: symbol=%s expiry=%s price=%.2f snapshot_ts=%s",
+                sym,
+                leg.get("expiry"),
+                current,
+                self._last_options_snapshot_timestamp,
+            )
             return current
 
         fallback_price = self._lookup_held_leg_price(leg)
         if fallback_price is not None:
             leg["last_price"] = float(fallback_price)
+            self.position_logger.info(
+                "STANDARD_NIFTY mark-to-market from fallback: symbol=%s expiry=%s price=%.2f snapshot_ts=%s",
+                sym,
+                leg.get("expiry"),
+                float(fallback_price),
+                self._last_options_snapshot_timestamp,
+            )
             self.logger.warning(
                 f"Quote for held leg {sym} missing from latest snapshot; using last known contract price {fallback_price:.2f}."
             )
