@@ -1,3 +1,4 @@
+#Paper trading module for Donchian AO strategy
 import pandas as pd 
 from datetime import date, datetime, timedelta 
 import time
