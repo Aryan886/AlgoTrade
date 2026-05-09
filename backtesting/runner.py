@@ -221,17 +221,23 @@ class BacktestRunner:
             rows = int(info.get("rows") or 0)
             start = info.get("start")
             end = info.get("end")
-            required_start, required_end = required_windows[table_name]
-            status, warning_message, issue_message = self._evaluate_coverage_status(
-                table_name,
-                start,
-                end,
-                required_start,
-                required_end,
-            )
+            required_window = required_windows.get(table_name)
+            if required_window is None:
+                status, warning_message, issue_message = "OPTIONAL", None, None
+                required_display = "optional"
+            else:
+                required_start, required_end = required_window
+                status, warning_message, issue_message = self._evaluate_coverage_status(
+                    table_name,
+                    start,
+                    end,
+                    required_start,
+                    required_end,
+                )
+                required_display = f"{required_start} -> {required_end}"
             print(
                 f"  - {table_name}: rows={rows}, available={self._format_range(start, end)}, "
-                f"required={required_start} -> {required_end}, status={status}"
+                f"required={required_display}, status={status}"
             )
             if warning_message:
                 print(f"WARNING: {warning_message}")
@@ -267,14 +273,12 @@ class BacktestRunner:
                 "fresh VIX snapshots are unavailable after this timestamp.",
             ))
 
-        for table_name in ("delta_cache", "option_data"):
-            table_end = coverage.get(table_name, {}).get("end")
-            if table_end is None:
-                continue
+        delta_end = coverage.get("delta_cache", {}).get("end")
+        if delta_end is not None:
             candidates.append((
-                table_name,
-                table_end - fill_headroom,
-                f"{table_name} needs post-signal fill headroom through {fill_headroom}.",
+                "delta_cache",
+                delta_end - fill_headroom,
+                f"delta_cache needs post-signal fill headroom through {fill_headroom}.",
             ))
 
         if not candidates:
@@ -319,7 +323,7 @@ class BacktestRunner:
                 required_end,
             )
 
-        if table_name in {"vix_data", "delta_cache", "option_data"}:
+        if table_name in {"vix_data", "delta_cache"}:
             if available_start > required_end:
                 return "MISSING", None, self._coverage_issue_message(
                     table_name,
@@ -370,7 +374,6 @@ class BacktestRunner:
             "market_data_1m": (effective_start, effective_end),
             "vix_data": (effective_start, max(effective_start, entry_required_end)),
             "delta_cache": (fill_required_start, max(fill_required_start, fill_required_end)),
-            "option_data": (fill_required_start, max(fill_required_start, fill_required_end)),
         }
 
     def _coverage_warning_message(
@@ -415,14 +418,9 @@ class BacktestRunner:
                 "so this coverage gap would otherwise show repeated "
                 "'VIX data missing; cannot determine VIX regime.' warnings and produce zero trades."
             )
-        if table_name == "option_data":
-            return (
-                f"{base} Strict contract validation and fill snapshot logic depend on option_data, "
-                "so trades may still be blocked even after VIX coverage is restored."
-            )
         if table_name == "delta_cache":
             return (
-                f"{base} Strict backtest pricing and option snapshot merges depend on delta_cache, "
+                f"{base} Strict contract validation, fill pricing, and option snapshots depend on delta_cache, "
                 "so entries or exits can fail without it."
             )
         return base

@@ -94,7 +94,7 @@ class BacktestRunnerCoverageTests(unittest.TestCase):
         self.assertEqual(result.num_trades, 0)
         runner.bot.run_once.assert_called_once()
 
-    def test_run_fails_fast_with_option_snapshot_guidance_when_option_data_is_missing(self):
+    def test_run_proceeds_when_option_data_is_missing_but_delta_cache_covers_window(self):
         start_date = datetime(2026, 4, 2, 9, 15)
         end_date = datetime(2026, 4, 2, 15, 30)
         runner = self._make_runner(start_date, end_date)
@@ -106,13 +106,18 @@ class BacktestRunnerCoverageTests(unittest.TestCase):
         }
         fake_provider = FakeCoverageProvider(start_date, end_date, coverage, [datetime(2026, 4, 2)])
         runner.data_provider = fake_provider
+        runner.bot.run_once = Mock()
+        runner.bot.get_unrealized_pnl = Mock(return_value=0.0)
 
-        with self.assertRaises(BacktestDataCoverageError) as ctx:
-            runner.run()
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            result = runner.run()
 
-        message = str(ctx.exception)
-        self.assertIn("option_data does not fully cover", message)
-        self.assertIn("Strict contract validation and fill snapshot logic depend on option_data", message)
+        output = buffer.getvalue()
+        self.assertIn("option_data: rows=0", output)
+        self.assertIn("required=optional, status=OPTIONAL", output)
+        self.assertEqual(result.num_trades, 0)
+        runner.bot.run_once.assert_called_once()
 
     def test_run_warns_and_proceeds_when_snapshot_tables_start_after_preferred_start(self):
         start_date = datetime(2026, 3, 24, 9, 15)
@@ -266,6 +271,6 @@ class BacktestRunnerCoverageTests(unittest.TestCase):
         output = buffer.getvalue()
         self.assertIn("Truncating backtest end to the latest fully supported point-in-time", output)
         self.assertIn("delta_cache limits execution to 2026-03-24 14:00:00", output)
-        self.assertIn("option_data limits execution to 2026-03-24 14:00:00", output)
+        self.assertNotIn("option_data limits execution", output)
         self.assertEqual(result.num_trades, 0)
         self.assertGreater(runner.bot.run_once.call_count, 0)
