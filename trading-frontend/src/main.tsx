@@ -1,12 +1,14 @@
-import React  from "react";
+import React from "react";
 import ReactDOM from "react-dom/client";
+import { BrowserRouter } from "react-router-dom";
+
 import App from "./App";
-import { StatusProvider } from "./context/StatusProvider";
+import "./index.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <StatusProvider>
+    <BrowserRouter>
       <App />
-    </StatusProvider>
-  </React.StrictMode>
-)
+    </BrowserRouter>
+  </React.StrictMode>,
+);

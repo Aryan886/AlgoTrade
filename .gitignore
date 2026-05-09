@@ -14,6 +14,8 @@ database/datas
 *.yml
 access_token.txt
 *.md
+!trading-frontend/package.json
+!trading-frontend/package-lock.json
 
 # Ignore virtual environments
 venv/

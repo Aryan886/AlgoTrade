@@ -55,6 +55,21 @@ def build_summary_dataframe(result) -> pd.DataFrame:
     )
 
 
+def build_summary_metrics(result) -> list[dict[str, object]]:
+    """Return summary rows in a frontend-friendly shape."""
+    summary_df = build_summary_dataframe(result)
+    rows: list[dict[str, object]] = []
+    for row in summary_df.itertuples(index=False):
+        rows.append(
+            {
+                "metric": row.metric,
+                "value": row.value,
+                "formattedValue": _format_metric(row.metric, row.value),
+            }
+        )
+    return rows
+
+
 def _next_available_output_path(output: Path) -> Path:
     """Return a non-destructive output path by appending a numeric suffix when needed."""
     candidate = output
@@ -268,6 +283,48 @@ def _compute_sl_metrics(trades) -> dict:
         "trades_time_exit": len(time_exit_trades),
         "total_trades": len(closed),
         "sl_by_lot": sl_by_lot,
+    }
+
+
+def build_report_payload(result, trades_df: pd.DataFrame | None = None) -> dict[str, object]:
+    """Return the structured sections behind the HTML showcase."""
+    trades_df = trades_df if trades_df is not None else pd.DataFrame()
+    sl_metrics = _compute_sl_metrics(getattr(result, "trades", []) or [])
+    return {
+        "summary": build_summary_metrics(result),
+        "kpis": {
+            "totalPnl": float(getattr(result, "total_pnl", 0.0) or 0.0),
+            "trades": int(getattr(result, "num_trades", 0) or 0),
+            "winRate": float(getattr(result, "win_rate", 0.0) or 0.0),
+            "maxDrawdown": float(getattr(result, "max_drawdown", 0.0) or 0.0),
+            "dailySharpe": float(getattr(result, "daily_sharpe_ratio", getattr(result, "sharpe_ratio", 0.0)) or 0.0),
+            "expectancy": float(getattr(result, "expectancy", 0.0) or 0.0),
+        },
+        "equityCurve": [
+            {
+                "timestamp": ts.isoformat(sep=" ") if hasattr(ts, "isoformat") else str(ts),
+                "equity": float(value),
+            }
+            for ts, value in list(getattr(result, "equity_curve", []) or [])
+        ],
+        "slAnalysis": {
+            "totalAdjustments": int(sl_metrics.get("total_adjustments", 0) or 0),
+            "avgAdjustmentsPerTrade": float(sl_metrics.get("avg_adjustments_per_trade", 0.0) or 0.0),
+            "avgSlMovementPct": float(sl_metrics.get("avg_sl_movement_pct", 0.0) or 0.0),
+            "tradesHitSl": int(sl_metrics.get("trades_hit_sl", 0) or 0),
+            "tradesTimeExit": int(sl_metrics.get("trades_time_exit", 0) or 0),
+            "totalTrades": int(sl_metrics.get("total_trades", 0) or 0),
+            "slByLot": [
+                {"lotId": str(lot_id), "count": int(count)}
+                for lot_id, count in sorted((sl_metrics.get("sl_by_lot", {}) or {}).items())
+            ],
+        },
+        "dataQuality": {
+            "skippedEntries": int(getattr(result, "skipped_entries", 0) or 0),
+            "warnings": list(getattr(result, "data_quality_warnings", []) or []),
+            "healthy": not bool(getattr(result, "data_quality_warnings", []) or []) and int(getattr(result, "skipped_entries", 0) or 0) == 0,
+        },
+        "tradeCount": int(len(trades_df.index)) if trades_df is not None else 0,
     }
 
 
