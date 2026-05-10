@@ -6,18 +6,32 @@ import ShowcaseReport from "../components/reports/ShowcaseReport";
 import type { BacktestRunResponse } from "../types/dashboard";
 
 const STORAGE_KEY = "algotrade-latest-backtest";
+const DEFAULT_START_DATE = "2026-03-26";
+const DEFAULT_END_DATE = "2026-03-27";
 
 function readStoredRun(): BacktestRunResponse | null {
-  const raw = sessionStorage.getItem(STORAGE_KEY);
-  if (!raw) {
-    return null;
-  }
-
   try {
+    const raw = sessionStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
     return JSON.parse(raw) as BacktestRunResponse;
   } catch {
-    sessionStorage.removeItem(STORAGE_KEY);
+    try {
+      sessionStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // Ignore storage cleanup failures and fall back to an uncached view.
+    }
     return null;
+  }
+}
+
+function storeRun(run: BacktestRunResponse) {
+  try {
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(run));
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -27,12 +41,13 @@ function toFileHref(path: string) {
 
 export default function BacktestsPage() {
   const initial = useMemo(() => readStoredRun(), []);
-  const [startDate, setStartDate] = useState(initial?.meta.startDate ?? "2026-03-26");
-  const [endDate, setEndDate] = useState(initial?.meta.endDate ?? "2026-03-27");
+  const [startDate, setStartDate] = useState(initial?.meta.startDate ?? DEFAULT_START_DATE);
+  const [endDate, setEndDate] = useState(initial?.meta.endDate ?? DEFAULT_END_DATE);
   const [report, setReport] = useState<BacktestRunResponse | null>(initial);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [exportState, setExportState] = useState<{ message: string; path: string } | null>(null);
+  const [storageMessage, setStorageMessage] = useState<string | null>(null);
 
   async function handleRun() {
     try {
@@ -45,7 +60,11 @@ export default function BacktestsPage() {
       });
       startTransition(() => {
         setReport(payload);
-        sessionStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+        setStorageMessage(
+          storeRun(payload)
+            ? null
+            : "This run is available now, but it was too large to keep in session storage for refresh."
+        );
       });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Backtest failed.");
@@ -76,7 +95,7 @@ export default function BacktestsPage() {
     <>
       <PageHeader
         title="Backtests"
-        subtitle="Real synchronous backtests for the Nifty Options Strategy, capped to a 5-trading-day MVP window."
+        subtitle="Real synchronous backtests for the Nifty Options Strategy across any supported historical date range."
       />
 
       <section className="surface-card">
@@ -111,10 +130,11 @@ export default function BacktestsPage() {
           ) : null}
         </div>
 
-        <p className="helper-text">The UI preserves the latest successful run in session storage so refresh keeps the showcase visible.</p>
+        <p className="helper-text">Larger ranges may take longer to run. The latest successful run is cached in session storage when the payload fits.</p>
 
         {error ? <div className="error-banner">{error}</div> : null}
         {exportState ? <div className="success-banner">{exportState.message}: <span className="mono">{exportState.path}</span></div> : null}
+        {storageMessage ? <div className="info-banner">{storageMessage}</div> : null}
       </section>
 
       <ShowcaseReport

@@ -200,10 +200,6 @@ def _validate_backtest_request(payload: BacktestRunRequest) -> BacktestRunReques
     end_day = date.fromisoformat(payload.endDate)
     if end_day < start_day:
         raise HTTPException(status_code=400, detail="endDate must be on or after startDate.")
-
-    trading_days = len(pd.bdate_range(start_day, end_day))
-    if trading_days > 5:
-        raise HTTPException(status_code=400, detail="Backtest window cannot exceed 5 trading days in the MVP.")
     return payload
 
 

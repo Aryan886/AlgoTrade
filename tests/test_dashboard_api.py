@@ -79,18 +79,29 @@ class DashboardApiTests(unittest.TestCase):
         self.assertIn("tradeCount", daily.json()[0])
         self.assertIn("winRate", monthly.json()[0])
 
-    def test_backtests_reject_non_nifty_and_oversized_windows(self):
+    def test_backtests_reject_non_nifty_and_invalid_date_order(self):
         wrong_strategy = self.client.post(
             "/api/backtests/run",
             json={"strategyId": "sma-spread", "startDate": "2026-03-26", "endDate": "2026-03-27"},
         )
         self.assertEqual(wrong_strategy.status_code, 400)
 
-        oversized = self.client.post(
+        invalid_date_order = self.client.post(
             "/api/backtests/run",
-            json={"strategyId": "nifty-options", "startDate": "2026-03-20", "endDate": "2026-03-30"},
+            json={"strategyId": "nifty-options", "startDate": "2026-03-30", "endDate": "2026-03-20"},
         )
-        self.assertEqual(oversized.status_code, 400)
+        self.assertEqual(invalid_date_order.status_code, 400)
+
+    def test_backtests_allow_longer_supported_windows(self):
+        longer_window = self.client.post(
+            "/api/backtests/run",
+            json={"strategyId": "nifty-options", "startDate": "2026-03-20", "endDate": "2026-03-27"},
+        )
+        self.assertEqual(longer_window.status_code, 200, longer_window.text)
+        payload = longer_window.json()
+        self.assertIn("summary", payload)
+        self.assertEqual(payload["meta"]["startDate"], "2026-03-20")
+        self.assertEqual(payload["meta"]["endDate"], "2026-03-27")
 
     def test_backtest_run_and_export_html(self):
         run = self.client.post(
