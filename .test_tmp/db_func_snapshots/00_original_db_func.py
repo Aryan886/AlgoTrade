@@ -316,132 +316,6 @@ def _row_matches_required_contract(row: Dict[str, Any], contract: Dict[str, Any]
     return True
 
 
-_CONTRACT_LOOKUP_FIELD_GROUPS = (
-    ("option_type",),
-    ("strike_price",),
-    ("expiry_date",),
-    ("option_type", "strike_price"),
-    ("option_type", "expiry_date"),
-    ("strike_price", "expiry_date"),
-    ("option_type", "strike_price", "expiry_date"),
-)
-
-
-def _normalize_option_row_contract_fields(row: Dict[str, Any]) -> Dict[str, Any]:
-    strike_price = row.get("strike_price")
-    try:
-        normalized_strike = int(float(strike_price)) if strike_price is not None else None
-    except Exception:
-        normalized_strike = None
-
-    return {
-        "tradingsymbol": str(row.get("tradingsymbol") or "").upper(),
-        "option_type": str(row.get("option_type") or "").upper(),
-        "strike_price": normalized_strike,
-        "expiry_date": str(row.get("expiry_date") or row.get("expiry") or "")[:10],
-    }
-
-
-def _build_required_contract_lookup(option_rows: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
-    tradingsymbol_rows: Dict[str, Dict[str, Any]] = {}
-    field_group_rows: Dict[tuple[str, ...], Dict[tuple[Any, ...], Dict[str, Any]]] = {
-        field_group: {}
-        for field_group in _CONTRACT_LOOKUP_FIELD_GROUPS
-    }
-
-    for row in option_rows or []:
-        normalized_row = _normalize_option_row_contract_fields(row)
-        tradingsymbol = normalized_row["tradingsymbol"]
-        if tradingsymbol and tradingsymbol not in tradingsymbol_rows:
-            tradingsymbol_rows[tradingsymbol] = row
-
-        for field_group, grouped_rows in field_group_rows.items():
-            key = tuple(normalized_row[field_name] for field_name in field_group)
-            if key not in grouped_rows:
-                grouped_rows[key] = row
-
-    return {
-        "tradingsymbol_rows": tradingsymbol_rows,
-        "field_group_rows": field_group_rows,
-    }
-
-
-def _get_required_contract_lookup_key(contract: Dict[str, Any]) -> tuple[tuple[str, ...], Optional[tuple[Any, ...]]]:
-    tradingsymbol = contract.get("tradingsymbol")
-    if tradingsymbol:
-        return ("tradingsymbol",), (str(tradingsymbol).upper(),)
-
-    field_names = []
-    field_values = []
-
-    option_type = contract.get("option_type")
-    if option_type:
-        field_names.append("option_type")
-        field_values.append(option_type)
-
-    strike_price = contract.get("strike_price")
-    if strike_price is not None:
-        field_names.append("strike_price")
-        field_values.append(strike_price)
-
-    expiry_date = contract.get("expiry_date")
-    if expiry_date:
-        field_names.append("expiry_date")
-        field_values.append(expiry_date)
-
-    if not field_names:
-        return tuple(), None
-
-    return tuple(field_names), tuple(field_values)
-
-
-def _find_matching_required_contract_row(
-    lookup: Dict[str, Any],
-    contract: Dict[str, Any],
-) -> Optional[Dict[str, Any]]:
-    field_names, key = _get_required_contract_lookup_key(contract)
-    if not key:
-        return None
-    if field_names == ("tradingsymbol",):
-        return lookup["tradingsymbol_rows"].get(key[0])
-    return lookup["field_group_rows"].get(field_names, {}).get(key)
-
-
-def _build_required_contract_match_sets(required_contracts: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
-    normalized_required = _normalize_required_contracts(required_contracts)
-    match_sets: Dict[str, Any] = {
-        "tradingsymbols": set(),
-        "field_groups": {
-            field_group: set()
-            for field_group in _CONTRACT_LOOKUP_FIELD_GROUPS
-        },
-    }
-
-    for contract in normalized_required:
-        tradingsymbol = contract.get("tradingsymbol")
-        if tradingsymbol:
-            match_sets["tradingsymbols"].add(tradingsymbol)
-            continue
-
-        field_names, key = _get_required_contract_lookup_key(contract)
-        if field_names and key:
-            match_sets["field_groups"][field_names].add(key)
-
-    return match_sets
-
-
-def _row_is_explicitly_required(row: Dict[str, Any], required_match_sets: Dict[str, Any]) -> bool:
-    normalized_row = _normalize_option_row_contract_fields(row)
-    tradingsymbol = normalized_row["tradingsymbol"]
-    if tradingsymbol and tradingsymbol in required_match_sets["tradingsymbols"]:
-        return True
-
-    for field_group, values in required_match_sets["field_groups"].items():
-        if tuple(normalized_row[field_name] for field_name in field_group) in values:
-            return True
-    return False
-
-
 def find_missing_required_contracts(
     option_rows: List[Dict[str, Any]],
     required_contracts: Optional[List[Dict[str, Any]]] = None,
@@ -451,9 +325,8 @@ def find_missing_required_contracts(
     if not normalized_required:
         return missing
 
-    lookup = _build_required_contract_lookup(option_rows)
     for contract in normalized_required:
-        if _find_matching_required_contract_row(lookup, contract) is not None:
+        if any(_row_matches_required_contract(row, contract) for row in option_rows or []):
             continue
         missing.append(contract)
 
@@ -467,14 +340,12 @@ def _build_exact_contract_delta_rows(
 ) -> List[Dict[str, Any]]:
     exact_rows: List[Dict[str, Any]] = []
     iv_calc = ProductionIVCalculator()
-    normalized_required = _normalize_required_contracts(required_contracts)
-    if not normalized_required:
-        return exact_rows
-    lookup = _build_required_contract_lookup(option_rows)
-    expiry_time_cache: Dict[str, Optional[float]] = {}
 
-    for contract in normalized_required:
-        matched_row = _find_matching_required_contract_row(lookup, contract)
+    for contract in _normalize_required_contracts(required_contracts):
+        matched_row = next(
+            (row for row in option_rows or [] if _row_matches_required_contract(row, contract)),
+            None,
+        )
         if not matched_row:
             continue
 
@@ -491,10 +362,7 @@ def _build_exact_contract_delta_rows(
         try:
             strike_int = int(float(strike_price))
             iv_float = float(iv_value)
-            expiry_key = str(expiry_date)
-            if expiry_key not in expiry_time_cache:
-                expiry_time_cache[expiry_key] = iv_calc.calculate_time_to_expiry(expiry_key)
-            T = expiry_time_cache[expiry_key]
+            T = iv_calc.calculate_time_to_expiry(str(expiry_date))
             if T is None or T <= 0:
                 continue
             delta_value = iv_calc.calculate_delta(
@@ -699,58 +567,51 @@ def store_market_data(df, symbol: str = 'NIFTY50', interval: str = '5m', vix_val
         if missing_cols:
             print(f"[WARN] DataFrame is missing columns: {missing_cols}")
 
-        columns_in_order = list(df.columns)
+        # Case-insensitive safe_get_value
+        def safe_get_value(row, column_name):
+            try:
+                candidates = []
+                if column_name in row.index:
+                    candidates.append(column_name)
 
-        def resolve_column_name(column_name: str) -> Optional[str]:
-            if column_name in df.columns:
-                return str(column_name)
-            lower_name = str(column_name).lower()
-            for existing_name in columns_in_order:
-                if str(existing_name).lower() == lower_name:
-                    return str(existing_name)
-            return None
+                lower_name = str(column_name).lower()
+                for col in row.index:
+                    if col not in candidates and str(col).lower() == lower_name:
+                        candidates.append(col)
 
-        def extract_float_values(column_name: str) -> List[Optional[float]]:
-            actual_column = resolve_column_name(column_name)
-            if actual_column is None:
-                return [None] * len(df)
-            return [
-                float(value) if pd.notna(value) else None
-                for value in pd.to_numeric(df[actual_column], errors="coerce").tolist()
-            ]
+                for col in candidates:
+                    value = row[col]
+                    if pd.notna(value):
+                        return float(value)
 
-        timestamp_column = resolve_column_name("timestamp")
-        timestamp_values = df[timestamp_column].tolist() if timestamp_column is not None else list(df.index)
-        timestamp_strings = [
-            timestamp_val.strftime("%Y-%m-%d %H:%M:%S") if hasattr(timestamp_val, 'strftime') else str(timestamp_val)
-            for timestamp_val in timestamp_values
-        ]
+                return None
+            except Exception:
+                return None
 
-        open_values = extract_float_values('open')
-        high_values = extract_float_values('high')
-        low_values = extract_float_values('low')
-        close_values = extract_float_values('close')
-        ao_values = extract_float_values('ao_value')
-        donchian_upper_values = extract_float_values('donchian_upper')
-        donchian_lower_values = extract_float_values('donchian_lower')
-        donchian_mid_values = extract_float_values('donchian_mid')
-        sl_values = extract_float_values('SL')
-        sh_values = extract_float_values('SH')
+        rows = []
+        for idx, row in df.iterrows():
+            # Get timestamp from row (it's now a column, not index)
+            timestamp_val = row.get('timestamp', idx)
 
-        rows = list(zip(
-            timestamp_strings,
-            [symbol] * len(df),
-            open_values,
-            high_values,
-            low_values,
-            close_values,
-            ao_values,
-            donchian_upper_values,
-            donchian_lower_values,
-            donchian_mid_values,
-            sl_values,
-            sh_values,
-        ))
+            if hasattr(timestamp_val, 'strftime'):
+                timestamp_str = timestamp_val.strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                timestamp_str = str(timestamp_val)
+
+            rows.append((
+                timestamp_str,
+                symbol,
+                safe_get_value(row, 'open'),
+                safe_get_value(row, 'high'),
+                safe_get_value(row, 'low'),
+                safe_get_value(row, 'close'),
+                safe_get_value(row, 'ao_value'),
+                safe_get_value(row, 'donchian_upper'),
+                safe_get_value(row, 'donchian_lower'),
+                safe_get_value(row, 'donchian_mid'),
+                safe_get_value(row, 'SL'),
+                safe_get_value(row, 'SH')
+            ))
 
         if not rows:
             print(f"No market data rows to store in {table_name}.")
@@ -858,39 +719,22 @@ def store_vix_data_bulk(df, symbol: str, db_path=DB_PATH):
     ensure_db_dir(db_path)
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    timestamp_strings = [
-        ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, 'strftime') else str(ts)
-        for ts in df.index.tolist()
-    ]
-    if 'vix_value' in df.columns:
-        vix_series = df['vix_value']
-    elif 'vix' in df.columns:
-        vix_series = df['vix']
-    else:
-        vix_series = pd.Series([None] * len(df), index=df.index)
 
-    rows = [
-        (timestamp_str, symbol, float(vix_value))
-        for timestamp_str, vix_value in zip(timestamp_strings, vix_series.tolist())
-        if vix_value is not None and pd.notna(vix_value)
-    ]
+    for ts, row in df.iterrows():
+        # Convert timestamp to string
+        timestamp_str = ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, 'strftime') else str(ts)
+        
+        # Get VIX value
+        vix_value = row.get('vix_value', row.get('vix', None))
+        
+        if vix_value is not None and pd.notna(vix_value):
+            cursor.execute("""
+                INSERT INTO vix_data (timestamp, symbol, vix_value)
+                VALUES (?, ?, ?)
+            """, (timestamp_str, symbol, float(vix_value)))
 
-    try:
-        if rows:
-            conn.execute("BEGIN")
-            try:
-                cursor.executemany("""
-                    INSERT INTO vix_data (timestamp, symbol, vix_value)
-                    VALUES (?, ?, ?)
-                """, rows)
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-        else:
-            conn.commit()
-    finally:
-        conn.close()
+    conn.commit()
+    conn.close()
     print(f"Stored {len(df)} VIX data points for {symbol} successfully!!!")
 
 def fetch_vix_data(symbol: str = 'NIFTY50', start=None, end=None, db_path=DB_PATH):
@@ -1510,8 +1354,7 @@ def store_high_accuracy_options_data(
     max_expiry_date = date.today() + timedelta(days=14)
     skipped_invalid_expiry = 0
     skipped_far_expiry = 0
-    required_match_sets = _build_required_contract_match_sets(required_contracts)
-    prepared_rows: List[tuple[str, tuple[Any, ...]]] = []
+    normalized_required_contracts = _normalize_required_contracts(required_contracts)
 
     for option in options_list:
         expiry_date = _parse_option_expiry_date(option.get('expiry_date'))
@@ -1524,49 +1367,30 @@ def store_high_accuracy_options_data(
             "strike_price": option.get("strike_price"),
             "expiry_date": expiry_date.isoformat(),
         }
-        is_explicitly_required = _row_is_explicitly_required(option_identity, required_match_sets)
+        is_explicitly_required = any(
+            _row_matches_required_contract(option_identity, contract)
+            for contract in normalized_required_contracts
+        )
         if expiry_date > max_expiry_date and not is_explicitly_required:
             skipped_far_expiry += 1
             continue
 
         try:
-            prepared_rows.append((
-                str(option.get('tradingsymbol', 'unknown')),
-                (
-                    timestamp_str, symbol, option['strike_price'], option['option_type'],
-                    option['ltp'], option['iv'], expiry_date.isoformat(), spot_price,
-                    option['tradingsymbol'], option.get('open_interest', 0)
-                ),
+            cursor.execute("""
+                INSERT INTO option_data (
+                    timestamp, symbol, strike_price, option_type,
+                    ltp, iv, expiry_date, spot_price, tradingsymbol, open_interest
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                timestamp_str, symbol, option['strike_price'], option['option_type'],
+                option['ltp'], option['iv'], expiry_date.isoformat(), spot_price,
+                option['tradingsymbol'], option.get('open_interest', 0)
             ))
         except Exception as e:
             print(f"Error storing option {option.get('tradingsymbol', 'unknown')}: {e}")
             continue
-
-    insert_sql = """
-        INSERT INTO option_data (
-            timestamp, symbol, strike_price, option_type,
-            ltp, iv, expiry_date, spot_price, tradingsymbol, open_interest
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """
-
-    try:
-        if prepared_rows:
-            try:
-                conn.execute("BEGIN")
-                cursor.executemany(insert_sql, [row_values for _, row_values in prepared_rows])
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                for tradingsymbol, row_values in prepared_rows:
-                    try:
-                        cursor.execute(insert_sql, row_values)
-                    except Exception as e:
-                        print(f"Error storing option {tradingsymbol}: {e}")
-                        continue
-                conn.commit()
-    finally:
-        conn.close()
-
+    conn.commit()
+    conn.close()
     if skipped_invalid_expiry:
         print(f"Skipped {skipped_invalid_expiry} option row(s) with invalid expiry_date.")
     if skipped_far_expiry:
@@ -1697,7 +1521,6 @@ def calculate_and_store_high_accuracy_delta(
 
         # Get cached options data
         cached_options = fetch_latest_option_snapshot(symbol, db_path)
-        cached_option_lookup = _build_required_contract_lookup(cached_options) if cached_options else None
         #print(f"[DEBUG] Total cached_options: {len(cached_options)}")
         #print("[DEBUG] First 5 cached options:")
         """
@@ -1807,14 +1630,12 @@ def calculate_and_store_high_accuracy_delta(
                 required_contracts=combined_required_contracts or None,
             )
             cached_options = fetch_latest_option_snapshot(symbol, db_path)
-            cached_option_lookup = _build_required_contract_lookup(cached_options) if cached_options else None
             
         if not cached_options:
             print("No options data available after refresh.")
             return None
 
         strategy_required_contracts = build_required_contracts(cached_options)
-        cached_option_lookup = cached_option_lookup or _build_required_contract_lookup(cached_options)
         combined_required_contracts = _merge_required_contracts(
             strategy_required_contracts,
             requested_required_contracts,
@@ -1847,9 +1668,10 @@ def calculate_and_store_high_accuracy_delta(
             tradingsymbol = contract.get("tradingsymbol")
             if not tradingsymbol:
                 continue
-            matched_row = None
-            if cached_option_lookup is not None:
-                matched_row = cached_option_lookup["tradingsymbol_rows"].get(str(tradingsymbol).upper())
+            matched_row = next(
+                (row for row in cached_options if str(row.get("tradingsymbol") or "").upper() == tradingsymbol),
+                None,
+            )
             if matched_row and matched_row.get("strike_price") is not None:
                 required_strikes.add(int(float(matched_row["strike_price"])))
         strike_band = sorted(required_strikes)
@@ -1877,7 +1699,6 @@ def calculate_and_store_high_accuracy_delta(
                 print(f"[DELTA CACHE] Snapshot already stored for {timestamp_str[:16]}; skipping duplicate write.")
             else:
                 stored_exact_keys = set()
-                delta_cache_rows: List[tuple[Any, ...]] = []
                 for strike, strike_data in delta_results.items():
                     for option_type, option_data in strike_data.items():
                         #print(f"[DEBUG] Looking for: strike={strike}, type={option_type}")
@@ -1916,7 +1737,19 @@ def calculate_and_store_high_accuracy_delta(
                                 int(strike),
                                 str(option_type).upper(),
                             ))
-                            delta_cache_rows.append((
+                            """
+                            correct_tradingsymbol = 'N/A'
+                            for opt in cached_options:
+                                if opt['strike_price'] == strike and opt['option_type'] == option_type:
+                                    correct_tradingsymbol = opt.get('tradingsymbol', 'N/A')
+                                    break
+                            """
+                            cursor.execute("""
+                                INSERT INTO delta_cache (
+                                    timestamp, strike_price, option_type, delta,
+                                    expiry_date, spot_price, symbol, ltp, tradingsymbol
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (
                                 timestamp_str, strike, option_type, delta_value,
                                 selected_expiry, spot_price, symbol, ltp_value,
                                 selected_tradingsymbol
@@ -1930,7 +1763,12 @@ def calculate_and_store_high_accuracy_delta(
                     )
                     if exact_key in stored_exact_keys:
                         continue
-                    delta_cache_rows.append((
+                    cursor.execute("""
+                        INSERT INTO delta_cache (
+                            timestamp, strike_price, option_type, delta,
+                            expiry_date, spot_price, symbol, ltp, tradingsymbol
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
                         timestamp_str,
                         exact_row["strike_price"],
                         exact_row["option_type"],
@@ -1941,23 +1779,7 @@ def calculate_and_store_high_accuracy_delta(
                         exact_row["ltp"],
                         exact_row["tradingsymbol"],
                     ))
-
-                if delta_cache_rows:
-                    insert_sql = """
-                        INSERT INTO delta_cache (
-                            timestamp, strike_price, option_type, delta,
-                            expiry_date, spot_price, symbol, ltp, tradingsymbol
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """
-                    conn.execute("BEGIN")
-                    try:
-                        cursor.executemany(insert_sql, delta_cache_rows)
-                        conn.commit()
-                    except Exception:
-                        conn.rollback()
-                        raise
-                else:
-                    conn.commit()
+            conn.commit()
             conn.close()
         print("Delta calculations completed and stored successfully.")
         return {
@@ -2338,7 +2160,7 @@ def scan_first_lower_pe_contract_below_ltp(
     if not nearest_expiry:
         return None
 
-    best_candidate: Optional[Dict[str, Any]] = None
+    pe_candidates: List[Dict[str, Any]] = []
     for row in rows or []:
         if str(row.get("option_type") or "").upper() != "PE":
             continue
@@ -2352,12 +2174,13 @@ def scan_first_lower_pe_contract_below_ltp(
             continue
         if strike_int >= int(buy_strike_price):
             continue
-        if ltp_value >= float(max_ltp):
-            continue
-        if best_candidate is None or strike_int > int(best_candidate["strike_price"]):
-            best_candidate = dict(row, strike_price=strike_int, ltp=ltp_value)
+        pe_candidates.append(dict(row, strike_price=strike_int, ltp=ltp_value))
 
-    return best_candidate
+    pe_candidates.sort(key=lambda row: row["strike_price"], reverse=True)
+    for row in pe_candidates:
+        if float(row["ltp"]) < float(max_ltp):
+            return row
+    return None
 
 
 def fetch_current_exact_option_ltp(
@@ -2460,28 +2283,19 @@ def store_sma_from_df(df: pd.DateOffset, symbol : str, interval: str, db_path= D
     df_smas = compute_smas_with_high_low(df)
 
     #prepare rows for insertoin
-    def safe_series(column_name: str) -> List[Optional[float]]:
-        if column_name not in df_smas.columns:
-            return [None] * len(df_smas)
-        return [
-            float(value) if pd.notna(value) else None
-            for value in df_smas[column_name].tolist()
-        ]
-
-    timestamp_strings = [
-        ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, "strftime") else str(ts)
-        for ts in df_smas.index.tolist()
-    ]
-    rows = list(zip(
-        timestamp_strings,
-        [symbol] * len(df_smas),
-        safe_series('sma_5'),
-        safe_series('sma_5_high'),
-        safe_series('sma_5_low'),
-        safe_series('sma_20'),
-        safe_series('sma_50'),
-        safe_series('sma_200'),
-    ))
+    rows = []
+    for ts, row in df_smas.iterrows():
+        ts_str = ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, "strftime") else str(ts)
+        def safe(x): return float(x) if pd.notna(x) else None
+        rows.append((
+            ts_str, symbol,
+            safe(row.get('sma_5')),
+            safe(row.get('sma_5_high')),
+            safe(row.get('sma_5_low')),
+            safe(row.get('sma_20')),
+            safe(row.get('sma_50')),
+            safe(row.get('sma_200')),
+        ))
 
     conn = sqlite3.connect(db_path, timeout=20)
     try:
@@ -2589,33 +2403,28 @@ def store_equity_data(
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
 
-        def safe_series(column_name: str) -> List[Optional[float]]:
-            if column_name not in df.columns:
-                return [None] * len(df)
-            return [
-                float(value) if pd.notna(value) else None
-                for value in df[column_name].tolist()
-            ]
+        rows = []
+        for ts, row in df.iterrows():
+            ts_str = ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, 'strftime') else str(ts)
 
-        timestamp_strings = [
-            ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, 'strftime') else str(ts)
-            for ts in df.index.tolist()
-        ]
-        rows = list(zip(
-            timestamp_strings,
-            [symbol] * len(df),
-            safe_series('open'),
-            safe_series('high'),
-            safe_series('low'),
-            safe_series('close'),
-            safe_series('volume'),
-            safe_series('vwap'),
-            safe_series('ao_value'),
-            safe_series('ao_color'),
-            safe_series('donchian_upper'),
-            safe_series('donchian_lower'),
-            safe_series('donchian_mid'),
-        ))
+            def safe(x):
+                return float(x) if pd.notna(x) else None
+
+            rows.append((
+                ts_str,
+                symbol,
+                safe(row.get('open')),
+                safe(row.get('high')),
+                safe(row.get('low')),
+                safe(row.get('close')),
+                safe(row.get('volume')),
+                safe(row.get('vwap')), 
+                safe(row.get('ao_value')),
+                safe(row.get('ao_color')),
+                safe(row.get('donchian_upper')),
+                safe(row.get('donchian_lower')),
+                safe(row.get('donchian_mid')),
+            ))
 
         cur.executemany(insert_sql, rows)
         conn.commit()
@@ -2648,28 +2457,23 @@ def store_equity_sma_from_df(df: pd.DataFrame, symbol: str, interval: str, db_pa
         df_smas = compute_smas_with_high_low(df)
         
         # Prepare rows for insertion
-        def safe_series(column_name: str) -> List[Optional[float]]:
-            if column_name not in df_smas.columns:
-                return [None] * len(df_smas)
-            return [
-                float(value) if pd.notna(value) else None
-                for value in df_smas[column_name].tolist()
-            ]
-
-        timestamp_strings = [
-            ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, 'strftime') else str(ts)
-            for ts in df_smas.index.tolist()
-        ]
-        rows = list(zip(
-            timestamp_strings,
-            [symbol] * len(df_smas),
-            safe_series('sma_5'),
-            safe_series('sma_20'),
-            safe_series('sma_5_high'),
-            safe_series('sma_5_low'),
-            safe_series('sma_20_high'),
-            safe_series('sma_20_low')
-        ))
+        rows = []
+        for ts, row in df_smas.iterrows():
+            ts_str = ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, 'strftime') else str(ts)
+            
+            def safe(x):
+                return float(x) if pd.notna(x) else None
+            
+            rows.append((
+                ts_str,
+                symbol,
+                safe(row.get('sma_5')),
+                safe(row.get('sma_20')),
+                safe(row.get('sma_5_high')),
+                safe(row.get('sma_5_low')),
+                safe(row.get('sma_20_high')),
+                safe(row.get('sma_20_low'))
+            ))
         
         # Ensure table exists and insert data
         create_equity_sma_table(conn, interval)

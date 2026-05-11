@@ -2648,28 +2648,23 @@ def store_equity_sma_from_df(df: pd.DataFrame, symbol: str, interval: str, db_pa
         df_smas = compute_smas_with_high_low(df)
         
         # Prepare rows for insertion
-        def safe_series(column_name: str) -> List[Optional[float]]:
-            if column_name not in df_smas.columns:
-                return [None] * len(df_smas)
-            return [
-                float(value) if pd.notna(value) else None
-                for value in df_smas[column_name].tolist()
-            ]
-
-        timestamp_strings = [
-            ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, 'strftime') else str(ts)
-            for ts in df_smas.index.tolist()
-        ]
-        rows = list(zip(
-            timestamp_strings,
-            [symbol] * len(df_smas),
-            safe_series('sma_5'),
-            safe_series('sma_20'),
-            safe_series('sma_5_high'),
-            safe_series('sma_5_low'),
-            safe_series('sma_20_high'),
-            safe_series('sma_20_low')
-        ))
+        rows = []
+        for ts, row in df_smas.iterrows():
+            ts_str = ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, 'strftime') else str(ts)
+            
+            def safe(x):
+                return float(x) if pd.notna(x) else None
+            
+            rows.append((
+                ts_str,
+                symbol,
+                safe(row.get('sma_5')),
+                safe(row.get('sma_20')),
+                safe(row.get('sma_5_high')),
+                safe(row.get('sma_5_low')),
+                safe(row.get('sma_20_high')),
+                safe(row.get('sma_20_low'))
+            ))
         
         # Ensure table exists and insert data
         create_equity_sma_table(conn, interval)

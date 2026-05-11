@@ -699,58 +699,51 @@ def store_market_data(df, symbol: str = 'NIFTY50', interval: str = '5m', vix_val
         if missing_cols:
             print(f"[WARN] DataFrame is missing columns: {missing_cols}")
 
-        columns_in_order = list(df.columns)
+        # Case-insensitive safe_get_value
+        def safe_get_value(row, column_name):
+            try:
+                candidates = []
+                if column_name in row.index:
+                    candidates.append(column_name)
 
-        def resolve_column_name(column_name: str) -> Optional[str]:
-            if column_name in df.columns:
-                return str(column_name)
-            lower_name = str(column_name).lower()
-            for existing_name in columns_in_order:
-                if str(existing_name).lower() == lower_name:
-                    return str(existing_name)
-            return None
+                lower_name = str(column_name).lower()
+                for col in row.index:
+                    if col not in candidates and str(col).lower() == lower_name:
+                        candidates.append(col)
 
-        def extract_float_values(column_name: str) -> List[Optional[float]]:
-            actual_column = resolve_column_name(column_name)
-            if actual_column is None:
-                return [None] * len(df)
-            return [
-                float(value) if pd.notna(value) else None
-                for value in pd.to_numeric(df[actual_column], errors="coerce").tolist()
-            ]
+                for col in candidates:
+                    value = row[col]
+                    if pd.notna(value):
+                        return float(value)
 
-        timestamp_column = resolve_column_name("timestamp")
-        timestamp_values = df[timestamp_column].tolist() if timestamp_column is not None else list(df.index)
-        timestamp_strings = [
-            timestamp_val.strftime("%Y-%m-%d %H:%M:%S") if hasattr(timestamp_val, 'strftime') else str(timestamp_val)
-            for timestamp_val in timestamp_values
-        ]
+                return None
+            except Exception:
+                return None
 
-        open_values = extract_float_values('open')
-        high_values = extract_float_values('high')
-        low_values = extract_float_values('low')
-        close_values = extract_float_values('close')
-        ao_values = extract_float_values('ao_value')
-        donchian_upper_values = extract_float_values('donchian_upper')
-        donchian_lower_values = extract_float_values('donchian_lower')
-        donchian_mid_values = extract_float_values('donchian_mid')
-        sl_values = extract_float_values('SL')
-        sh_values = extract_float_values('SH')
+        rows = []
+        for idx, row in df.iterrows():
+            # Get timestamp from row (it's now a column, not index)
+            timestamp_val = row.get('timestamp', idx)
 
-        rows = list(zip(
-            timestamp_strings,
-            [symbol] * len(df),
-            open_values,
-            high_values,
-            low_values,
-            close_values,
-            ao_values,
-            donchian_upper_values,
-            donchian_lower_values,
-            donchian_mid_values,
-            sl_values,
-            sh_values,
-        ))
+            if hasattr(timestamp_val, 'strftime'):
+                timestamp_str = timestamp_val.strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                timestamp_str = str(timestamp_val)
+
+            rows.append((
+                timestamp_str,
+                symbol,
+                safe_get_value(row, 'open'),
+                safe_get_value(row, 'high'),
+                safe_get_value(row, 'low'),
+                safe_get_value(row, 'close'),
+                safe_get_value(row, 'ao_value'),
+                safe_get_value(row, 'donchian_upper'),
+                safe_get_value(row, 'donchian_lower'),
+                safe_get_value(row, 'donchian_mid'),
+                safe_get_value(row, 'SL'),
+                safe_get_value(row, 'SH')
+            ))
 
         if not rows:
             print(f"No market data rows to store in {table_name}.")
@@ -858,39 +851,22 @@ def store_vix_data_bulk(df, symbol: str, db_path=DB_PATH):
     ensure_db_dir(db_path)
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    timestamp_strings = [
-        ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, 'strftime') else str(ts)
-        for ts in df.index.tolist()
-    ]
-    if 'vix_value' in df.columns:
-        vix_series = df['vix_value']
-    elif 'vix' in df.columns:
-        vix_series = df['vix']
-    else:
-        vix_series = pd.Series([None] * len(df), index=df.index)
 
-    rows = [
-        (timestamp_str, symbol, float(vix_value))
-        for timestamp_str, vix_value in zip(timestamp_strings, vix_series.tolist())
-        if vix_value is not None and pd.notna(vix_value)
-    ]
+    for ts, row in df.iterrows():
+        # Convert timestamp to string
+        timestamp_str = ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, 'strftime') else str(ts)
+        
+        # Get VIX value
+        vix_value = row.get('vix_value', row.get('vix', None))
+        
+        if vix_value is not None and pd.notna(vix_value):
+            cursor.execute("""
+                INSERT INTO vix_data (timestamp, symbol, vix_value)
+                VALUES (?, ?, ?)
+            """, (timestamp_str, symbol, float(vix_value)))
 
-    try:
-        if rows:
-            conn.execute("BEGIN")
-            try:
-                cursor.executemany("""
-                    INSERT INTO vix_data (timestamp, symbol, vix_value)
-                    VALUES (?, ?, ?)
-                """, rows)
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-        else:
-            conn.commit()
-    finally:
-        conn.close()
+    conn.commit()
+    conn.close()
     print(f"Stored {len(df)} VIX data points for {symbol} successfully!!!")
 
 def fetch_vix_data(symbol: str = 'NIFTY50', start=None, end=None, db_path=DB_PATH):
@@ -1697,7 +1673,6 @@ def calculate_and_store_high_accuracy_delta(
 
         # Get cached options data
         cached_options = fetch_latest_option_snapshot(symbol, db_path)
-        cached_option_lookup = _build_required_contract_lookup(cached_options) if cached_options else None
         #print(f"[DEBUG] Total cached_options: {len(cached_options)}")
         #print("[DEBUG] First 5 cached options:")
         """
@@ -1807,14 +1782,12 @@ def calculate_and_store_high_accuracy_delta(
                 required_contracts=combined_required_contracts or None,
             )
             cached_options = fetch_latest_option_snapshot(symbol, db_path)
-            cached_option_lookup = _build_required_contract_lookup(cached_options) if cached_options else None
             
         if not cached_options:
             print("No options data available after refresh.")
             return None
 
         strategy_required_contracts = build_required_contracts(cached_options)
-        cached_option_lookup = cached_option_lookup or _build_required_contract_lookup(cached_options)
         combined_required_contracts = _merge_required_contracts(
             strategy_required_contracts,
             requested_required_contracts,
@@ -1847,9 +1820,10 @@ def calculate_and_store_high_accuracy_delta(
             tradingsymbol = contract.get("tradingsymbol")
             if not tradingsymbol:
                 continue
-            matched_row = None
-            if cached_option_lookup is not None:
-                matched_row = cached_option_lookup["tradingsymbol_rows"].get(str(tradingsymbol).upper())
+            matched_row = next(
+                (row for row in cached_options if str(row.get("tradingsymbol") or "").upper() == tradingsymbol),
+                None,
+            )
             if matched_row and matched_row.get("strike_price") is not None:
                 required_strikes.add(int(float(matched_row["strike_price"])))
         strike_band = sorted(required_strikes)
@@ -1877,7 +1851,6 @@ def calculate_and_store_high_accuracy_delta(
                 print(f"[DELTA CACHE] Snapshot already stored for {timestamp_str[:16]}; skipping duplicate write.")
             else:
                 stored_exact_keys = set()
-                delta_cache_rows: List[tuple[Any, ...]] = []
                 for strike, strike_data in delta_results.items():
                     for option_type, option_data in strike_data.items():
                         #print(f"[DEBUG] Looking for: strike={strike}, type={option_type}")
@@ -1916,7 +1889,19 @@ def calculate_and_store_high_accuracy_delta(
                                 int(strike),
                                 str(option_type).upper(),
                             ))
-                            delta_cache_rows.append((
+                            """
+                            correct_tradingsymbol = 'N/A'
+                            for opt in cached_options:
+                                if opt['strike_price'] == strike and opt['option_type'] == option_type:
+                                    correct_tradingsymbol = opt.get('tradingsymbol', 'N/A')
+                                    break
+                            """
+                            cursor.execute("""
+                                INSERT INTO delta_cache (
+                                    timestamp, strike_price, option_type, delta,
+                                    expiry_date, spot_price, symbol, ltp, tradingsymbol
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (
                                 timestamp_str, strike, option_type, delta_value,
                                 selected_expiry, spot_price, symbol, ltp_value,
                                 selected_tradingsymbol
@@ -1930,7 +1915,12 @@ def calculate_and_store_high_accuracy_delta(
                     )
                     if exact_key in stored_exact_keys:
                         continue
-                    delta_cache_rows.append((
+                    cursor.execute("""
+                        INSERT INTO delta_cache (
+                            timestamp, strike_price, option_type, delta,
+                            expiry_date, spot_price, symbol, ltp, tradingsymbol
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
                         timestamp_str,
                         exact_row["strike_price"],
                         exact_row["option_type"],
@@ -1941,23 +1931,7 @@ def calculate_and_store_high_accuracy_delta(
                         exact_row["ltp"],
                         exact_row["tradingsymbol"],
                     ))
-
-                if delta_cache_rows:
-                    insert_sql = """
-                        INSERT INTO delta_cache (
-                            timestamp, strike_price, option_type, delta,
-                            expiry_date, spot_price, symbol, ltp, tradingsymbol
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """
-                    conn.execute("BEGIN")
-                    try:
-                        cursor.executemany(insert_sql, delta_cache_rows)
-                        conn.commit()
-                    except Exception:
-                        conn.rollback()
-                        raise
-                else:
-                    conn.commit()
+            conn.commit()
             conn.close()
         print("Delta calculations completed and stored successfully.")
         return {
@@ -2460,28 +2434,19 @@ def store_sma_from_df(df: pd.DateOffset, symbol : str, interval: str, db_path= D
     df_smas = compute_smas_with_high_low(df)
 
     #prepare rows for insertoin
-    def safe_series(column_name: str) -> List[Optional[float]]:
-        if column_name not in df_smas.columns:
-            return [None] * len(df_smas)
-        return [
-            float(value) if pd.notna(value) else None
-            for value in df_smas[column_name].tolist()
-        ]
-
-    timestamp_strings = [
-        ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, "strftime") else str(ts)
-        for ts in df_smas.index.tolist()
-    ]
-    rows = list(zip(
-        timestamp_strings,
-        [symbol] * len(df_smas),
-        safe_series('sma_5'),
-        safe_series('sma_5_high'),
-        safe_series('sma_5_low'),
-        safe_series('sma_20'),
-        safe_series('sma_50'),
-        safe_series('sma_200'),
-    ))
+    rows = []
+    for ts, row in df_smas.iterrows():
+        ts_str = ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, "strftime") else str(ts)
+        def safe(x): return float(x) if pd.notna(x) else None
+        rows.append((
+            ts_str, symbol,
+            safe(row.get('sma_5')),
+            safe(row.get('sma_5_high')),
+            safe(row.get('sma_5_low')),
+            safe(row.get('sma_20')),
+            safe(row.get('sma_50')),
+            safe(row.get('sma_200')),
+        ))
 
     conn = sqlite3.connect(db_path, timeout=20)
     try:
@@ -2589,33 +2554,28 @@ def store_equity_data(
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
 
-        def safe_series(column_name: str) -> List[Optional[float]]:
-            if column_name not in df.columns:
-                return [None] * len(df)
-            return [
-                float(value) if pd.notna(value) else None
-                for value in df[column_name].tolist()
-            ]
+        rows = []
+        for ts, row in df.iterrows():
+            ts_str = ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, 'strftime') else str(ts)
 
-        timestamp_strings = [
-            ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, 'strftime') else str(ts)
-            for ts in df.index.tolist()
-        ]
-        rows = list(zip(
-            timestamp_strings,
-            [symbol] * len(df),
-            safe_series('open'),
-            safe_series('high'),
-            safe_series('low'),
-            safe_series('close'),
-            safe_series('volume'),
-            safe_series('vwap'),
-            safe_series('ao_value'),
-            safe_series('ao_color'),
-            safe_series('donchian_upper'),
-            safe_series('donchian_lower'),
-            safe_series('donchian_mid'),
-        ))
+            def safe(x):
+                return float(x) if pd.notna(x) else None
+
+            rows.append((
+                ts_str,
+                symbol,
+                safe(row.get('open')),
+                safe(row.get('high')),
+                safe(row.get('low')),
+                safe(row.get('close')),
+                safe(row.get('volume')),
+                safe(row.get('vwap')), 
+                safe(row.get('ao_value')),
+                safe(row.get('ao_color')),
+                safe(row.get('donchian_upper')),
+                safe(row.get('donchian_lower')),
+                safe(row.get('donchian_mid')),
+            ))
 
         cur.executemany(insert_sql, rows)
         conn.commit()
@@ -2648,28 +2608,23 @@ def store_equity_sma_from_df(df: pd.DataFrame, symbol: str, interval: str, db_pa
         df_smas = compute_smas_with_high_low(df)
         
         # Prepare rows for insertion
-        def safe_series(column_name: str) -> List[Optional[float]]:
-            if column_name not in df_smas.columns:
-                return [None] * len(df_smas)
-            return [
-                float(value) if pd.notna(value) else None
-                for value in df_smas[column_name].tolist()
-            ]
-
-        timestamp_strings = [
-            ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, 'strftime') else str(ts)
-            for ts in df_smas.index.tolist()
-        ]
-        rows = list(zip(
-            timestamp_strings,
-            [symbol] * len(df_smas),
-            safe_series('sma_5'),
-            safe_series('sma_20'),
-            safe_series('sma_5_high'),
-            safe_series('sma_5_low'),
-            safe_series('sma_20_high'),
-            safe_series('sma_20_low')
-        ))
+        rows = []
+        for ts, row in df_smas.iterrows():
+            ts_str = ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, 'strftime') else str(ts)
+            
+            def safe(x):
+                return float(x) if pd.notna(x) else None
+            
+            rows.append((
+                ts_str,
+                symbol,
+                safe(row.get('sma_5')),
+                safe(row.get('sma_20')),
+                safe(row.get('sma_5_high')),
+                safe(row.get('sma_5_low')),
+                safe(row.get('sma_20_high')),
+                safe(row.get('sma_20_low'))
+            ))
         
         # Ensure table exists and insert data
         create_equity_sma_table(conn, interval)
