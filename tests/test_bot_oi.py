@@ -40,6 +40,7 @@ class OIExpiryPaperBotTests(unittest.TestCase):
             strategy.evaluate.return_value = {
                 "timestamp": "2026-04-28 09:30:00",
                 "state": {
+                    "entry_price_below_1m_smas": True,
                     "session": {"last_reset_date": "2026-04-28"},
                     "type_a": {
                         "entry_flag_on": True,
@@ -65,6 +66,7 @@ class OIExpiryPaperBotTests(unittest.TestCase):
                 "actions": [
                     {
                         "type": "OPEN_TYPE_A_POS1",
+                        "entry_price_below_1m_smas": True,
                         "entry_diff": 25.0,
                         "strike_bundle": {
                             "atm_strike": 24200,
@@ -80,6 +82,7 @@ class OIExpiryPaperBotTests(unittest.TestCase):
                         "type": "OPEN_TYPE_B_POSITION",
                         "trigger_1": True,
                         "trigger_2": False,
+                        "entry_price_below_1m_smas": True,
                         "sell_pe_entry_ltp": 20.0,
                         "selected_contracts": {
                             "sell_pe": {"tradingsymbol": "B_SELL_PE", "strike_price": 24100, "expiry": "2026-04-28"},
@@ -106,7 +109,9 @@ class OIExpiryPaperBotTests(unittest.TestCase):
 
             self.assertEqual(bot.position["type_a"]["position_1"]["status"], "OPEN")
             self.assertEqual(bot.position["type_b"]["position"]["status"], "OPEN")
+            self.assertTrue(bot.state["entry_price_below_1m_smas"])
             self.assertEqual(bot.state["type_b"]["sell_pe_entry_ltp"], 20.0)
+            self.assertTrue(bot.get_status_summary()["entry_price_below_1m_smas"])
 
     def test_type_a_position_2_reopen_persists_rearm_state_and_reentry_count(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -176,6 +181,7 @@ class OIExpiryPaperBotTests(unittest.TestCase):
             bot._apply_action(
                 {
                     "type": "OPEN_TYPE_A_POS1",
+                    "entry_price_below_1m_smas": True,
                     "entry_diff": 25.0,
                     "legs": [
                         {"action": "BUY", "tradingsymbol": "A_BUY", "option_type": "CE", "strike_price": 24200, "expiry": "2026-04-28", "last_price": 50.0},
@@ -190,6 +196,7 @@ class OIExpiryPaperBotTests(unittest.TestCase):
                 "2026-04-28 09:30:00",
             )
 
+            self.assertTrue(bot.state["entry_price_below_1m_smas"])
             self.assertFalse(bot.state["type_a"]["position_2_trigger_consumed"])
             self.assertFalse(bot.state["type_a"]["position_2_rearmed"])
             self.assertEqual(bot.state["type_a"]["position_2_reentry_count"], 0)

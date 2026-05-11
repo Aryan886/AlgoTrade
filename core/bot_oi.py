@@ -245,6 +245,7 @@ class OIExpiryPaperBot:
         })
         self.state["type_a"]["strike_bundle"] = copy.deepcopy(action.get("strike_bundle"))
         if slot == "position_1":
+            self.state["entry_price_below_1m_smas"] = bool(action.get("entry_price_below_1m_smas"))
             self.state["type_a"]["position_1"] = {"is_open": True, "opened_at": timestamp}
             self.state["type_a"]["position_1_entry_diff"] = float(action.get("entry_diff") or 0.0)
             self.state["type_a"]["position_2_trigger_consumed"] = False
@@ -281,6 +282,7 @@ class OIExpiryPaperBot:
             "oi_contracts": action.get("oi_contracts"),
         })
         self.state["type_b"]["position"] = {"is_open": True, "opened_at": timestamp}
+        self.state["entry_price_below_1m_smas"] = bool(action.get("entry_price_below_1m_smas"))
         self.state["type_b"]["sell_pe_entry_ltp"] = float(action.get("sell_pe_entry_ltp") or 0.0)
         self.state["type_b"]["selected_contracts"] = copy.deepcopy(action.get("selected_contracts"))
         self.state["type_b"]["trigger_1_seen"] = bool(action.get("trigger_1"))
@@ -364,6 +366,7 @@ class OIExpiryPaperBot:
         type_b_pos = self.position["type_b"]["position"]
         return {
             "selected_strategy": self.position["meta"].get("selected_strategy", "standard_nifty"),
+            "entry_price_below_1m_smas": bool(self.state.get("entry_price_below_1m_smas")),
             "type_a": {
                 "entry_flag_on": bool((self.state.get("type_a") or {}).get("entry_flag_on")),
                 "position_1_status": type_a_pos1.get("status", "FLAT"),

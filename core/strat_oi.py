@@ -31,6 +31,7 @@ def _to_iso(ts: Any) -> str:
 
 def build_default_oi_state() -> Dict[str, Any]:
     return {
+        "entry_price_below_1m_smas": False,
         "session": {
             "last_reset_date": None,
         },
@@ -60,6 +61,8 @@ def build_default_oi_state() -> Dict[str, Any]:
 def normalize_oi_state(state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     incoming = state or {}
     base = build_default_oi_state()
+
+    base["entry_price_below_1m_smas"] = bool(incoming.get("entry_price_below_1m_smas"))
 
     session = incoming.get("session") or {}
     base["session"].update(session)
@@ -161,6 +164,18 @@ class OIExpiryStrategy:
             return close_1m < donchian_mid
         except Exception:
             return False
+
+    def _entry_price_below_1m_smas(self, latest_1m: pd.Series) -> bool:
+        try:
+            close_1m = float(latest_1m["close"])
+            sma_20 = float(latest_1m["sma_20"])
+            sma_50 = float(latest_1m["sma_50"])
+        except Exception:
+            return False
+
+        if pd.isna(close_1m) or pd.isna(sma_20) or pd.isna(sma_50):
+            return False
+        return close_1m < sma_20 and close_1m < sma_50
 
     def _evaluate_universal_oi(
         self,
@@ -442,6 +457,7 @@ class OIExpiryStrategy:
         status = {
             "selected_strategy": "oi_expiry" if self.is_tuesday(now) else "standard_nifty",
             "evaluation_timestamp": _to_iso(evaluation_ts),
+            "entry_price_below_1m_smas": False,
             "type_a": {},
             "type_b": {},
         }
@@ -465,7 +481,10 @@ class OIExpiryStrategy:
 
         atm_strike = floor_to_100_strike(spot)
         entry_flag_on = self._entry_flag_on(latest_1m, latest_5m)
+        entry_price_below_1m_smas = self._entry_price_below_1m_smas(latest_1m)
+        next_state["entry_price_below_1m_smas"] = bool(entry_price_below_1m_smas)
         next_state["type_a"]["entry_flag_on"] = bool(entry_flag_on)
+        status["entry_price_below_1m_smas"] = bool(entry_price_below_1m_smas)
 
         type_a_pos1 = ((position.get("type_a") or {}).get("position_1") or {})
         type_a_pos2 = ((position.get("type_a") or {}).get("position_2") or {})
@@ -576,7 +595,12 @@ class OIExpiryStrategy:
         if not self._entry_window_open(now):
             return {"timestamp": _to_iso(evaluation_ts), "actions": actions, "state": next_state, "status": status}
 
-        if (not self._position_is_open(type_a_pos1)) and (not self._position_is_open(type_a_pos2)) and entry_flag_on:
+        if (
+            (not self._position_is_open(type_a_pos1))
+            and (not self._position_is_open(type_a_pos2))
+            and entry_flag_on
+            and entry_price_below_1m_smas
+        ):
             oi_result = self._evaluate_universal_oi(atm_strike=atm_strike, oi_rows=oi_rows, current_date=current_date)
             if oi_result["passed"]:
                 type_a_payload = self._build_type_a_legs(atm_strike=atm_strike, option_rows=option_rows, current_date=current_date)
@@ -584,6 +608,7 @@ class OIExpiryStrategy:
                     actions.append({
                         "type": "OPEN_TYPE_A_POS1",
                         "reason": "entry_flag_and_oi",
+                        "entry_price_below_1m_smas": True,
                         **type_a_payload,
                         "oi_contracts": oi_result["contracts"],
                     })
@@ -635,7 +660,7 @@ class OIExpiryStrategy:
             next_state["type_b"]["trigger_1_seen"] = bool(trigger_1)
             next_state["type_b"]["trigger_2_seen"] = bool(trigger_2)
 
-            if trigger_1 or trigger_2:
+            if (trigger_1 or trigger_2) and entry_price_below_1m_smas:
                 oi_result = self._evaluate_universal_oi(atm_strike=atm_strike, oi_rows=oi_rows, current_date=current_date)
                 if oi_result["passed"]:
                     type_b_payload = self._build_type_b_legs(atm_strike=atm_strike, option_rows=option_rows, current_date=current_date)
@@ -645,6 +670,7 @@ class OIExpiryStrategy:
                             "reason": "trigger_and_oi",
                             "trigger_1": trigger_1,
                             "trigger_2": trigger_2,
+                            "entry_price_below_1m_smas": True,
                             **type_b_payload,
                             "oi_contracts": oi_result["contracts"],
                         })

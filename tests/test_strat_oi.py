@@ -60,6 +60,8 @@ class OIExpiryStrategyTests(unittest.TestCase):
             highs=[24290, 24292, 24293, 24295, 24296, 24294, 24291, 24289],
             lows=[24270] * 8,
             sh=[24350] * 8,
+            sma_20=[24320] * 8,
+            sma_50=[24340] * 8,
         )
         df_5m = make_df(
             pd.date_range("2026-04-28 09:15:00", periods=4, freq="5min"),
@@ -90,8 +92,16 @@ class OIExpiryStrategyTests(unittest.TestCase):
             {"tradingsymbol": "NIFTYNEAR24300CE", "strike_price": 24300, "option_type": "CE", "expiry_date": "2026-04-28", "open_interest": 3900},
         ]
 
-    def _evaluate_type_a(self, strategy: OIExpiryStrategy, state: dict, position: dict, option_rows: list[dict], now: datetime):
-        frames = self._frames()
+    def _evaluate_type_a(
+        self,
+        strategy: OIExpiryStrategy,
+        state: dict,
+        position: dict,
+        option_rows: list[dict],
+        now: datetime,
+        frames: dict[str, pd.DataFrame] | None = None,
+    ):
+        frames = frames or self._frames()
         with patch.object(strategy, "_now", return_value=now), \
              patch.object(strategy, "_get_df", side_effect=lambda interval, limit=300: frames[interval].copy()), \
              patch.object(strategy, "_fetch_option_snapshot", return_value=option_rows), \
@@ -122,11 +132,40 @@ class OIExpiryStrategyTests(unittest.TestCase):
             result = strategy.evaluate(build_default_oi_state(), make_position())
 
         self.assertEqual(result["actions"][0]["type"], "OPEN_TYPE_A_POS1")
+        self.assertTrue(result["state"]["entry_price_below_1m_smas"])
+        self.assertTrue(result["status"]["entry_price_below_1m_smas"])
+        self.assertTrue(result["actions"][0]["entry_price_below_1m_smas"])
         self.assertEqual(result["actions"][0]["strike_bundle"]["atm_strike"], 24200)
         self.assertEqual(
             [leg["tradingsymbol"] for leg in result["actions"][0]["legs"]],
             ["NIFTYNEAR24200CE", "NIFTYNEAR24250CE"],
         )
+
+    def test_type_a_position_1_entry_is_blocked_when_1m_close_is_not_below_both_smas(self):
+        strategy = self._strategy()
+        frames = self._frames()
+        frames["1m"]["close"] = [24330] * len(frames["1m"])
+        frames["1m"]["high"] = [24331] * len(frames["1m"])
+        option_rows = [
+            {"tradingsymbol": "NIFTYNEAR24300CE", "strike_price": 24300, "option_type": "CE", "expiry_date": "2026-04-28", "ltp": 72.0},
+            {"tradingsymbol": "NIFTYNEAR24350CE", "strike_price": 24350, "option_type": "CE", "expiry_date": "2026-04-28", "ltp": 40.0},
+        ]
+        oi_rows = [
+            {"tradingsymbol": "NIFTYNEAR24300PE", "strike_price": 24300, "option_type": "PE", "expiry_date": "2026-04-28", "open_interest": 5000},
+            {"tradingsymbol": "NIFTYNEAR24300CE", "strike_price": 24300, "option_type": "CE", "expiry_date": "2026-04-28", "open_interest": 4000},
+            {"tradingsymbol": "NIFTYNEAR24400CE", "strike_price": 24400, "option_type": "CE", "expiry_date": "2026-04-28", "open_interest": 3900},
+        ]
+
+        with patch.object(strategy, "_now", return_value=datetime(2026, 4, 28, 9, 27, 0)), \
+             patch.object(strategy, "_get_df", side_effect=lambda interval, limit=300: frames[interval].copy()), \
+             patch.object(strategy, "_fetch_option_snapshot", return_value=option_rows), \
+             patch.object(strategy, "_fetch_open_interest_snapshot", return_value=oi_rows), \
+             patch.object(strategy, "_fetch_open_interest_5m_snapshot", return_value=[]):
+            result = strategy.evaluate(build_default_oi_state(), make_position())
+
+        self.assertEqual(result["actions"], [])
+        self.assertFalse(result["state"]["entry_price_below_1m_smas"])
+        self.assertFalse(result["status"]["entry_price_below_1m_smas"])
 
     def test_type_a_position_2_opens_after_five_point_diff_drop_and_oi_recheck(self):
         strategy = self._strategy()
@@ -136,6 +175,9 @@ class OIExpiryStrategyTests(unittest.TestCase):
             "status": "OPEN",
             "legs": [],
         }
+        frames = self._frames()
+        frames["1m"]["close"] = [24345] * len(frames["1m"])
+        frames["1m"]["high"] = [24346] * len(frames["1m"])
         option_rows = [
             {"tradingsymbol": "NIFTYNEAR24200CE", "strike_price": 24200, "option_type": "CE", "expiry_date": "2026-04-28", "ltp": 40.0},
             {"tradingsymbol": "NIFTYNEAR24250CE", "strike_price": 24250, "option_type": "CE", "expiry_date": "2026-04-28", "ltp": 15.0},
@@ -146,8 +188,10 @@ class OIExpiryStrategyTests(unittest.TestCase):
             position,
             option_rows,
             now=datetime(2026, 4, 28, 9, 31, 0),
+            frames=frames,
         )
 
+        self.assertFalse(result["state"]["entry_price_below_1m_smas"])
         self.assertTrue(result["state"]["type_a"]["flag_1"])
         self.assertTrue(result["state"]["type_a"]["flag_2"])
         self.assertFalse(result["state"]["type_a"]["position_2_trigger_consumed"])
@@ -186,6 +230,9 @@ class OIExpiryStrategyTests(unittest.TestCase):
         position = make_position()
         position["type_a"]["position_1"] = {"status": "OPEN", "legs": []}
         position["type_a"]["position_2"] = {"status": "CLOSED", "legs": []}
+        frames = self._frames()
+        frames["1m"]["close"] = [24345] * len(frames["1m"])
+        frames["1m"]["high"] = [24346] * len(frames["1m"])
 
         recovery_rows = [
             {"tradingsymbol": "NIFTYNEAR24200CE", "strike_price": 24200, "option_type": "CE", "expiry_date": "2026-04-28", "ltp": 45.0},
@@ -197,6 +244,7 @@ class OIExpiryStrategyTests(unittest.TestCase):
             position,
             recovery_rows,
             now=datetime(2026, 4, 28, 9, 36, 0),
+            frames=frames,
         )
 
         self.assertEqual(recovery["actions"], [])
@@ -213,6 +261,7 @@ class OIExpiryStrategyTests(unittest.TestCase):
             position,
             reopen_rows,
             now=datetime(2026, 4, 28, 9, 37, 0),
+            frames=frames,
         )
 
         self.assertEqual(reopen["actions"][0]["type"], "OPEN_TYPE_A_POS2")
@@ -300,6 +349,7 @@ class OIExpiryStrategyTests(unittest.TestCase):
 
         self.assertEqual(result["actions"][0]["type"], "OPEN_TYPE_B_POSITION")
         self.assertTrue(result["actions"][0]["trigger_1"])
+        self.assertTrue(result["actions"][0]["entry_price_below_1m_smas"])
         self.assertEqual(result["actions"][0]["selected_contracts"]["sell_pe"]["strike_price"], 24200)
 
     def test_type_b_trigger_2_uses_latest_contract_ltp_against_oi_vwap(self):
@@ -328,6 +378,34 @@ class OIExpiryStrategyTests(unittest.TestCase):
 
         self.assertEqual(result["actions"][0]["type"], "OPEN_TYPE_B_POSITION")
         self.assertTrue(result["actions"][0]["trigger_2"])
+
+    def test_type_b_entry_is_blocked_when_1m_close_is_not_below_both_smas(self):
+        strategy = self._strategy()
+        frames = self._frames()
+        frames["1m"]["close"] = [24345] * len(frames["1m"])
+        frames["1m"]["high"] = [24346] * len(frames["1m"])
+        frames["5m"]["sma_50"] = [24350] * len(frames["5m"])
+        option_rows = [
+            {"tradingsymbol": "NIFTYNEAR24100CE", "strike_price": 24100, "option_type": "CE", "expiry_date": "2026-04-28", "ltp": 100.0},
+            {"tradingsymbol": "NIFTYNEAR24300PE", "strike_price": 24300, "option_type": "PE", "expiry_date": "2026-04-28", "ltp": 75.0},
+            {"tradingsymbol": "NIFTYNEAR24200PE", "strike_price": 24200, "option_type": "PE", "expiry_date": "2026-04-28", "ltp": 28.0},
+        ]
+        oi_rows = [
+            {"tradingsymbol": "NIFTYNEAR24300PE", "strike_price": 24300, "option_type": "PE", "expiry_date": "2026-04-28", "open_interest": 5000},
+            {"tradingsymbol": "NIFTYNEAR24300CE", "strike_price": 24300, "option_type": "CE", "expiry_date": "2026-04-28", "open_interest": 4000},
+            {"tradingsymbol": "NIFTYNEAR24400CE", "strike_price": 24400, "option_type": "CE", "expiry_date": "2026-04-28", "open_interest": 3900},
+        ]
+
+        with patch.object(strategy, "_now", return_value=datetime(2026, 4, 28, 9, 33, 0)), \
+             patch.object(strategy, "_get_df", side_effect=lambda interval, limit=300: frames[interval].copy()), \
+             patch.object(strategy, "_fetch_option_snapshot", return_value=option_rows), \
+             patch.object(strategy, "_fetch_open_interest_snapshot", return_value=oi_rows), \
+             patch.object(strategy, "_fetch_open_interest_5m_snapshot", return_value=[]):
+            result = strategy.evaluate(build_default_oi_state(), make_position())
+
+        self.assertEqual(result["actions"], [])
+        self.assertFalse(result["state"]["entry_price_below_1m_smas"])
+        self.assertFalse(result["status"]["entry_price_below_1m_smas"])
 
     def test_type_b_exit_on_sell_pe_rise(self):
         strategy = self._strategy()
