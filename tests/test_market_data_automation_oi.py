@@ -18,18 +18,21 @@ class MarketDataAutomationOITests(unittest.TestCase):
             return MarketDataAutomation()
 
     def test_tuesday_routing_runs_oi_bot_and_skips_standard_nifty_bot(self):
-        automation = self._build_automation()
-        automation.is_market_open = Mock(return_value=True)
-        automation.use_oi_nifty_strategy = Mock(return_value=True)
-        automation.oi_nifty_trader.get_status_summary.return_value = {
-            "type_a": {"position_1_status": "FLAT", "position_2_status": "FLAT"},
-            "type_b": {"position_status": "FLAT"},
-        }
+        with patch("utils.market_data_automation.logger", Mock()) as logger_mock:
+            automation = self._build_automation()
+            automation.is_market_open = Mock(return_value=True)
+            automation.use_oi_nifty_strategy = Mock(return_value=True)
+            automation.oi_nifty_trader.get_status_summary.return_value = {
+                "type_a": {"position_1_status": "OPEN", "position_2_status": "FLAT"},
+                "type_b": {"position_status": "FLAT"},
+                "aggregate_open_pnl": 125.5,
+            }
 
-        automation.run_nifty_paper_trading_cycle()
+            automation.run_nifty_paper_trading_cycle()
 
         automation.oi_nifty_trader.run_once.assert_called_once()
         automation.nifty_trader.run_once.assert_not_called()
+        self.assertTrue(any("OpenPnL: 125.50" in str(call) for call in logger_mock.info.call_args_list))
 
     def test_non_tuesday_routing_runs_standard_nifty_bot_and_skips_oi_bot(self):
         automation = self._build_automation()

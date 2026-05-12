@@ -4,7 +4,7 @@ import tempfile
 import unittest
 import logging
 from datetime import datetime
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pandas as pd
 
@@ -45,12 +45,11 @@ def make_position() -> dict:
 
 class OIExpiryStrategyTests(unittest.TestCase):
     @staticmethod
-    def _logger_tuple():
-        logger = logging.getLogger("test.oi.strategy")
-        return (logger, logger, logger, logger, logger, logger)
+    def _oi_loggers():
+        return (Mock(name="oi_strategy_logger"), Mock(name="oi_trade_logger"), Mock(name="oi_position_logger"))
 
     def _strategy(self) -> OIExpiryStrategy:
-        with patch("core.strat_oi.setup_paper_trading_logger", return_value=self._logger_tuple()):
+        with patch("core.strat_oi.setup_oi_logging", return_value=self._oi_loggers()):
             return OIExpiryStrategy(symbol="NIFTY50")
 
     def _frames(self) -> dict[str, pd.DataFrame]:
@@ -134,8 +133,13 @@ class OIExpiryStrategyTests(unittest.TestCase):
         self.assertEqual(result["actions"][0]["type"], "OPEN_TYPE_A_POS1")
         self.assertTrue(result["state"]["entry_price_below_1m_smas"])
         self.assertTrue(result["status"]["entry_price_below_1m_smas"])
+        self.assertTrue(result["status"]["entry_window_open"])
+        self.assertTrue(result["status"]["data_ready"])
+        self.assertEqual(result["status"]["spot"], 24279.0)
+        self.assertEqual(result["status"]["atm_strike"], 24200)
         self.assertTrue(result["actions"][0]["entry_price_below_1m_smas"])
         self.assertEqual(result["actions"][0]["strike_bundle"]["atm_strike"], 24200)
+        self.assertIn("OPEN_TYPE_A_POS1", result["status"]["type_a"]["pending_actions"])
         self.assertEqual(
             [leg["tradingsymbol"] for leg in result["actions"][0]["legs"]],
             ["NIFTYNEAR24200CE", "NIFTYNEAR24250CE"],
@@ -166,6 +170,7 @@ class OIExpiryStrategyTests(unittest.TestCase):
         self.assertEqual(result["actions"], [])
         self.assertFalse(result["state"]["entry_price_below_1m_smas"])
         self.assertFalse(result["status"]["entry_price_below_1m_smas"])
+        self.assertIn("entry_price_not_below_1m_smas", result["status"]["type_a"]["blockers"])
 
     def test_type_a_position_2_opens_after_five_point_diff_drop_and_oi_recheck(self):
         strategy = self._strategy()
@@ -197,6 +202,8 @@ class OIExpiryStrategyTests(unittest.TestCase):
         self.assertFalse(result["state"]["type_a"]["position_2_trigger_consumed"])
         self.assertEqual(result["actions"][0]["reentry_kind"], "initial")
         self.assertEqual(result["actions"][0]["type"], "OPEN_TYPE_A_POS2")
+        self.assertEqual(result["status"]["type_a"]["current_diff"], 25.0)
+        self.assertIn("OPEN_TYPE_A_POS2", result["status"]["type_a"]["pending_actions"])
 
     def test_type_a_position_2_does_not_reopen_without_recovery(self):
         strategy = self._strategy()
@@ -351,6 +358,7 @@ class OIExpiryStrategyTests(unittest.TestCase):
         self.assertTrue(result["actions"][0]["trigger_1"])
         self.assertTrue(result["actions"][0]["entry_price_below_1m_smas"])
         self.assertEqual(result["actions"][0]["selected_contracts"]["sell_pe"]["strike_price"], 24200)
+        self.assertIn("OPEN_TYPE_B_POSITION", result["status"]["type_b"]["pending_actions"])
 
     def test_type_b_trigger_2_uses_latest_contract_ltp_against_oi_vwap(self):
         strategy = self._strategy()
@@ -406,6 +414,7 @@ class OIExpiryStrategyTests(unittest.TestCase):
         self.assertEqual(result["actions"], [])
         self.assertFalse(result["state"]["entry_price_below_1m_smas"])
         self.assertFalse(result["status"]["entry_price_below_1m_smas"])
+        self.assertIn("entry_price_not_below_1m_smas", result["status"]["type_b"]["blockers"])
 
     def test_type_b_exit_on_sell_pe_rise(self):
         strategy = self._strategy()
@@ -500,6 +509,7 @@ class OIExpiryStrategyTests(unittest.TestCase):
             result = strategy.evaluate(state, position)
 
         self.assertEqual(result["actions"][0]["reason"], "profit_target")
+        self.assertEqual(result["status"]["type_b"]["current_pnl"], 4010.0)
 
 
 if __name__ == "__main__":

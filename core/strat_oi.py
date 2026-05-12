@@ -18,7 +18,7 @@ from utils.db_func import (
     floor_to_100_strike,
     scan_first_lower_pe_contract_below_ltp,
 )
-from utils.utility import setup_paper_trading_logger
+from utils.utility import setup_oi_logging
 
 
 def _to_iso(ts: Any) -> str:
@@ -95,8 +95,7 @@ class OIExpiryStrategy:
 
     def __init__(self, symbol: str = "NIFTY50") -> None:
         self.symbol = symbol or "NIFTY50"
-        _paper_logger, _trade_logger, _position_logger, _sma_logger, _equity_logger, nifty_logger = setup_paper_trading_logger()
-        self.logger = nifty_logger
+        self.logger, _oi_trade_logger, _oi_position_logger = setup_oi_logging()
 
     def _now(self) -> datetime:
         return datetime.now()
@@ -211,18 +210,32 @@ class OIExpiryStrategy:
             "atm_plus_100_ce": otm_ce,
         }
         if not all(contracts.values()):
-            return {"passed": False, "contracts": contracts}
+            missing = [name for name, contract in contracts.items() if not contract]
+            return {
+                "passed": False,
+                "contracts": contracts,
+                "reason": "missing_oi_contracts",
+                "missing_contracts": missing,
+            }
 
         try:
             pe_oi = float(atm_pe["open_interest"])
             ce_oi = float(atm_ce["open_interest"])
             otm_ce_oi = float(otm_ce["open_interest"])
         except Exception:
-            return {"passed": False, "contracts": contracts}
+            return {
+                "passed": False,
+                "contracts": contracts,
+                "reason": "invalid_oi_values",
+            }
 
         return {
             "passed": pe_oi > ce_oi and pe_oi > otm_ce_oi,
             "contracts": contracts,
+            "reason": "passed" if pe_oi > ce_oi and pe_oi > otm_ce_oi else "oi_filter_failed",
+            "pe_oi": pe_oi,
+            "ce_oi": ce_oi,
+            "otm_ce_oi": otm_ce_oi,
         }
 
     def _build_type_a_legs(
@@ -439,6 +452,41 @@ class OIExpiryStrategy:
         except Exception:
             return None
 
+    def _append_blocker(self, status_branch: Dict[str, Any], blocker: str) -> None:
+        blockers = status_branch.setdefault("blockers", [])
+        if blocker not in blockers:
+            blockers.append(blocker)
+
+    def _append_pending_action(self, status_branch: Dict[str, Any], action_type: str) -> None:
+        pending = status_branch.setdefault("pending_actions", [])
+        pending.append(action_type)
+
+    def _log_evaluation(self, status: Dict[str, Any], actions: List[Dict[str, Any]]) -> None:
+        type_a = status.get("type_a") or {}
+        type_b = status.get("type_b") or {}
+        self.logger.info(
+            "oi_eval ts=%s window_open=%s data_ready=%s spot=%s atm=%s actions=%s "
+            "type_a_open=%s/%s type_a_diff=%s type_a_pnl=%s/%s type_a_blockers=%s "
+            "type_b_open=%s type_b_pnl=%s type_b_triggers=%s/%s type_b_blockers=%s",
+            status.get("evaluation_timestamp"),
+            status.get("entry_window_open"),
+            status.get("data_ready"),
+            status.get("spot"),
+            status.get("atm_strike"),
+            ",".join(str(action.get("type")) for action in actions) or "none",
+            type_a.get("position_1_open"),
+            type_a.get("position_2_open"),
+            type_a.get("current_diff"),
+            type_a.get("position_1_pnl"),
+            type_a.get("position_2_pnl"),
+            ",".join(type_a.get("blockers") or []) or "none",
+            type_b.get("position_open"),
+            type_b.get("current_pnl"),
+            type_b.get("trigger_1_seen"),
+            type_b.get("trigger_2_seen"),
+            ",".join(type_b.get("blockers") or []) or "none",
+        )
+
     def evaluate(
         self,
         state: Optional[Dict[str, Any]],
@@ -449,6 +497,10 @@ class OIExpiryStrategy:
         position = position or {}
         actions: List[Dict[str, Any]] = []
 
+        type_a_pos1 = ((position.get("type_a") or {}).get("position_1") or {})
+        type_a_pos2 = ((position.get("type_a") or {}).get("position_2") or {})
+        type_b_pos = ((position.get("type_b") or {}).get("position") or {})
+
         df_1m = self._get_df("1m", limit=300)
         df_5m = self._get_df("5m", limit=300)
         latest_1m_ts = self._latest_ts(df_1m)
@@ -457,12 +509,55 @@ class OIExpiryStrategy:
         status = {
             "selected_strategy": "oi_expiry" if self.is_tuesday(now) else "standard_nifty",
             "evaluation_timestamp": _to_iso(evaluation_ts),
+            "entry_window_open": self._entry_window_open(now),
             "entry_price_below_1m_smas": False,
-            "type_a": {},
-            "type_b": {},
+            "data_ready": False,
+            "spot": None,
+            "atm_strike": None,
+            "type_a": {
+                "entry_flag_on": False,
+                "current_diff": None,
+                "position_1_open": self._position_is_open(type_a_pos1),
+                "position_2_open": self._position_is_open(type_a_pos2),
+                "position_1_pnl": None,
+                "position_2_pnl": None,
+                "reentry_threshold": None,
+                "blockers": [],
+                "pending_actions": [],
+            },
+            "type_b": {
+                "trigger_1_seen": False,
+                "trigger_2_seen": False,
+                "position_open": self._position_is_open(type_b_pos),
+                "current_pnl": None,
+                "blockers": [],
+                "pending_actions": [],
+            },
         }
 
+        self.logger.info(
+            "oi_eval_start ts=%s tuesday=%s pos_a1=%s pos_a2=%s pos_b=%s",
+            status["evaluation_timestamp"],
+            self.is_tuesday(now),
+            status["type_a"]["position_1_open"],
+            status["type_a"]["position_2_open"],
+            status["type_b"]["position_open"],
+        )
+
         if df_1m.empty or df_5m.empty:
+            if df_1m.empty:
+                self._append_blocker(status["type_a"], "missing_1m_data")
+                self._append_blocker(status["type_b"], "missing_1m_data")
+            if df_5m.empty:
+                self._append_blocker(status["type_a"], "missing_5m_data")
+                self._append_blocker(status["type_b"], "missing_5m_data")
+            self.logger.warning(
+                "oi_eval blocker=missing_market_data missing_1m=%s missing_5m=%s ts=%s",
+                df_1m.empty,
+                df_5m.empty,
+                status["evaluation_timestamp"],
+            )
+            self._log_evaluation(status, actions)
             return {"timestamp": _to_iso(evaluation_ts), "actions": actions, "state": next_state, "status": status}
 
         latest_1m = df_1m.iloc[-1]
@@ -477,41 +572,66 @@ class OIExpiryStrategy:
         try:
             spot = float(latest_1m["close"])
         except Exception:
+            self._append_blocker(status["type_a"], "invalid_spot_price")
+            self._append_blocker(status["type_b"], "invalid_spot_price")
+            self.logger.warning("oi_eval blocker=invalid_spot_price ts=%s", status["evaluation_timestamp"])
+            self._log_evaluation(status, actions)
             return {"timestamp": _to_iso(evaluation_ts), "actions": actions, "state": next_state, "status": status}
 
         atm_strike = floor_to_100_strike(spot)
         entry_flag_on = self._entry_flag_on(latest_1m, latest_5m)
         entry_price_below_1m_smas = self._entry_price_below_1m_smas(latest_1m)
+        status["spot"] = float(spot)
+        status["atm_strike"] = int(atm_strike)
         next_state["entry_price_below_1m_smas"] = bool(entry_price_below_1m_smas)
         next_state["type_a"]["entry_flag_on"] = bool(entry_flag_on)
         status["entry_price_below_1m_smas"] = bool(entry_price_below_1m_smas)
+        status["data_ready"] = bool(option_rows) and bool(oi_rows)
 
-        type_a_pos1 = ((position.get("type_a") or {}).get("position_1") or {})
-        type_a_pos2 = ((position.get("type_a") or {}).get("position_2") or {})
-        type_b_pos = ((position.get("type_b") or {}).get("position") or {})
+        if not option_rows:
+            self._append_blocker(status["type_a"], "missing_option_snapshot")
+            self._append_blocker(status["type_b"], "missing_option_snapshot")
+            self.logger.warning("oi_eval blocker=missing_option_snapshot ts=%s", status["evaluation_timestamp"])
+        if not oi_rows:
+            self._append_blocker(status["type_a"], "missing_oi_snapshot")
+            self._append_blocker(status["type_b"], "missing_oi_snapshot")
+            self.logger.warning("oi_eval blocker=missing_oi_snapshot ts=%s", status["evaluation_timestamp"])
+        if not oi_5m_rows:
+            self._append_blocker(status["type_b"], "missing_oi_5m_snapshot")
 
-        current_diff = self._current_type_a_diff(next_state["type_a"].get("strike_bundle"), option_rows)
+        current_diff = self._current_type_a_diff(next_state["type_a"].get("strike_bundle"), option_rows) if option_rows else None
+        type_a_pos1_pnl = self._current_position_pnl(type_a_pos1, option_rows) if option_rows else None
+        type_a_pos2_pnl = self._current_position_pnl(type_a_pos2, option_rows) if option_rows else None
         type_a_trigger_threshold = self._type_a_pos2_trigger_threshold(next_state["type_a"])
-        status["type_a"] = {
-            "entry_flag_on": bool(entry_flag_on),
-            "current_diff": current_diff,
-            "position_1_open": self._position_is_open(type_a_pos1),
-            "position_2_open": self._position_is_open(type_a_pos2),
-        }
+        status["type_a"]["entry_flag_on"] = bool(entry_flag_on)
+        status["type_a"]["current_diff"] = current_diff
+        status["type_a"]["position_1_pnl"] = type_a_pos1_pnl
+        status["type_a"]["position_2_pnl"] = type_a_pos2_pnl
+        status["type_a"]["reentry_threshold"] = type_a_trigger_threshold
+        if status["type_a"]["position_1_open"] and current_diff is None:
+            self._append_blocker(status["type_a"], "type_a_diff_unavailable")
+        if status["type_a"]["position_1_open"] and type_a_pos1_pnl is None:
+            self._append_blocker(status["type_a"], "type_a_position_1_pnl_unavailable")
+        if status["type_a"]["position_2_open"] and type_a_pos2_pnl is None:
+            self._append_blocker(status["type_a"], "type_a_position_2_pnl_unavailable")
 
         if self._position_is_open(type_a_pos1) and current_diff is not None:
             if current_diff <= 12.0:
-                actions.append({
+                action = {
                     "type": "CLOSE_TYPE_A_ALL",
                     "reason": "position_1_sl",
                     "current_diff": current_diff,
-                })
+                }
+                actions.append(action)
+                self._append_pending_action(status["type_a"], action["type"])
             elif current_diff >= 45.0:
-                actions.append({
+                action = {
                     "type": "CLOSE_TYPE_A_POS1",
                     "reason": "position_1_target",
                     "current_diff": current_diff,
-                })
+                }
+                actions.append(action)
+                self._append_pending_action(status["type_a"], action["type"])
             elif (not self._position_is_open(type_a_pos2)) and type_a_trigger_threshold is not None:
                 if current_diff > type_a_trigger_threshold:
                     next_state["type_a"]["flag_1"] = False
@@ -530,28 +650,33 @@ class OIExpiryStrategy:
                         or int(next_state["type_a"].get("position_2_reentry_count") or 0) < 1
                     ):
                         next_state["type_a"]["flag_1"] = True
+            elif type_a_trigger_threshold is None:
+                self._append_blocker(status["type_a"], "type_a_reentry_threshold_unavailable")
 
         if self._position_is_open(type_a_pos2) and current_diff is not None:
             if current_diff <= 12.0:
-                actions.append({
+                action = {
                     "type": "CLOSE_TYPE_A_POS2",
                     "reason": "position_2_sl",
                     "current_diff": current_diff,
-                })
+                }
+                actions.append(action)
+                self._append_pending_action(status["type_a"], action["type"])
             elif current_diff >= 50.0:
-                actions.append({
+                action = {
                     "type": "CLOSE_TYPE_A_POS2",
                     "reason": "position_2_target",
                     "current_diff": current_diff,
-                })
+                }
+                actions.append(action)
+                self._append_pending_action(status["type_a"], action["type"])
 
-        type_b_pnl = self._current_position_pnl(type_b_pos, option_rows)
-        status["type_b"] = {
-            "trigger_1_seen": bool(next_state["type_b"].get("trigger_1_seen")),
-            "trigger_2_seen": bool(next_state["type_b"].get("trigger_2_seen")),
-            "position_open": self._position_is_open(type_b_pos),
-            "current_pnl": type_b_pnl,
-        }
+        type_b_pnl = self._current_position_pnl(type_b_pos, option_rows) if option_rows else None
+        status["type_b"]["trigger_1_seen"] = bool(next_state["type_b"].get("trigger_1_seen"))
+        status["type_b"]["trigger_2_seen"] = bool(next_state["type_b"].get("trigger_2_seen"))
+        status["type_b"]["current_pnl"] = type_b_pnl
+        if status["type_b"]["position_open"] and type_b_pnl is None:
+            self._append_blocker(status["type_b"], "type_b_pnl_unavailable")
 
         if self._position_is_open(type_b_pos):
             sell_pe = ((next_state["type_b"].get("selected_contracts") or {}).get("sell_pe") or {})
@@ -565,12 +690,16 @@ class OIExpiryStrategy:
             )
             sell_pe_entry_ltp = next_state["type_b"].get("sell_pe_entry_ltp")
             if sell_pe_ltp is not None and sell_pe_entry_ltp is not None and sell_pe_ltp > (float(sell_pe_entry_ltp) + 20.0):
-                actions.append({
+                action = {
                     "type": "CLOSE_TYPE_B_POSITION",
                     "reason": "sell_pe_rise",
                     "sell_pe_ltp": sell_pe_ltp,
-                })
+                }
+                actions.append(action)
+                self._append_pending_action(status["type_b"], action["type"])
             else:
+                if sell_pe_ltp is None:
+                    self._append_blocker(status["type_b"], "type_b_sell_pe_ltp_unavailable")
                 current_sh = latest_1m.get("sh")
                 try:
                     current_high = float(latest_1m["high"])
@@ -579,20 +708,27 @@ class OIExpiryStrategy:
                     current_high = None
                     current_sh_value = None
                 if current_high is not None and current_sh_value is not None and current_high > current_sh_value:
-                    actions.append({
+                    action = {
                         "type": "CLOSE_TYPE_B_POSITION",
                         "reason": "sh_breach",
                         "high": current_high,
                         "sh": current_sh_value,
-                    })
+                    }
+                    actions.append(action)
+                    self._append_pending_action(status["type_b"], action["type"])
                 elif type_b_pnl is not None and type_b_pnl > 3000.0:
-                    actions.append({
+                    action = {
                         "type": "CLOSE_TYPE_B_POSITION",
                         "reason": "profit_target",
                         "current_pnl": type_b_pnl,
-                    })
+                    }
+                    actions.append(action)
+                    self._append_pending_action(status["type_b"], action["type"])
 
         if not self._entry_window_open(now):
+            self._append_blocker(status["type_a"], "entry_window_closed")
+            self._append_blocker(status["type_b"], "entry_window_closed")
+            self._log_evaluation(status, actions)
             return {"timestamp": _to_iso(evaluation_ts), "actions": actions, "state": next_state, "status": status}
 
         if (
@@ -605,13 +741,32 @@ class OIExpiryStrategy:
             if oi_result["passed"]:
                 type_a_payload = self._build_type_a_legs(atm_strike=atm_strike, option_rows=option_rows, current_date=current_date)
                 if type_a_payload:
-                    actions.append({
+                    action = {
                         "type": "OPEN_TYPE_A_POS1",
                         "reason": "entry_flag_and_oi",
                         "entry_price_below_1m_smas": True,
                         **type_a_payload,
                         "oi_contracts": oi_result["contracts"],
-                    })
+                    }
+                    actions.append(action)
+                    self._append_pending_action(status["type_a"], action["type"])
+                else:
+                    self._append_blocker(status["type_a"], "type_a_legs_unavailable")
+                    self.logger.warning(
+                        "oi_eval blocker=type_a_legs_unavailable ts=%s atm=%s",
+                        status["evaluation_timestamp"],
+                        atm_strike,
+                    )
+            else:
+                self._append_blocker(status["type_a"], str(oi_result.get("reason") or "oi_filter_failed"))
+                self.logger.info(
+                    "oi_eval blocker=%s ts=%s pe_oi=%s ce_oi=%s otm_ce_oi=%s",
+                    oi_result.get("reason"),
+                    status["evaluation_timestamp"],
+                    oi_result.get("pe_oi"),
+                    oi_result.get("ce_oi"),
+                    oi_result.get("otm_ce_oi"),
+                )
         elif self._position_is_open(type_a_pos1) and (not self._position_is_open(type_a_pos2)) and next_state["type_a"].get("flag_1"):
             strike_bundle = next_state["type_a"].get("strike_bundle") or {}
             bundle_atm = strike_bundle.get("atm_strike")
@@ -622,13 +777,26 @@ class OIExpiryStrategy:
                     if type_a_payload:
                         reentry_kind = "reopen" if next_state["type_a"].get("position_2_rearmed") else "initial"
                         next_state["type_a"]["flag_2"] = True
-                        actions.append({
+                        action = {
                             "type": "OPEN_TYPE_A_POS2",
                             "reason": "flag_1_and_oi_recheck",
                             "reentry_kind": reentry_kind,
                             **type_a_payload,
                             "oi_contracts": oi_result["contracts"],
-                        })
+                        }
+                        actions.append(action)
+                        self._append_pending_action(status["type_a"], action["type"])
+                    else:
+                        self._append_blocker(status["type_a"], "type_a_reentry_legs_unavailable")
+                else:
+                    self._append_blocker(status["type_a"], str(oi_result.get("reason") or "oi_filter_failed"))
+            else:
+                self._append_blocker(status["type_a"], "missing_strike_bundle")
+        elif (not self._position_is_open(type_a_pos1)) and (not self._position_is_open(type_a_pos2)):
+            if not entry_flag_on:
+                self._append_blocker(status["type_a"], "entry_flag_off")
+            if not entry_price_below_1m_smas:
+                self._append_blocker(status["type_a"], "entry_price_not_below_1m_smas")
 
         if not self._position_is_open(type_b_pos):
             trigger_1 = False
@@ -656,16 +824,20 @@ class OIExpiryStrategy:
             )
             if deep_itm_ce_ltp is not None and deep_itm_ce_vwap is not None:
                 trigger_2 = abs(float(deep_itm_ce_ltp) - float(deep_itm_ce_vwap)) <= 5.0
+            else:
+                self._append_blocker(status["type_b"], "type_b_trigger_2_data_unavailable")
 
             next_state["type_b"]["trigger_1_seen"] = bool(trigger_1)
             next_state["type_b"]["trigger_2_seen"] = bool(trigger_2)
+            status["type_b"]["trigger_1_seen"] = bool(trigger_1)
+            status["type_b"]["trigger_2_seen"] = bool(trigger_2)
 
             if (trigger_1 or trigger_2) and entry_price_below_1m_smas:
                 oi_result = self._evaluate_universal_oi(atm_strike=atm_strike, oi_rows=oi_rows, current_date=current_date)
                 if oi_result["passed"]:
                     type_b_payload = self._build_type_b_legs(atm_strike=atm_strike, option_rows=option_rows, current_date=current_date)
                     if type_b_payload:
-                        actions.append({
+                        action = {
                             "type": "OPEN_TYPE_B_POSITION",
                             "reason": "trigger_and_oi",
                             "trigger_1": trigger_1,
@@ -673,10 +845,29 @@ class OIExpiryStrategy:
                             "entry_price_below_1m_smas": True,
                             **type_b_payload,
                             "oi_contracts": oi_result["contracts"],
-                        })
+                        }
+                        actions.append(action)
+                        self._append_pending_action(status["type_b"], action["type"])
+                    else:
+                        self._append_blocker(status["type_b"], "type_b_legs_unavailable")
+                else:
+                    self._append_blocker(status["type_b"], str(oi_result.get("reason") or "oi_filter_failed"))
+                    self.logger.info(
+                        "oi_eval blocker=%s ts=%s pe_oi=%s ce_oi=%s otm_ce_oi=%s",
+                        oi_result.get("reason"),
+                        status["evaluation_timestamp"],
+                        oi_result.get("pe_oi"),
+                        oi_result.get("ce_oi"),
+                        oi_result.get("otm_ce_oi"),
+                    )
+            elif not trigger_1 and not trigger_2:
+                self._append_blocker(status["type_b"], "type_b_triggers_not_met")
+            elif not entry_price_below_1m_smas:
+                self._append_blocker(status["type_b"], "entry_price_not_below_1m_smas")
 
         status["type_b"]["trigger_1_seen"] = bool(next_state["type_b"].get("trigger_1_seen"))
         status["type_b"]["trigger_2_seen"] = bool(next_state["type_b"].get("trigger_2_seen"))
+        self._log_evaluation(status, actions)
         return {
             "timestamp": _to_iso(evaluation_ts),
             "actions": actions,

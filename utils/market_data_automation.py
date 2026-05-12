@@ -500,11 +500,13 @@ class MarketDataAutomation:
                     or oi_summary.get("type_a", {}).get("position_2_status") == "OPEN"
                     or oi_summary.get("type_b", {}).get("position_status") == "OPEN"
                 ):
+                    aggregate_open_pnl = oi_summary.get("aggregate_open_pnl", 0.0)
                     logger.info(
                         "OI Nifty Status - "
                         f"A1: {oi_summary.get('type_a', {}).get('position_1_status')} "
                         f"A2: {oi_summary.get('type_a', {}).get('position_2_status')} "
-                        f"B: {oi_summary.get('type_b', {}).get('position_status')}"
+                        f"B: {oi_summary.get('type_b', {}).get('position_status')} "
+                        f"OpenPnL: {aggregate_open_pnl:.2f}"
                     )
                 else:
                     logger.debug("OI Nifty trader: No active position, waiting for signals")
@@ -584,6 +586,7 @@ class MarketDataAutomation:
                     'selected_strategy': 'oi_expiry',
                     'active_position': active_position,
                     'message': 'No active OI position' if not active_position else 'OI expiry strategy active',
+                    'aggregate_open_pnl': oi_summary.get('aggregate_open_pnl'),
                     'type_a_position_1_status': type_a.get('position_1_status', 'FLAT'),
                     'type_a_position_2_status': type_a.get('position_2_status', 'FLAT'),
                     'type_a_position_1_entry_diff': type_a.get('position_1_entry_diff'),

@@ -13,9 +13,8 @@ from core.bot_oi import OIExpiryPaperBot
 
 class OIExpiryPaperBotTests(unittest.TestCase):
     @staticmethod
-    def _logger_tuple():
-        logger = logging.getLogger("test.oi.bot")
-        return (logger, logger, logger, logger, logger, logger)
+    def _oi_loggers():
+        return (Mock(name="oi_strategy_logger"), Mock(name="oi_trade_logger"), Mock(name="oi_position_logger"))
 
     def _mock_strategy(self):
         strategy = Mock()
@@ -27,10 +26,12 @@ class OIExpiryPaperBotTests(unittest.TestCase):
 
     def test_default_files_are_separate_from_existing_nifty_bot_files(self):
         strategy = self._mock_strategy()
-        with patch("core.bot_oi.setup_paper_trading_logger", return_value=self._logger_tuple()):
+        with patch("core.bot_oi.setup_oi_logging", return_value=self._oi_loggers()):
             bot = OIExpiryPaperBot(strategy=strategy)
         self.assertEqual(bot.position_file, "active_position_oi.json")
         self.assertEqual(bot.state_file, "oi_strategy_state.json")
+        self.assertIsNot(bot.logger, bot.trade_logger)
+        self.assertIsNot(bot.trade_logger, bot.position_logger)
 
     def test_run_once_opens_type_a_and_type_b_in_same_cycle(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -94,9 +95,14 @@ class OIExpiryPaperBotTests(unittest.TestCase):
                         ],
                     },
                 ],
+                "status": {
+                    "evaluation_timestamp": "2026-04-28 09:30:00",
+                    "type_a": {"current_diff": 25.0, "pending_actions": ["OPEN_TYPE_A_POS1"]},
+                    "type_b": {"trigger_1_seen": True, "trigger_2_seen": False, "pending_actions": ["OPEN_TYPE_B_POSITION"]},
+                },
             }
 
-            with patch("core.bot_oi.setup_paper_trading_logger", return_value=self._logger_tuple()), \
+            with patch("core.bot_oi.setup_oi_logging", return_value=self._oi_loggers()), \
                  patch("core.bot_oi.fetch_latest_option_snapshot", return_value=[]):
                 bot = OIExpiryPaperBot(
                     position_file=position_file,
@@ -109,9 +115,16 @@ class OIExpiryPaperBotTests(unittest.TestCase):
 
             self.assertEqual(bot.position["type_a"]["position_1"]["status"], "OPEN")
             self.assertEqual(bot.position["type_b"]["position"]["status"], "OPEN")
+            self.assertTrue(bot.position["type_a"]["position_1"]["trade_id"].startswith("A1-"))
+            self.assertTrue(bot.position["type_b"]["position"]["trade_id"].startswith("B-"))
             self.assertTrue(bot.state["entry_price_below_1m_smas"])
             self.assertEqual(bot.state["type_b"]["sell_pe_entry_ltp"], 20.0)
-            self.assertTrue(bot.get_status_summary()["entry_price_below_1m_smas"])
+            with patch("core.bot_oi.fetch_latest_option_snapshot", return_value=[]):
+                summary = bot.get_status_summary()
+            self.assertTrue(summary["entry_price_below_1m_smas"])
+            self.assertIn("aggregate_open_pnl", summary)
+            self.assertEqual(summary["type_a"]["position_1_trade_id"], bot.position["type_a"]["position_1"]["trade_id"])
+            self.assertEqual(summary["type_b"]["trade_id"], bot.position["type_b"]["position"]["trade_id"])
 
     def test_type_a_position_2_reopen_persists_rearm_state_and_reentry_count(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -119,7 +132,7 @@ class OIExpiryPaperBotTests(unittest.TestCase):
             state_file = os.path.join(temp_dir, "oi_strategy_state.json")
             strategy = self._mock_strategy()
 
-            with patch("core.bot_oi.setup_paper_trading_logger", return_value=self._logger_tuple()), \
+            with patch("core.bot_oi.setup_oi_logging", return_value=self._oi_loggers()), \
                  patch("core.bot_oi.fetch_latest_option_snapshot", return_value=[]):
                 bot = OIExpiryPaperBot(
                     position_file=position_file,
@@ -153,6 +166,7 @@ class OIExpiryPaperBotTests(unittest.TestCase):
             self.assertTrue(bot.state["type_a"]["position_2_trigger_consumed"])
             self.assertFalse(bot.state["type_a"]["position_2_rearmed"])
             self.assertEqual(bot.state["type_a"]["position_2_reentry_count"], 1)
+            self.assertTrue(bot.position["type_a"]["position_2"]["trade_id"].startswith("A2-"))
 
             bot._apply_action({"type": "CLOSE_TYPE_A_POS2", "reason": "position_2_target"}, "2026-04-28 09:42:00")
 
@@ -166,7 +180,7 @@ class OIExpiryPaperBotTests(unittest.TestCase):
             state_file = os.path.join(temp_dir, "oi_strategy_state.json")
             strategy = self._mock_strategy()
 
-            with patch("core.bot_oi.setup_paper_trading_logger", return_value=self._logger_tuple()), \
+            with patch("core.bot_oi.setup_oi_logging", return_value=self._oi_loggers()), \
                  patch("core.bot_oi.fetch_latest_option_snapshot", return_value=[]):
                 bot = OIExpiryPaperBot(
                     position_file=position_file,
@@ -208,7 +222,7 @@ class OIExpiryPaperBotTests(unittest.TestCase):
             strategy = self._mock_strategy()
             strategy._hard_close_reached.return_value = True
 
-            with patch("core.bot_oi.setup_paper_trading_logger", return_value=self._logger_tuple()):
+            with patch("core.bot_oi.setup_oi_logging", return_value=self._oi_loggers()):
                 bot = OIExpiryPaperBot(
                     position_file=position_file,
                     state_file=state_file,
@@ -246,7 +260,7 @@ class OIExpiryPaperBotTests(unittest.TestCase):
             state_file = os.path.join(temp_dir, "oi_strategy_state.json")
             strategy = self._mock_strategy()
 
-            with patch("core.bot_oi.setup_paper_trading_logger", return_value=self._logger_tuple()), \
+            with patch("core.bot_oi.setup_oi_logging", return_value=self._oi_loggers()), \
                  patch("core.bot_oi.fetch_latest_option_snapshot", return_value=[]):
                 bot = OIExpiryPaperBot(
                     position_file=position_file,
@@ -274,7 +288,7 @@ class OIExpiryPaperBotTests(unittest.TestCase):
             state_file = os.path.join(temp_dir, "oi_strategy_state.json")
             strategy = self._mock_strategy()
 
-            with patch("core.bot_oi.setup_paper_trading_logger", return_value=self._logger_tuple()), \
+            with patch("core.bot_oi.setup_oi_logging", return_value=self._oi_loggers()), \
                  patch("core.bot_oi.fetch_latest_option_snapshot", return_value=[]):
                 bot = OIExpiryPaperBot(
                     position_file=position_file,
@@ -295,6 +309,57 @@ class OIExpiryPaperBotTests(unittest.TestCase):
             self.assertTrue(cleaned)
             self.assertEqual(bot.position["type_b"]["position"]["status"], "FLAT")
             self.assertEqual(bot.state["session"]["last_reset_date"], "2026-04-28")
+
+    def test_status_summary_reports_live_branch_pnl_and_aggregate_open_pnl(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            position_file = os.path.join(temp_dir, "active_position_oi.json")
+            state_file = os.path.join(temp_dir, "oi_strategy_state.json")
+            strategy = self._mock_strategy()
+
+            with patch("core.bot_oi.setup_oi_logging", return_value=self._oi_loggers()), \
+                 patch("core.bot_oi.fetch_latest_option_snapshot", return_value=[]):
+                bot = OIExpiryPaperBot(
+                    position_file=position_file,
+                    state_file=state_file,
+                    strategy=strategy,
+                )
+
+            bot.last_evaluation_status = {
+                "evaluation_timestamp": "2026-04-28 10:15:00",
+                "type_a": {"current_diff": 18.5, "pending_actions": [], "blockers": []},
+                "type_b": {"trigger_1_seen": True, "trigger_2_seen": False, "pending_actions": [], "blockers": []},
+            }
+            bot.position["type_a"]["position_1"] = {
+                "status": "OPEN",
+                "trade_id": "A1-20260428101500",
+                "opened_at": "2026-04-28 10:15:00",
+                "pnl": 0.0,
+                "legs": [
+                    {"tradingsymbol": "A_BUY", "side": "BUY", "option_type": "CE", "strike_price": 24200, "expiry": "2026-04-28", "entry_price": 50.0, "last_price": 50.0},
+                    {"tradingsymbol": "A_SELL", "side": "SELL", "option_type": "CE", "strike_price": 24250, "expiry": "2026-04-28", "entry_price": 25.0, "last_price": 25.0},
+                ],
+            }
+            bot.position["type_b"]["position"] = {
+                "status": "OPEN",
+                "trade_id": "B-20260428101500",
+                "opened_at": "2026-04-28 10:15:00",
+                "pnl": 0.0,
+                "legs": [
+                    {"tradingsymbol": "B_BUY", "side": "BUY", "option_type": "PE", "strike_price": 24200, "expiry": "2026-04-28", "entry_price": 20.0, "last_price": 20.0},
+                ],
+            }
+            option_rows = [
+                {"tradingsymbol": "A_BUY", "strike_price": 24200, "option_type": "CE", "expiry_date": "2026-04-28", "ltp": 55.0},
+                {"tradingsymbol": "A_SELL", "strike_price": 24250, "option_type": "CE", "expiry_date": "2026-04-28", "ltp": 20.0},
+                {"tradingsymbol": "B_BUY", "strike_price": 24200, "option_type": "PE", "expiry_date": "2026-04-28", "ltp": 27.0},
+            ]
+
+            with patch("core.bot_oi.fetch_latest_option_snapshot", return_value=option_rows):
+                summary = bot.get_status_summary()
+
+            self.assertEqual(summary["aggregate_open_pnl"], 17.0)
+            self.assertEqual(summary["type_a"]["position_1_current_pnl"], 10.0)
+            self.assertEqual(summary["type_b"]["current_pnl"], 7.0)
 
 
 if __name__ == "__main__":
