@@ -3,6 +3,7 @@ Command-line interface for backtesting.
 
 Usage:
     python -m backtesting.cli --start 2025-11-03 --end 2026-03-15 --output results.html
+    python -m backtesting.cli --strategy oi-expiry --start 2026-04-21 --end 2026-04-28 --output oi_results.html
     # Run backtest with debug logging enabled
     python -m backtesting.cli --start 2025-11-03 --end 2025-11-05 --debug-log logs/name of file.log -v
     python -m backtesting.cli --start YYYY-MM-DD --end YYYY-MM-DD --output report.html
@@ -600,7 +601,7 @@ def write_html_report(output: Path, summary_df: pd.DataFrame, trades_df: pd.Data
 def main() -> int:
     """Main entry point for CLI."""
     parser = argparse.ArgumentParser(
-        description="Backtest NIFTY options strategy on historical data",
+        description="Backtest repository strategies on historical data",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -618,6 +619,13 @@ Examples:
         """,
     )
 
+    parser.add_argument(
+        "--strategy",
+        type=str,
+        default="nifty-options",
+        choices=["nifty-options", "oi-expiry"],
+        help="Strategy to backtest (default: nifty-options)",
+    )
     parser.add_argument(
         "--start",
         type=str,
@@ -679,6 +687,7 @@ Examples:
     config = BacktestConfig(
         start_date=start_date,
         end_date=end_date,
+        strategy_id=args.strategy,
         db_path=args.db,
         symbol=args.symbol,
         verbose=args.verbose,
@@ -686,9 +695,11 @@ Examples:
     )
 
     # Run backtest
+    title = "OI Expiry Backtest" if args.strategy == "oi-expiry" else "NIFTY Options Strategy Backtest"
     print("=" * 60)
-    print("NIFTY Options Strategy Backtest")
+    print(title)
     print("=" * 60)
+    print(f"Strategy: {args.strategy}")
     print(f"Period: {start_date.date()} to {end_date.date()}")
     print(f"Symbol: {args.symbol}")
     print(f"Database: {args.db}")

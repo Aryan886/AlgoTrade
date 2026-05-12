@@ -3,11 +3,13 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pandas as pd
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from backtesting import cli as cli_module
 from backtesting.cli import export_results
 
 
@@ -37,7 +39,7 @@ class DummyRunner:
 
 
 def make_result() -> SimpleNamespace:
-    return SimpleNamespace(
+    result = SimpleNamespace(
         total_pnl=20.0,
         num_trades=1,
         win_rate=1.0,
@@ -59,9 +61,31 @@ def make_result() -> SimpleNamespace:
             ("2026-03-20 09:35:00", 100120.0),
         ],
     )
+    result.summary = lambda: "summary"
+    return result
 
 
 class BacktestingCliExportTests(unittest.TestCase):
+    def test_cli_main_accepts_oi_expiry_strategy(self):
+        runner = DummyRunner()
+        runner.run = lambda: make_result()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "backtesting.cli",
+                "--strategy", "oi-expiry",
+                "--start", "2026-04-28",
+                "--end", "2026-04-28",
+            ],
+        ), patch("backtesting.cli.BacktestRunner", return_value=runner) as runner_cls:
+            rc = cli_module.main()
+
+        self.assertEqual(rc, 0)
+        config = runner_cls.call_args[0][0]
+        self.assertEqual(config.strategy_id, "oi-expiry")
+
     def test_export_results_writes_html_report(self):
         runner = DummyRunner()
         result = make_result()

@@ -117,9 +117,6 @@ def create_dashboard_router(engine: TradingEngine, db_path: str = DB_PATH) -> AP
 
     @router.post("/backtests/export-html", response_model=HtmlExportResponse)
     def export_backtest_html(payload: HtmlExportRequest, request: Request) -> HtmlExportResponse:
-        if payload.strategyId != "nifty-options":
-            raise HTTPException(status_code=400, detail="Only nifty-options supports MVP backtests.")
-
         stored: Optional[StoredBacktestRun] = getattr(request.app.state, "latest_backtest_run", None)
         runner: Optional[BacktestRunner] = None
         result = None
@@ -193,8 +190,8 @@ def initialize_dashboard_store(router: APIRouter, reference_time: Optional[datet
 
 
 def _validate_backtest_request(payload: BacktestRunRequest) -> BacktestRunRequest:
-    if payload.strategyId != "nifty-options":
-        raise HTTPException(status_code=400, detail="Only nifty-options supports real backtests in this MVP.")
+    if payload.strategyId not in {"nifty-options", "oi-expiry"}:
+        raise HTTPException(status_code=400, detail="Only nifty-options and oi-expiry support real backtests in this MVP.")
 
     start_day = date.fromisoformat(payload.startDate)
     end_day = date.fromisoformat(payload.endDate)
@@ -209,6 +206,7 @@ def _create_runner(payload: BacktestRunRequest, db_path: str = DB_PATH) -> Backt
     config = BacktestConfig(
         start_date=start_dt,
         end_date=end_dt,
+        strategy_id=payload.strategyId,
         db_path=db_path,
         symbol="NIFTY50",
         verbose=False,
@@ -219,6 +217,7 @@ def _create_runner(payload: BacktestRunRequest, db_path: str = DB_PATH) -> Backt
 def _build_backtest_response(payload: BacktestRunRequest, runner: BacktestRunner, result: object) -> BacktestRunResponse:
     trades_df = runner.trade_log.to_dataframe()
     report = build_report_payload(result=result, trades_df=trades_df)
+    strategy_qty = _strategy_backtest_qty(payload.strategyId)
     return BacktestRunResponse(
         summary=report["summary"],
         kpis=report["kpis"],
@@ -228,12 +227,12 @@ def _build_backtest_response(payload: BacktestRunRequest, runner: BacktestRunner
         trades=[
             TradeRow(
                 id=index + 1,
-                strategyId="nifty-options",
+                strategyId=payload.strategyId,
                 symbol=str(row.get("trade_id") or f"trade-{index+1}"),
                 entryTs=_stringify(row.get("entry_fill_time") or row.get("entry_time")),
                 exitTs=_stringify(row.get("exit_fill_time") or row.get("exit_time")),
-                side="SELL",
-                qty=50,
+                side="MULTI" if payload.strategyId == "oi-expiry" else "SELL",
+                qty=strategy_qty,
                 entryPrice=float(row.get("entry_price") or 0.0),
                 exitPrice=float(row.get("exit_price")) if pd.notna(row.get("exit_price")) else None,
                 realizedPnl=float(row.get("pnl")) if pd.notna(row.get("pnl")) else None,
@@ -280,3 +279,7 @@ def _stringify(value: object) -> Optional[str]:
     if hasattr(value, "isoformat"):
         return value.isoformat(sep=" ")
     return str(value)
+
+
+def _strategy_backtest_qty(strategy_id: StrategyId) -> int:
+    return 1 if strategy_id == "oi-expiry" else 50

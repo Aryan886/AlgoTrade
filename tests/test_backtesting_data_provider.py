@@ -306,7 +306,7 @@ class HistoricalDataProviderTests(unittest.TestCase):
             provider.load_all_data(datetime(2026, 3, 5, 9, 15), datetime(2026, 3, 5, 15, 30))
             coverage = provider.get_backtest_data_coverage()
 
-        self.assertEqual(coverage["option_data"]["start"], datetime(2026, 3, 5, 8, 44, 7))
+        self.assertEqual(coverage["option_data"]["start"], datetime(2026, 3, 5, 9, 18, 14))
         self.assertEqual(coverage["option_data"]["end"], datetime(2026, 3, 5, 9, 18, 14))
 
     def test_fetch_vix_data_is_snapshot_based(self):
@@ -510,6 +510,75 @@ class HistoricalDataProviderTests(unittest.TestCase):
         self.assertEqual(enriched[22950]["iv"], 0.22)
         self.assertEqual(enriched[22950]["open_interest"], 125000)
 
+    def test_fetch_option_snapshot_returns_latest_snapshot_at_or_before_time(self):
+        provider = HistoricalDataProvider(db_path=":memory:")
+        provider._data_loaded = True
+        provider._option_data = pd.DataFrame(
+            [
+                {
+                    "timestamp": pd.Timestamp("2026-04-28 09:29:00"),
+                    "tradingsymbol": "NIFTYA",
+                    "strike_price": 24200,
+                    "option_type": "CE",
+                    "expiry_date": "2026-04-30",
+                    "ltp": 40.0,
+                },
+                {
+                    "timestamp": pd.Timestamp("2026-04-28 09:30:00"),
+                    "tradingsymbol": "NIFTYB",
+                    "strike_price": 24250,
+                    "option_type": "CE",
+                    "expiry_date": "2026-04-30",
+                    "ltp": 25.0,
+                },
+                {
+                    "timestamp": pd.Timestamp("2026-04-28 09:30:00"),
+                    "tradingsymbol": "NIFTYC",
+                    "strike_price": 24200,
+                    "option_type": "PE",
+                    "expiry_date": "2026-04-30",
+                    "ltp": 31.0,
+                },
+            ]
+        )
+
+        before = provider.fetch_option_snapshot(datetime(2026, 4, 28, 9, 29, 30))
+        exact = provider.fetch_option_snapshot(datetime(2026, 4, 28, 9, 30, 0))
+
+        self.assertEqual(len(before), 1)
+        self.assertEqual(before[0]["tradingsymbol"], "NIFTYA")
+        self.assertEqual({row["tradingsymbol"] for row in exact}, {"NIFTYB", "NIFTYC"})
+
+    def test_fetch_next_option_snapshot_returns_first_snapshot_at_or_after_time(self):
+        provider = HistoricalDataProvider(db_path=":memory:")
+        provider._data_loaded = True
+        provider._option_data = pd.DataFrame(
+            [
+                {
+                    "timestamp": pd.Timestamp("2026-04-28 09:30:04"),
+                    "tradingsymbol": "NIFTYEARLY",
+                    "strike_price": 24200,
+                    "option_type": "CE",
+                    "expiry_date": "2026-04-30",
+                    "ltp": 40.0,
+                },
+                {
+                    "timestamp": pd.Timestamp("2026-04-28 09:30:07"),
+                    "tradingsymbol": "NIFTYFILL",
+                    "strike_price": 24250,
+                    "option_type": "CE",
+                    "expiry_date": "2026-04-30",
+                    "ltp": 25.0,
+                },
+            ]
+        )
+
+        snapshot_time, rows = provider.fetch_next_option_snapshot(datetime(2026, 4, 28, 9, 30, 5))
+
+        self.assertEqual(snapshot_time, datetime(2026, 4, 28, 9, 30, 7))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["tradingsymbol"], "NIFTYFILL")
+
     def test_fetch_option_price_falls_back_to_option_data_when_delta_cache_misses_contract(self):
         provider = HistoricalDataProvider(db_path=":memory:")
         provider._data_loaded = True
@@ -552,6 +621,7 @@ class HistoricalDataProviderTests(unittest.TestCase):
         provider = HistoricalDataProvider(db_path=":memory:")
         provider._data_loaded = True
         provider._market_data["1m"] = make_market_df("2026-04-07 09:15:00", periods=3, freq="1min")
+        provider._market_data["5m"] = make_market_df("2026-04-07 09:15:00", periods=3, freq="5min")
         provider._vix_data = pd.DataFrame(
             {"vix_value": [13.1, 13.4]},
             index=pd.DatetimeIndex([
@@ -571,17 +641,35 @@ class HistoricalDataProviderTests(unittest.TestCase):
                 {"timestamp": pd.Timestamp("2026-04-07 15:26:00"), "ltp": 111.0},
             ]
         )
+        provider._open_interest_data = pd.DataFrame(
+            [
+                {"timestamp": pd.Timestamp("2026-04-07 09:25:00"), "open_interest": 1000},
+                {"timestamp": pd.Timestamp("2026-04-07 15:15:00"), "open_interest": 1200},
+            ]
+        )
+        provider._open_interest_5m_data = pd.DataFrame(
+            [
+                {"timestamp": pd.Timestamp("2026-04-07 09:25:00"), "vwap": 10.0},
+                {"timestamp": pd.Timestamp("2026-04-07 15:15:00"), "vwap": 12.0},
+            ]
+        )
 
         coverage = provider.get_backtest_data_coverage()
 
         self.assertEqual(coverage["market_data_1m"]["start"], datetime(2026, 4, 7, 9, 15))
         self.assertEqual(coverage["market_data_1m"]["end"], datetime(2026, 4, 7, 9, 17))
+        self.assertEqual(coverage["market_data_5m"]["start"], datetime(2026, 4, 7, 9, 15))
+        self.assertEqual(coverage["market_data_5m"]["end"], datetime(2026, 4, 7, 9, 25))
         self.assertEqual(coverage["vix_data"]["start"], datetime(2026, 4, 7, 9, 20))
         self.assertEqual(coverage["vix_data"]["end"], datetime(2026, 4, 7, 15, 20))
         self.assertEqual(coverage["delta_cache"]["start"], datetime(2026, 4, 7, 9, 16))
         self.assertEqual(coverage["delta_cache"]["end"], datetime(2026, 4, 7, 15, 25))
         self.assertEqual(coverage["option_data"]["start"], datetime(2026, 4, 7, 9, 17))
         self.assertEqual(coverage["option_data"]["end"], datetime(2026, 4, 7, 15, 26))
+        self.assertEqual(coverage["option_open_interest"]["start"], datetime(2026, 4, 7, 9, 25))
+        self.assertEqual(coverage["option_open_interest"]["end"], datetime(2026, 4, 7, 15, 15))
+        self.assertEqual(coverage["option_open_interest_5m"]["start"], datetime(2026, 4, 7, 9, 25))
+        self.assertEqual(coverage["option_open_interest_5m"]["end"], datetime(2026, 4, 7, 15, 15))
 
 
 if __name__ == "__main__":

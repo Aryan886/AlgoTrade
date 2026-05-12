@@ -74,6 +74,9 @@ class OIExpiryPaperBot:
     def _now(self) -> datetime:
         return datetime.now()
 
+    def _fetch_option_snapshot(self) -> List[Dict[str, Any]]:
+        return fetch_latest_option_snapshot(symbol=self.symbol)
+
     def _load_state(self) -> Dict[str, Any]:
         if not os.path.exists(self.state_file):
             return build_default_oi_state()
@@ -427,7 +430,7 @@ class OIExpiryPaperBot:
         )
 
     def _apply_action(self, action: Dict[str, Any], timestamp: str) -> None:
-        option_rows = fetch_latest_option_snapshot(symbol=self.symbol)
+        option_rows = self._fetch_option_snapshot()
         action_type = str(action.get("type") or "")
         self.logger.info(
             "OI applying action type=%s ts=%s reason=%s",
@@ -469,7 +472,7 @@ class OIExpiryPaperBot:
     def _force_square_off_all(self, now: Optional[datetime] = None) -> None:
         now = now or self._now()
         exit_time = _to_iso(now)
-        option_rows = fetch_latest_option_snapshot(symbol=self.symbol)
+        option_rows = self._fetch_option_snapshot()
         self.logger.warning(
             "OI force square off ts=%s open_positions=%s",
             exit_time,
@@ -506,13 +509,13 @@ class OIExpiryPaperBot:
         for action in evaluation.get("actions") or []:
             self._apply_action(action, str(evaluation.get("timestamp")))
 
-        option_rows = fetch_latest_option_snapshot(symbol=self.symbol)
+        option_rows = self._fetch_option_snapshot()
         self._log_position_monitor(evaluation_status=self.last_evaluation_status, option_rows=option_rows)
         self.save_state()
         self.save_position()
 
     def get_status_summary(self) -> Dict[str, Any]:
-        option_rows = fetch_latest_option_snapshot(symbol=self.symbol)
+        option_rows = self._fetch_option_snapshot()
         aggregate_open_pnl = self._refresh_branch_metrics(option_rows=option_rows)
         type_a_pos1 = self.position["type_a"]["position_1"]
         type_a_pos2 = self.position["type_a"]["position_2"]

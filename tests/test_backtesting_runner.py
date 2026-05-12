@@ -54,6 +54,7 @@ class BacktestRunnerCoverageTests(unittest.TestCase):
         runner = self._make_runner(start_date, end_date)
         coverage = {
             "market_data_1m": make_coverage(start_date, end_date, rows=100),
+            "market_data_5m": make_coverage(start_date, end_date, rows=100),
             "vix_data": make_coverage(None, None, rows=0),
             "delta_cache": make_coverage(start_date, datetime(2026, 3, 24, 15, 1, 5), rows=100),
             "option_data": make_coverage(start_date, datetime(2026, 3, 24, 15, 1, 5), rows=100),
@@ -75,6 +76,7 @@ class BacktestRunnerCoverageTests(unittest.TestCase):
         runner = self._make_runner(start_date, end_date)
         coverage = {
             "market_data_1m": make_coverage(start_date, end_date, rows=100),
+            "market_data_5m": make_coverage(start_date, end_date, rows=100),
             "vix_data": make_coverage(datetime(2026, 3, 24, 9, 26, 45), datetime(2026, 3, 24, 15, 0, 0), rows=100),
             "delta_cache": make_coverage(start_date, datetime(2026, 3, 24, 15, 1, 5), rows=100),
             "option_data": make_coverage(start_date, datetime(2026, 3, 24, 15, 1, 5), rows=100),
@@ -100,6 +102,7 @@ class BacktestRunnerCoverageTests(unittest.TestCase):
         runner = self._make_runner(start_date, end_date)
         coverage = {
             "market_data_1m": make_coverage(start_date, end_date, rows=100),
+            "market_data_5m": make_coverage(start_date, end_date, rows=100),
             "vix_data": make_coverage(start_date, datetime(2026, 4, 2, 15, 0, 0), rows=100),
             "delta_cache": make_coverage(start_date, datetime(2026, 4, 2, 15, 1, 5), rows=100),
             "option_data": make_coverage(None, None, rows=0),
@@ -125,6 +128,7 @@ class BacktestRunnerCoverageTests(unittest.TestCase):
         runner = self._make_runner(start_date, end_date)
         coverage = {
             "market_data_1m": make_coverage(start_date, end_date, rows=100),
+            "market_data_5m": make_coverage(start_date, end_date, rows=100),
             "vix_data": make_coverage(start_date, datetime(2026, 3, 24, 15, 0, 0), rows=100),
             "delta_cache": make_coverage(datetime(2026, 3, 24, 9, 18, 14), datetime(2026, 3, 24, 15, 1, 5), rows=100),
             "option_data": make_coverage(datetime(2026, 3, 24, 9, 18, 14), datetime(2026, 3, 24, 15, 1, 5), rows=100),
@@ -152,6 +156,7 @@ class BacktestRunnerCoverageTests(unittest.TestCase):
         runner = self._make_runner(start_date, end_date)
         coverage = {
             "market_data_1m": make_coverage(start_date, end_date, rows=100),
+            "market_data_5m": make_coverage(start_date, end_date, rows=100),
             "vix_data": make_coverage(start_date, datetime(2026, 4, 7, 15, 0, 0), rows=100),
             "delta_cache": make_coverage(start_date, datetime(2026, 4, 7, 15, 1, 5), rows=100),
             "option_data": make_coverage(start_date, datetime(2026, 4, 7, 15, 1, 5), rows=100),
@@ -177,6 +182,7 @@ class BacktestRunnerCoverageTests(unittest.TestCase):
         runner = self._make_runner(start_date, end_date)
         coverage = {
             "market_data_1m": make_coverage(start_date, end_date, rows=100),
+            "market_data_5m": make_coverage(start_date, end_date, rows=100),
             "vix_data": make_coverage(datetime(2026, 3, 24, 15, 5, 0), datetime(2026, 3, 24, 15, 10, 0), rows=100),
             "delta_cache": make_coverage(start_date, datetime(2026, 3, 24, 15, 1, 5), rows=100),
             "option_data": make_coverage(start_date, datetime(2026, 3, 24, 15, 1, 5), rows=100),
@@ -196,6 +202,7 @@ class BacktestRunnerCoverageTests(unittest.TestCase):
         runner = self._make_runner(start_date, end_date)
         coverage = {
             "market_data_1m": make_coverage(start_date, end_date, rows=100),
+            "market_data_5m": make_coverage(start_date, end_date, rows=100),
             "vix_data": make_coverage(start_date, datetime(2026, 3, 24, 15, 0, 0), rows=100),
             "delta_cache": make_coverage(datetime(2026, 3, 24, 15, 5, 0), datetime(2026, 3, 24, 15, 10, 0), rows=100),
             "option_data": make_coverage(start_date, datetime(2026, 3, 24, 15, 1, 5), rows=100),
@@ -215,6 +222,7 @@ class BacktestRunnerCoverageTests(unittest.TestCase):
         runner = self._make_runner(start_date, end_date)
         coverage = {
             "market_data_1m": make_coverage(start_date, end_date, rows=100),
+            "market_data_5m": make_coverage(start_date, end_date, rows=100),
             "vix_data": make_coverage(start_date, datetime(2026, 3, 24, 15, 0, 0), rows=100),
             "delta_cache": make_coverage(start_date, datetime(2026, 3, 24, 15, 1, 5), rows=100),
             "option_data": make_coverage(start_date, datetime(2026, 3, 24, 15, 1, 5), rows=100),
@@ -235,6 +243,7 @@ class BacktestRunnerCoverageTests(unittest.TestCase):
         runner = self._make_runner(start_date, end_date)
         coverage = {
             "market_data_1m": make_coverage(start_date, end_date, rows=100),
+            "market_data_5m": make_coverage(start_date, end_date, rows=100),
             "vix_data": make_coverage(start_date, datetime(2026, 3, 24, 15, 5, 0), rows=100),
             "delta_cache": make_coverage(start_date, datetime(2026, 3, 24, 15, 1, 5), rows=100),
             "option_data": make_coverage(start_date, datetime(2026, 3, 24, 15, 1, 5), rows=100),
@@ -255,6 +264,7 @@ class BacktestRunnerCoverageTests(unittest.TestCase):
         runner = self._make_runner(start_date, end_date, step_interval=timedelta(minutes=30))
         coverage = {
             "market_data_1m": make_coverage(start_date, end_date, rows=100),
+            "market_data_5m": make_coverage(start_date, end_date, rows=100),
             "vix_data": make_coverage(start_date, datetime(2026, 3, 24, 15, 0, 0), rows=100),
             "delta_cache": make_coverage(start_date, datetime(2026, 3, 24, 14, 1, 5), rows=100),
             "option_data": make_coverage(start_date, datetime(2026, 3, 24, 14, 1, 5), rows=100),
@@ -272,5 +282,102 @@ class BacktestRunnerCoverageTests(unittest.TestCase):
         self.assertIn("Truncating backtest end to the latest fully supported point-in-time", output)
         self.assertIn("delta_cache limits execution to 2026-03-24 14:00:00", output)
         self.assertNotIn("option_data limits execution", output)
+        self.assertEqual(result.num_trades, 0)
+        self.assertGreater(runner.bot.run_once.call_count, 0)
+
+    def test_oi_run_fails_when_open_interest_coverage_is_missing(self):
+        start_date = datetime(2026, 4, 28, 9, 15)
+        end_date = datetime(2026, 4, 28, 15, 30)
+        config = BacktestConfig(
+            start_date=start_date,
+            end_date=end_date,
+            strategy_id="oi-expiry",
+            symbol="NIFTY50",
+            db_path="db/trading_bot.db",
+            verbose=False,
+            step_interval=timedelta(days=1),
+        )
+        runner = BacktestRunner(config)
+        coverage = {
+            "market_data_1m": make_coverage(start_date, end_date, rows=100),
+            "market_data_5m": make_coverage(start_date, end_date, rows=100),
+            "option_data": make_coverage(start_date, datetime(2026, 4, 28, 15, 21, 5), rows=100),
+            "option_open_interest": make_coverage(None, None, rows=0),
+            "option_open_interest_5m": make_coverage(None, None, rows=0),
+        }
+        fake_provider = FakeCoverageProvider(start_date, end_date, coverage, [datetime(2026, 4, 28)])
+        runner.data_provider = fake_provider
+
+        with self.assertRaises(BacktestDataCoverageError) as ctx:
+            runner.run()
+
+        self.assertIn("option_open_interest", str(ctx.exception))
+
+    def test_oi_run_warns_and_proceeds_when_open_interest_5m_is_missing(self):
+        start_date = datetime(2026, 4, 28, 9, 15)
+        end_date = datetime(2026, 4, 28, 15, 30)
+        config = BacktestConfig(
+            start_date=start_date,
+            end_date=end_date,
+            strategy_id="oi-expiry",
+            symbol="NIFTY50",
+            db_path="db/trading_bot.db",
+            verbose=False,
+            step_interval=timedelta(days=1),
+        )
+        runner = BacktestRunner(config)
+        coverage = {
+            "market_data_1m": make_coverage(start_date, end_date, rows=100),
+            "market_data_5m": make_coverage(start_date, end_date, rows=100),
+            "option_data": make_coverage(start_date, datetime(2026, 4, 28, 15, 21, 5), rows=100),
+            "option_open_interest": make_coverage(start_date, datetime(2026, 4, 28, 15, 15, 0), rows=100),
+            "option_open_interest_5m": make_coverage(None, None, rows=0),
+        }
+        fake_provider = FakeCoverageProvider(start_date, end_date, coverage, [datetime(2026, 4, 28)])
+        runner.data_provider = fake_provider
+        runner.bot.run_once = Mock()
+        runner.bot.get_unrealized_pnl = Mock(return_value=0.0)
+
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            result = runner.run()
+
+        output = buffer.getvalue()
+        self.assertIn("option_open_interest_5m", output)
+        self.assertIn("status=WARNING", output)
+        self.assertEqual(result.num_trades, 0)
+        runner.bot.run_once.assert_called_once()
+
+    def test_oi_run_truncates_to_option_data_tail(self):
+        start_date = datetime(2026, 4, 28, 9, 15)
+        end_date = datetime(2026, 4, 28, 15, 30)
+        config = BacktestConfig(
+            start_date=start_date,
+            end_date=end_date,
+            strategy_id="oi-expiry",
+            symbol="NIFTY50",
+            db_path="db/trading_bot.db",
+            verbose=False,
+            step_interval=timedelta(minutes=30),
+        )
+        runner = BacktestRunner(config)
+        coverage = {
+            "market_data_1m": make_coverage(start_date, end_date, rows=100),
+            "market_data_5m": make_coverage(start_date, end_date, rows=100),
+            "option_data": make_coverage(start_date, datetime(2026, 4, 28, 14, 0, 5), rows=100),
+            "option_open_interest": make_coverage(start_date, datetime(2026, 4, 28, 15, 15, 0), rows=100),
+            "option_open_interest_5m": make_coverage(start_date, datetime(2026, 4, 28, 15, 15, 0), rows=100),
+        }
+        fake_provider = FakeCoverageProvider(start_date, end_date, coverage, [datetime(2026, 4, 28)])
+        runner.data_provider = fake_provider
+        runner.bot.run_once = Mock()
+        runner.bot.get_unrealized_pnl = Mock(return_value=0.0)
+
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            result = runner.run()
+
+        output = buffer.getvalue()
+        self.assertIn("option_data limits execution to 2026-04-28 13:59:00", output)
         self.assertEqual(result.num_trades, 0)
         self.assertGreater(runner.bot.run_once.call_count, 0)

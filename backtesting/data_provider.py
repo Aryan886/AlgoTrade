@@ -296,6 +296,27 @@ class HistoricalDataProvider:
         snapshot_ts = pd.Timestamp(option_snapshot["timestamp"].iloc[0])
         return snapshot_ts.to_pydatetime(), self._normalize_snapshot(option_snapshot, source="option")
 
+    def fetch_option_snapshot(self, current_time: datetime) -> List[Dict[str, Any]]:
+        """Return the latest pure option snapshot at or before current_time."""
+        if not self._data_loaded:
+            raise RuntimeError("Data not loaded. Call load_all_data() first.")
+        current_ts = pd.Timestamp(current_time)
+        option_snapshot = self._latest_snapshot(self._option_data, current_ts)
+        return self._normalize_snapshot(option_snapshot, source="option")
+
+    def fetch_next_option_snapshot(self, current_time: datetime) -> Tuple[Optional[datetime], List[Dict[str, Any]]]:
+        """Return the first pure option snapshot at or after current_time."""
+        if not self._data_loaded:
+            raise RuntimeError("Data not loaded. Call load_all_data() first.")
+
+        current_ts = pd.Timestamp(current_time)
+        option_snapshot = self._next_snapshot(self._option_data, current_ts, strict=False)
+        if option_snapshot.empty:
+            return None, []
+
+        snapshot_ts = pd.Timestamp(option_snapshot["timestamp"].iloc[0])
+        return snapshot_ts.to_pydatetime(), self._normalize_snapshot(option_snapshot, source="option")
+
     def fetch_option_price(
         self,
         current_time: datetime,
@@ -496,9 +517,12 @@ class HistoricalDataProvider:
 
         coverage = {
             "market_data_1m": self._describe_loaded_frame(self._market_data.get("1m")),
+            "market_data_5m": self._describe_loaded_frame(self._market_data.get("5m")),
             "vix_data": self._describe_loaded_frame(self._vix_data),
             "delta_cache": self._describe_loaded_snapshot_frame(self._delta_cache),
             "option_data": self._describe_loaded_snapshot_frame(self._option_data),
+            "option_open_interest": self._describe_loaded_snapshot_frame(self._open_interest_data),
+            "option_open_interest_5m": self._describe_loaded_snapshot_frame(self._open_interest_5m_data),
         }
         return coverage
 

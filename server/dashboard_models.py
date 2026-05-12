@@ -5,7 +5,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
-StrategyId = Literal["nifty-options", "donchian-options", "sma-spread"]
+StrategyId = Literal["nifty-options", "oi-expiry", "donchian-options", "sma-spread"]
 StrategyStatus = Literal["RUNNING", "STOPPED", "PAUSED"]
 StrategyType = Literal["Live-ready", "Demo"]
 PnlGroupBy = Literal["daily", "monthly"]

@@ -4,6 +4,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+import pandas as pd
 
 from fastapi.testclient import TestClient
 
@@ -91,6 +95,37 @@ class DashboardApiTests(unittest.TestCase):
             json={"strategyId": "nifty-options", "startDate": "2026-03-30", "endDate": "2026-03-20"},
         )
         self.assertEqual(invalid_date_order.status_code, 400)
+
+    def test_backtests_accept_oi_expiry(self):
+        fake_result = SimpleNamespace(
+            total_pnl=0.0,
+            num_trades=0,
+            win_rate=0.0,
+            avg_win=0.0,
+            avg_loss=0.0,
+            profit_factor=0.0,
+            max_drawdown=0.0,
+            max_drawdown_pct=0.0,
+            sharpe_ratio=0.0,
+            daily_sharpe_ratio=0.0,
+            expectancy=0.0,
+            skipped_entries=0,
+            data_quality_warnings=[],
+            trades=[],
+            equity_curve=[],
+        )
+        fake_runner = Mock()
+        fake_runner.run.return_value = fake_result
+        fake_runner.trade_log.to_dataframe.return_value = pd.DataFrame()
+
+        with patch("server.dashboard_router._create_runner", return_value=fake_runner):
+            response = self.client.post(
+                "/api/backtests/run",
+                json={"strategyId": "oi-expiry", "startDate": "2026-04-28", "endDate": "2026-04-28"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["meta"]["strategyId"], "oi-expiry")
 
     def test_backtests_allow_longer_supported_windows(self):
         longer_window = self.client.post(

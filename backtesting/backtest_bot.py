@@ -532,6 +532,10 @@ class BacktestableBot(NiftyPaperBot):
         self._active_trade_ids = {}
         self._pending_sl_exit = set()
 
+    def reset_for_backtest_day(self) -> None:
+        """Reset per-session strategy state at the start of a simulated trading day."""
+        self.strategy.reset_state()
+
     def get_unrealized_pnl(self) -> float:
         """Calculate unrealized P&L for open positions."""
         unrealized = 0.0
