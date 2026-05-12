@@ -1,33 +1,51 @@
-import { useContext } from "react";
-import { StatusContext } from "./context/StatusProvider";
+import { Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
 
-import IdleTradeEntry from "./components/screens/IdleTradeEntry";
-import TradePreview from "./components/screens/TradePreview";
-import OpenPosition from "./components/screens/OpenPosition";
-import ClosingOverlay from "./components/screens/ClosingOverlay";
-import ErrorView from "./components/screens/ErrorView";
-import Loader from "./components/common/Loader";
-import NetworkBanner from "./components/common/NetworkBanner";
+import { AuthProvider, useAuth } from "./context/AuthContext";
+import AppShell from "./layout/AppShell";
+import BacktestsPage from "./pages/BacktestsPage";
+import DashboardPage from "./pages/DashboardPage";
+import LoginPage from "./pages/LoginPage";
+import ReportsPage from "./pages/ReportsPage";
+import StrategiesPage from "./pages/StrategiesPage";
+import LegacyEngineApp from "./legacy/LegacyEngineApp";
 
-export default function App() {
-  const { status, loading, networkError } = useContext(StatusContext);
+function ProtectedRoute() {
+  const { session } = useAuth();
+  const location = useLocation();
 
-  // Shell loading state (NOT an engine state)
-  if (loading || !status) {
-    return <Loader />;
+  if (!session) {
+    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
   }
 
-  console.log("Engine State:", status.engine_state);
-  return (
-    <>
-      <div style={{ color:"red"}}>APP IS RENDERING</div>
-      {networkError && <NetworkBanner />}
+  return <Outlet />;
+}
 
-      {status.engine_state === "IDLE" && <IdleTradeEntry status={status}/>}
-      {status.engine_state === "PREVIEWING" && <TradePreview status={status} />}
-      {status.engine_state === "OPEN" && <OpenPosition />}
-      {status.engine_state === "CLOSING" && <ClosingOverlay />}
-      {status.engine_state === "ERROR" && <ErrorView />}
-    </>
+function PublicOnlyRoute() {
+  const { session } = useAuth();
+  return session ? <Navigate to="/dashboard" replace /> : <Outlet />;
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <Routes>
+        <Route element={<PublicOnlyRoute />}>
+          <Route path="/login" element={<LoginPage />} />
+        </Route>
+
+        <Route element={<ProtectedRoute />}>
+          <Route element={<AppShell />}>
+            <Route path="/" element={<Navigate to="/dashboard" replace />} />
+            <Route path="/dashboard" element={<DashboardPage />} />
+            <Route path="/strategies" element={<StrategiesPage />} />
+            <Route path="/backtests" element={<BacktestsPage />} />
+            <Route path="/reports" element={<ReportsPage />} />
+            <Route path="/legacy-engine" element={<LegacyEngineApp />} />
+          </Route>
+        </Route>
+
+        <Route path="*" element={<Navigate to="/dashboard" replace />} />
+      </Routes>
+    </AuthProvider>
   );
 }

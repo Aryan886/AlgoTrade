@@ -1,3 +1,5 @@
+/* eslint-disable react-refresh/only-export-components */
+
 import React, { createContext, useEffect, useState } from "react";
 import { fetchStatus } from "../api/status";
 import  type { EngineStatus } from "../types/engine";

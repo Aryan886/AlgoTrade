@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 from datetime import datetime, timedelta
 from engine.engine import TradingEngine, PreviewExpiredError, PositionAlreadyOpenError
+from utils.db_func import DB_PATH
 
 from engine.models import EngineState, Leg, Preview
 from server.schemas import (
@@ -13,9 +14,10 @@ from server.schemas import (
     ManualTradePreviewResponse,
     leg_request_to_model,
 )
+from server.dashboard_router import create_dashboard_router, initialize_dashboard_store
 
 
-def create_app(engine: TradingEngine) -> FastAPI:
+def create_app(engine: TradingEngine, db_path: str = DB_PATH) -> FastAPI:
     app = FastAPI(
         title="Trading Bot API",
         description="API for managing and monitoring trading bots.",
@@ -29,6 +31,13 @@ def create_app(engine: TradingEngine) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    dashboard_router = create_dashboard_router(engine=engine, db_path=db_path)
+    app.include_router(dashboard_router)
+
+    @app.on_event("startup")
+    def startup_dashboard_store() -> None:
+        initialize_dashboard_store(dashboard_router)
 
     @app.get("/")
     def root():
