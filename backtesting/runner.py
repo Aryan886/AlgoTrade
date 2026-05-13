@@ -101,6 +101,14 @@ class BacktestRunner:
         # Adjust start/end if needed
         effective_start = max(self.config.start_date, data_start) if data_start else self.config.start_date
         effective_end = min(self.config.end_date, data_end) if data_end else self.config.end_date
+        
+        # If requested date is beyond available data, clamp start to end
+        if effective_start > effective_end:
+            effective_start = effective_end
+            if self.config.start_date > data_end:
+                print(f"Warning: Requested start date {self.config.start_date} is beyond available data {data_end}.")
+                print(f"Adjusting to run backtest on latest available date: {effective_start.date()}")
+        
         trading_days = self.data_provider.get_trading_days(effective_start, effective_end)
         requested_effective_end = effective_end
         effective_end, truncation_messages = self._truncate_effective_end_for_supporting_data(
@@ -319,6 +327,20 @@ class BacktestRunner:
         adjusted_end = min([effective_end] + [candidate_end for _, candidate_end, _ in candidates])
         if adjusted_end >= effective_end:
             return effective_end, []
+
+        # Check if truncation would eliminate all trading days
+        # If so, warn but proceed without truncation to avoid total data rejection
+        potential_trading_days = self.data_provider.get_trading_days(effective_start, adjusted_end)
+        if not potential_trading_days and trading_days:
+            # Truncation would eliminate all trading days; revert and warn instead
+            messages = []
+            for table_name, candidate_end, detail in candidates:
+                if candidate_end < effective_end:
+                    messages.append(
+                        f"WARNING: {table_name} would limit execution to {candidate_end}, "
+                        f"but this eliminates all runnable days. Proceeding with available data through {effective_end}."
+                    )
+            return effective_end, messages
 
         messages = []
         for table_name, candidate_end, detail in candidates:
