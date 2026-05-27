@@ -377,17 +377,19 @@ class BacktestRunner:
                 required_end,
             )
 
-        if available_end < required_end:
+        effective_available_end = self._effective_coverage_end(table_name, available_end)
+
+        if effective_available_end < required_end:
             if table_name in optional_warning_tables:
                 return "WARNING", self._coverage_warning_message(
                     table_name,
-                    available_end,
+                    effective_available_end,
                     required_start,
                 ), None
             return "MISSING", None, self._coverage_issue_message(
                 table_name,
                 available_start,
-                available_end,
+                effective_available_end,
                 required_start,
                 required_end,
             )
@@ -397,7 +399,7 @@ class BacktestRunner:
                 return "MISSING", None, self._coverage_issue_message(
                     table_name,
                     available_start,
-                    available_end,
+                    effective_available_end,
                     required_start,
                     required_end,
                 )
@@ -413,12 +415,28 @@ class BacktestRunner:
             return "MISSING", None, self._coverage_issue_message(
                 table_name,
                 available_start,
-                available_end,
+                effective_available_end,
                 required_start,
                 required_end,
             )
 
         return "OK", None, None
+
+    @staticmethod
+    def _market_data_interval_for_table(table_name: str) -> Optional[str]:
+        if not table_name.startswith("market_data_"):
+            return None
+        return table_name.removeprefix("market_data_")
+
+    def _effective_coverage_end(self, table_name: str, available_end: Optional[datetime]) -> Optional[datetime]:
+        if available_end is None:
+            return None
+
+        interval = self._market_data_interval_for_table(table_name)
+        if interval is None:
+            return available_end
+
+        return available_end + HistoricalDataProvider.get_interval_duration(interval)
 
     @staticmethod
     def _format_range(start: Optional[datetime], end: Optional[datetime]) -> str:

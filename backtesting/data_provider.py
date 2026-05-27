@@ -14,6 +14,13 @@ import pandas as pd
 from utils.db_func import _canonical_option_order_by, _sort_option_like_dataframe
 from utils.market_data_1h import build_1h_market_data_from_15m
 
+MARKET_INTERVAL_DURATIONS: Dict[str, timedelta] = {
+    "1m": timedelta(minutes=1),
+    "5m": timedelta(minutes=5),
+    "15m": timedelta(minutes=15),
+    "1h": timedelta(hours=1),
+}
+
 
 @dataclass
 class HistoricalDataProvider:
@@ -22,12 +29,7 @@ class HistoricalDataProvider:
     db_path: str
     symbol: str = "NIFTY50"
     INTERVAL_DURATIONS: Dict[str, timedelta] = field(
-        default_factory=lambda: {
-            "1m": timedelta(minutes=1),
-            "5m": timedelta(minutes=5),
-            "15m": timedelta(minutes=15),
-            "1h": timedelta(hours=1),
-        },
+        default_factory=lambda: dict(MARKET_INTERVAL_DURATIONS),
         init=False,
         repr=False,
     )
@@ -537,6 +539,13 @@ class HistoricalDataProvider:
         unique_dates = sorted(set(filtered.index.date))
         return [datetime.combine(d, datetime.min.time()) for d in unique_dates]
 
+    @classmethod
+    def get_interval_duration(cls, interval: str) -> timedelta:
+        interval_duration = MARKET_INTERVAL_DURATIONS.get(interval)
+        if interval_duration is None:
+            raise ValueError(f"Unsupported interval: {interval}")
+        return interval_duration
+
     def _latest_fully_available_candle_start(self, current_time: datetime, interval: str) -> pd.Timestamp:
         """Return the latest open-timestamped candle that would be closed by current_time.
 
@@ -544,9 +553,7 @@ class HistoricalDataProvider:
         a 5m row stamped 09:20:00 represents the candle that opened at 09:20 and
         closes at 09:25, so it is only available once current_time >= 09:25.
         """
-        interval_duration = self.INTERVAL_DURATIONS.get(interval)
-        if interval_duration is None:
-            raise ValueError(f"Unsupported interval: {interval}")
+        interval_duration = self.get_interval_duration(interval)
         return pd.Timestamp(current_time) - interval_duration
 
     def _describe_loaded_frame(self, df: Optional[pd.DataFrame]) -> Dict[str, Any]:

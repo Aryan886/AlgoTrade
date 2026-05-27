@@ -285,6 +285,61 @@ class BacktestRunnerCoverageTests(unittest.TestCase):
         self.assertEqual(result.num_trades, 0)
         self.assertGreater(runner.bot.run_once.call_count, 0)
 
+    def test_run_accepts_5m_candle_open_coverage_when_last_row_closes_after_effective_end(self):
+        start_date = datetime(2026, 3, 17, 9, 15)
+        end_date = datetime(2026, 3, 17, 15, 30)
+        runner = self._make_runner(start_date, end_date)
+        coverage = {
+            "market_data_1m": make_coverage(start_date, datetime(2026, 3, 17, 15, 29), rows=375),
+            "market_data_5m": make_coverage(start_date, datetime(2026, 3, 17, 15, 25), rows=75),
+            "vix_data": make_coverage(datetime(2026, 3, 17, 9, 25, 51), datetime(2026, 3, 17, 15, 41, 25), rows=128),
+            "delta_cache": make_coverage(datetime(2026, 3, 17, 9, 21, 0), datetime(2026, 3, 17, 15, 28, 15), rows=6726),
+            "option_data": make_coverage(None, None, rows=0),
+        }
+        fake_provider = FakeCoverageProvider(
+            start_date,
+            datetime(2026, 3, 17, 15, 29),
+            coverage,
+            [datetime(2026, 3, 17)],
+        )
+        runner.data_provider = fake_provider
+        runner.bot.run_once = Mock()
+        runner.bot.get_unrealized_pnl = Mock(return_value=0.0)
+
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            result = runner.run()
+
+        output = buffer.getvalue()
+        self.assertIn("market_data_5m: rows=75", output)
+        self.assertNotIn("market_data_5m does not fully cover", output)
+        self.assertEqual(result.num_trades, 0)
+        runner.bot.run_once.assert_called_once()
+
+    def test_run_fails_when_5m_candle_open_coverage_truly_ends_before_effective_end(self):
+        start_date = datetime(2026, 3, 17, 9, 15)
+        end_date = datetime(2026, 3, 17, 15, 30)
+        runner = self._make_runner(start_date, end_date)
+        coverage = {
+            "market_data_1m": make_coverage(start_date, datetime(2026, 3, 17, 15, 29), rows=375),
+            "market_data_5m": make_coverage(start_date, datetime(2026, 3, 17, 15, 20), rows=74),
+            "vix_data": make_coverage(datetime(2026, 3, 17, 9, 25, 51), datetime(2026, 3, 17, 15, 41, 25), rows=128),
+            "delta_cache": make_coverage(datetime(2026, 3, 17, 9, 21, 0), datetime(2026, 3, 17, 15, 28, 15), rows=6726),
+            "option_data": make_coverage(None, None, rows=0),
+        }
+        fake_provider = FakeCoverageProvider(
+            start_date,
+            datetime(2026, 3, 17, 15, 29),
+            coverage,
+            [datetime(2026, 3, 17)],
+        )
+        runner.data_provider = fake_provider
+
+        with self.assertRaises(BacktestDataCoverageError) as ctx:
+            runner.run()
+
+        self.assertIn("market_data_5m does not fully cover", str(ctx.exception))
+
     def test_oi_run_fails_when_open_interest_coverage_is_missing(self):
         start_date = datetime(2026, 4, 28, 9, 15)
         end_date = datetime(2026, 4, 28, 15, 30)

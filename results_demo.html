@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Backtest Report</title>
+  <style>
+    :root {
+      --bg: #f3f6ef;
+      --panel: #ffffff;
+      --ink: #17301f;
+      --muted: #5f6f65;
+      --line: #d8e0d4;
+      --accent: #2f6b3b;
+      --accent-soft: #dcedd7;
+      --danger: #b53a2f;
+      --danger-soft: #fde3df;
+      --shadow: 0 12px 30px rgba(24, 45, 27, 0.08);
+    }
+    body {
+      font-family: Segoe UI, Arial, sans-serif;
+      margin: 0;
+      padding: 28px;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, #e8f3dd 0%, rgba(232, 243, 221, 0) 32%),
+        linear-gradient(180deg, #f7faf5 0%, var(--bg) 100%);
+    }
+    h1, h2 {
+      margin-bottom: 12px;
+    }
+    h1 {
+      font-size: 34px;
+      margin-top: 0;
+      margin-bottom: 8px;
+    }
+    p {
+      color: var(--muted);
+      margin-top: 0;
+    }
+    .hero {
+      margin-bottom: 22px;
+    }
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 14px;
+      margin-bottom: 20px;
+    }
+    .kpi-card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 16px 18px;
+      box-shadow: var(--shadow);
+    }
+    .kpi-card.positive {
+      background: linear-gradient(180deg, #ffffff 0%, #f2fbef 100%);
+    }
+    .kpi-card.negative {
+      background: linear-gradient(180deg, #ffffff 0%, #fff2ef 100%);
+    }
+    .kpi-label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    .kpi-value {
+      font-size: 28px;
+      font-weight: 700;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: 1.1fr 1.9fr;
+      gap: 20px;
+      margin-bottom: 20px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 20px;
+      box-shadow: var(--shadow);
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 14px;
+      background: var(--panel);
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      text-align: left;
+    }
+    th {
+      background: #eef3eb;
+    }
+    tr:nth-child(even) td {
+      background: #f9fbf8;
+    }
+    .trade-table tbody tr.trade-win td {
+      background: var(--accent-soft);
+    }
+    .trade-table tbody tr.trade-loss td {
+      background: var(--danger-soft);
+    }
+    .trade-table tbody tr.trade-flat td {
+      background: #fbfcfb;
+    }
+    .table-wrap {
+      overflow-x: auto;
+    }
+    .equity-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .equity-meta {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .equity-chart {
+      width: 100%;
+      height: auto;
+      background: linear-gradient(180deg, #fbfdf9 0%, #f1f7ec 100%);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+    }
+    .equity-line {
+      stroke-width: 4;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .equity-line.positive {
+      stroke: var(--accent);
+    }
+    .equity-line.negative {
+      stroke: var(--danger);
+    }
+    .empty-state {
+      padding: 18px;
+      border: 1px dashed var(--line);
+      border-radius: 14px;
+      color: var(--muted);
+      background: #fbfcfa;
+    }
+    .sl-kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .sl-lot-breakdown {
+      font-size: 13px;
+      color: var(--muted);
+      padding: 10px 14px;
+      background: #f8faf6;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+    }
+    .warning-list {
+      margin: 14px 0 0;
+      padding-left: 20px;
+      color: var(--ink);
+    }
+    .warning-list li {
+      margin-bottom: 8px;
+    }
+    @media (max-width: 900px) {
+      body {
+        padding: 16px;
+      }
+      .layout {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="hero">
+    <h1>Backtest Report</h1>
+    <p>A cleaner view of strategy performance, trade quality, and equity movement.</p>
+  </div>
+  <div class="kpi-grid">
+    <div class="kpi-card positive"><div class="kpi-label">Total P&L</div><div class="kpi-value">0.00</div></div>
+<div class="kpi-card neutral"><div class="kpi-label">Trades</div><div class="kpi-value">0</div></div>
+<div class="kpi-card neutral"><div class="kpi-label">Win Rate</div><div class="kpi-value">0.00%</div></div>
+<div class="kpi-card neutral"><div class="kpi-label">Max Drawdown</div><div class="kpi-value">0.00</div></div>
+<div class="kpi-card neutral"><div class="kpi-label">Daily Sharpe</div><div class="kpi-value">0.00</div></div>
+<div class="kpi-card positive"><div class="kpi-label">Expectancy</div><div class="kpi-value">0.00</div></div>
+  </div>
+  <div class="layout">
+    <div class="card">
+      <h2>Summary</h2>
+      <table>
+        <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+        <tbody><tr><td>Total P&L</td><td>0.00</td></tr><tr><td>Number of Trades</td><td>0</td></tr><tr><td>Win Rate</td><td>0.00%</td></tr><tr><td>Avg Win</td><td>0.00</td></tr><tr><td>Avg Loss</td><td>0.00</td></tr><tr><td>Profit Factor</td><td>0.00</td></tr><tr><td>Max Drawdown</td><td>0.00</td></tr><tr><td>Max Drawdown %</td><td>0.00%</td></tr><tr><td>Daily Sharpe</td><td>0.00</td></tr><tr><td>Expectancy</td><td>0.00</td></tr><tr><td>Skipped Entries</td><td>0</td></tr></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h2>Equity Curve</h2>
+      
+    <div class="equity-wrap">
+      <div class="equity-meta">
+        <span>Start Equity: 100,000.00</span>
+        <span>End Equity: 100,000.00</span>
+        <span>Points: 300</span>
+      </div>
+      <svg viewBox="0 0 960 260" class="equity-chart" role="img" aria-label="Equity curve chart">
+        <polyline class="equity-line positive" fill="none" points="24.00,236.00 27.05,236.00 30.10,236.00 33.15,236.00 36.20,236.00 39.25,236.00 42.30,236.00 45.35,236.00 48.40,236.00 51.45,236.00 54.50,236.00 57.55,236.00 60.60,236.00 63.65,236.00 66.70,236.00 69.75,236.00 72.80,236.00 75.85,236.00 78.90,236.00 81.95,236.00 85.00,236.00 88.05,236.00 91.10,236.00 94.15,236.00 97.20,236.00 100.25,236.00 103.30,236.00 106.35,236.00 109.40,236.00 112.45,236.00 115.51,236.00 118.56,236.00 121.61,236.00 124.66,236.00 127.71,236.00 130.76,236.00 133.81,236.00 136.86,236.00 139.91,236.00 142.96,236.00 146.01,236.00 149.06,236.00 152.11,236.00 155.16,236.00 158.21,236.00 161.26,236.00 164.31,236.00 167.36,236.00 170.41,236.00 173.46,236.00 176.51,236.00 179.56,236.00 182.61,236.00 185.66,236.00 188.71,236.00 191.76,236.00 194.81,236.00 197.86,236.00 200.91,236.00 203.96,236.00 207.01,236.00 210.06,236.00 213.11,236.00 216.16,236.00 219.21,236.00 222.26,236.00 225.31,236.00 228.36,236.00 231.41,236.00 234.46,236.00 237.51,236.00 240.56,236.00 243.61,236.00 246.66,236.00 249.71,236.00 252.76,236.00 255.81,236.00 258.86,236.00 261.91,236.00 264.96,236.00 268.01,236.00 271.06,236.00 274.11,236.00 277.16,236.00 280.21,236.00 283.26,236.00 286.31,236.00 289.36,236.00 292.41,236.00 295.46,236.00 298.52,236.00 301.57,236.00 304.62,236.00 307.67,236.00 310.72,236.00 313.77,236.00 316.82,236.00 319.87,236.00 322.92,236.00 325.97,236.00 329.02,236.00 332.07,236.00 335.12,236.00 338.17,236.00 341.22,236.00 344.27,236.00 347.32,236.00 350.37,236.00 353.42,236.00 356.47,236.00 359.52,236.00 362.57,236.00 365.62,236.00 368.67,236.00 371.72,236.00 374.77,236.00 377.82,236.00 380.87,236.00 383.92,236.00 386.97,236.00 390.02,236.00 393.07,236.00 396.12,236.00 399.17,236.00 402.22,236.00 405.27,236.00 408.32,236.00 411.37,236.00 414.42,236.00 417.47,236.00 420.52,236.00 423.57,236.00 426.62,236.00 429.67,236.00 432.72,236.00 435.77,236.00 438.82,236.00 441.87,236.00 444.92,236.00 447.97,236.00 451.02,236.00 454.07,236.00 457.12,236.00 460.17,236.00 463.22,236.00 466.27,236.00 469.32,236.00 472.37,236.00 475.42,236.00 478.47,236.00 481.53,236.00 484.58,236.00 487.63,236.00 490.68,236.00 493.73,236.00 496.78,236.00 499.83,236.00 502.88,236.00 505.93,236.00 508.98,236.00 512.03,236.00 515.08,236.00 518.13,236.00 521.18,236.00 524.23,236.00 527.28,236.00 530.33,236.00 533.38,236.00 536.43,236.00 539.48,236.00 542.53,236.00 545.58,236.00 548.63,236.00 551.68,236.00 554.73,236.00 557.78,236.00 560.83,236.00 563.88,236.00 566.93,236.00 569.98,236.00 573.03,236.00 576.08,236.00 579.13,236.00 582.18,236.00 585.23,236.00 588.28,236.00 591.33,236.00 594.38,236.00 597.43,236.00 600.48,236.00 603.53,236.00 606.58,236.00 609.63,236.00 612.68,236.00 615.73,236.00 618.78,236.00 621.83,236.00 624.88,236.00 627.93,236.00 630.98,236.00 634.03,236.00 637.08,236.00 640.13,236.00 643.18,236.00 646.23,236.00 649.28,236.00 652.33,236.00 655.38,236.00 658.43,236.00 661.48,236.00 664.54,236.00 667.59,236.00 670.64,236.00 673.69,236.00 676.74,236.00 679.79,236.00 682.84,236.00 685.89,236.00 688.94,236.00 691.99,236.00 695.04,236.00 698.09,236.00 701.14,236.00 704.19,236.00 707.24,236.00 710.29,236.00 713.34,236.00 716.39,236.00 719.44,236.00 722.49,236.00 725.54,236.00 728.59,236.00 731.64,236.00 734.69,236.00 737.74,236.00 740.79,236.00 743.84,236.00 746.89,236.00 749.94,236.00 752.99,236.00 756.04,236.00 759.09,236.00 762.14,236.00 765.19,236.00 768.24,236.00 771.29,236.00 774.34,236.00 777.39,236.00 780.44,236.00 783.49,236.00 786.54,236.00 789.59,236.00 792.64,236.00 795.69,236.00 798.74,236.00 801.79,236.00 804.84,236.00 807.89,236.00 810.94,236.00 813.99,236.00 817.04,236.00 820.09,236.00 823.14,236.00 826.19,236.00 829.24,236.00 832.29,236.00 835.34,236.00 838.39,236.00 841.44,236.00 844.49,236.00 847.55,236.00 850.60,236.00 853.65,236.00 856.70,236.00 859.75,236.00 862.80,236.00 865.85,236.00 868.90,236.00 871.95,236.00 875.00,236.00 878.05,236.00 881.10,236.00 884.15,236.00 887.20,236.00 890.25,236.00 893.30,236.00 896.35,236.00 899.40,236.00 902.45,236.00 905.50,236.00 908.55,236.00 911.60,236.00 914.65,236.00 917.70,236.00 920.75,236.00 923.80,236.00 926.85,236.00 929.90,236.00 932.95,236.00 936.00,236.00"></polyline>
+      </svg>
+    </div>
+    
+    </div>
+  </div>
+  <div class="card">
+    <h2>Stop Loss Analysis</h2>
+    <div class="empty-state">No SL data available - no closed trades.</div>
+  </div>
+  <div class="card">
+    <h2>Data Quality</h2>
+    <div class="empty-state">No strict backtest data-quality issues were recorded.</div>
+  </div>
+  <div class="card">
+    <h2>Trade Log</h2>
+    <div class="table-wrap">
+      <div class="empty-state">No trades were recorded for this run.</div>
+    </div>
+  </div>
+</body>
+</html>
