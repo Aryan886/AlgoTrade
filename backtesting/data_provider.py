@@ -11,7 +11,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from utils.db_func import _canonical_option_order_by, _sort_option_like_dataframe
 from utils.market_data_1h import build_1h_market_data_from_15m
+
+MARKET_INTERVAL_DURATIONS: Dict[str, timedelta] = {
+    "1m": timedelta(minutes=1),
+    "5m": timedelta(minutes=5),
+    "15m": timedelta(minutes=15),
+    "1h": timedelta(hours=1),
+}
 
 
 @dataclass
@@ -21,12 +29,7 @@ class HistoricalDataProvider:
     db_path: str
     symbol: str = "NIFTY50"
     INTERVAL_DURATIONS: Dict[str, timedelta] = field(
-        default_factory=lambda: {
-            "1m": timedelta(minutes=1),
-            "5m": timedelta(minutes=5),
-            "15m": timedelta(minutes=15),
-            "1h": timedelta(hours=1),
-        },
+        default_factory=lambda: dict(MARKET_INTERVAL_DURATIONS),
         init=False,
         repr=False,
     )
@@ -170,7 +173,11 @@ class HistoricalDataProvider:
 
     def _load_option_data(self, conn: sqlite3.Connection, start: datetime, end: datetime) -> pd.DataFrame:
         try:
-            query = "SELECT * FROM option_data WHERE symbol = ? AND timestamp >= ? AND timestamp <= ? ORDER BY timestamp"
+            query = (
+                "SELECT * FROM option_data "
+                "WHERE symbol = ? AND timestamp >= ? AND timestamp <= ? "
+                f"ORDER BY {_canonical_option_order_by(include_timestamp=True)}"
+            )
             df = pd.read_sql_query(query, conn, params=(
                 self.symbol, start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")
             ))
@@ -181,7 +188,7 @@ class HistoricalDataProvider:
             return df
         df["timestamp"] = pd.to_datetime(df["timestamp"])
         df.columns = [c.lower() for c in df.columns]
-        return df
+        return _sort_option_like_dataframe(df)
 
     def _load_open_interest_data(self, conn: sqlite3.Connection, start: datetime, end: datetime) -> pd.DataFrame:
         try:
@@ -192,8 +199,7 @@ class HistoricalDataProvider:
                 SELECT *
                 FROM option_open_interest
                 WHERE symbol = ? AND timestamp >= ? AND timestamp <= ?
-                ORDER BY timestamp, expiry_date, strike_price, option_type
-            """
+                ORDER BY """ + _canonical_option_order_by(include_timestamp=True)
             df = pd.read_sql_query(query, conn, params=(
                 self.symbol, start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")
             ))
@@ -207,7 +213,7 @@ class HistoricalDataProvider:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce")
         df.columns = [c.lower() for c in df.columns]
-        return df
+        return _sort_option_like_dataframe(df)
 
     def _load_open_interest_5m_data(self, conn: sqlite3.Connection, start: datetime, end: datetime) -> pd.DataFrame:
         try:
@@ -218,8 +224,7 @@ class HistoricalDataProvider:
                 SELECT *
                 FROM option_open_interest_5m
                 WHERE symbol = ? AND timestamp >= ? AND timestamp <= ?
-                ORDER BY timestamp, expiry_date, strike_price, option_type
-            """
+                ORDER BY """ + _canonical_option_order_by(include_timestamp=True)
             df = pd.read_sql_query(query, conn, params=(
                 self.symbol, start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")
             ))
@@ -232,7 +237,7 @@ class HistoricalDataProvider:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce")
         df.columns = [c.lower() for c in df.columns]
-        return df
+        return _sort_option_like_dataframe(df)
 
     def fetch_market_data(self, current_time: datetime, interval: str, limit: int = 300) -> pd.DataFrame:
         """Returns last `limit` fully known candles for the requested interval."""
@@ -286,6 +291,27 @@ class HistoricalDataProvider:
             option_snapshot = self._latest_snapshot(self._option_data, snapshot_ts)
             return snapshot_ts.to_pydatetime(), self._merge_delta_with_option_enrichment(delta_snapshot, option_snapshot)
 
+        option_snapshot = self._next_snapshot(self._option_data, current_ts, strict=False)
+        if option_snapshot.empty:
+            return None, []
+
+        snapshot_ts = pd.Timestamp(option_snapshot["timestamp"].iloc[0])
+        return snapshot_ts.to_pydatetime(), self._normalize_snapshot(option_snapshot, source="option")
+
+    def fetch_option_snapshot(self, current_time: datetime) -> List[Dict[str, Any]]:
+        """Return the latest pure option snapshot at or before current_time."""
+        if not self._data_loaded:
+            raise RuntimeError("Data not loaded. Call load_all_data() first.")
+        current_ts = pd.Timestamp(current_time)
+        option_snapshot = self._latest_snapshot(self._option_data, current_ts)
+        return self._normalize_snapshot(option_snapshot, source="option")
+
+    def fetch_next_option_snapshot(self, current_time: datetime) -> Tuple[Optional[datetime], List[Dict[str, Any]]]:
+        """Return the first pure option snapshot at or after current_time."""
+        if not self._data_loaded:
+            raise RuntimeError("Data not loaded. Call load_all_data() first.")
+
+        current_ts = pd.Timestamp(current_time)
         option_snapshot = self._next_snapshot(self._option_data, current_ts, strict=False)
         if option_snapshot.empty:
             return None, []
@@ -372,7 +398,8 @@ class HistoricalDataProvider:
         if self._open_interest_data.empty:
             return pd.DataFrame()
         current_ts = pd.Timestamp(current_time)
-        return self._open_interest_data[self._open_interest_data["timestamp"] <= current_ts].copy()
+        history = self._open_interest_data[self._open_interest_data["timestamp"] <= current_ts].copy()
+        return _sort_option_like_dataframe(history)
 
     def fetch_open_interest_5m_snapshot(self, current_time: datetime) -> List[Dict[str, Any]]:
         """Return the latest derived 5-minute OI snapshot at or before current_time."""
@@ -393,7 +420,8 @@ class HistoricalDataProvider:
         if self._open_interest_5m_data.empty:
             return pd.DataFrame()
         current_bucket = pd.Timestamp(current_time).floor("5min")
-        return self._open_interest_5m_data[self._open_interest_5m_data["timestamp"] <= current_bucket].copy()
+        history = self._open_interest_5m_data[self._open_interest_5m_data["timestamp"] <= current_bucket].copy()
+        return _sort_option_like_dataframe(history)
 
     def _latest_snapshot(self, df: pd.DataFrame, current_ts: pd.Timestamp) -> pd.DataFrame:
         if df is None or df.empty:
@@ -402,7 +430,8 @@ class HistoricalDataProvider:
         if valid_records.empty:
             return pd.DataFrame()
         latest_ts = valid_records["timestamp"].max()
-        return valid_records[valid_records["timestamp"] == latest_ts].copy()
+        snapshot = valid_records[valid_records["timestamp"] == latest_ts].copy()
+        return _sort_option_like_dataframe(snapshot)
 
     def _next_snapshot(self, df: pd.DataFrame, current_ts: pd.Timestamp, strict: bool = True) -> pd.DataFrame:
         if df is None or df.empty:
@@ -490,9 +519,12 @@ class HistoricalDataProvider:
 
         coverage = {
             "market_data_1m": self._describe_loaded_frame(self._market_data.get("1m")),
+            "market_data_5m": self._describe_loaded_frame(self._market_data.get("5m")),
             "vix_data": self._describe_loaded_frame(self._vix_data),
             "delta_cache": self._describe_loaded_snapshot_frame(self._delta_cache),
             "option_data": self._describe_loaded_snapshot_frame(self._option_data),
+            "option_open_interest": self._describe_loaded_snapshot_frame(self._open_interest_data),
+            "option_open_interest_5m": self._describe_loaded_snapshot_frame(self._open_interest_5m_data),
         }
         return coverage
 
@@ -507,6 +539,13 @@ class HistoricalDataProvider:
         unique_dates = sorted(set(filtered.index.date))
         return [datetime.combine(d, datetime.min.time()) for d in unique_dates]
 
+    @classmethod
+    def get_interval_duration(cls, interval: str) -> timedelta:
+        interval_duration = MARKET_INTERVAL_DURATIONS.get(interval)
+        if interval_duration is None:
+            raise ValueError(f"Unsupported interval: {interval}")
+        return interval_duration
+
     def _latest_fully_available_candle_start(self, current_time: datetime, interval: str) -> pd.Timestamp:
         """Return the latest open-timestamped candle that would be closed by current_time.
 
@@ -514,9 +553,7 @@ class HistoricalDataProvider:
         a 5m row stamped 09:20:00 represents the candle that opened at 09:20 and
         closes at 09:25, so it is only available once current_time >= 09:25.
         """
-        interval_duration = self.INTERVAL_DURATIONS.get(interval)
-        if interval_duration is None:
-            raise ValueError(f"Unsupported interval: {interval}")
+        interval_duration = self.get_interval_duration(interval)
         return pd.Timestamp(current_time) - interval_duration
 
     def _describe_loaded_frame(self, df: Optional[pd.DataFrame]) -> Dict[str, Any]:

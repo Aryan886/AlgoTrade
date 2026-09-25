@@ -8,10 +8,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, time as dtime
-from typing import Optional
+from typing import Literal, Optional
 
 from backtesting.data_provider import HistoricalDataProvider
 from backtesting.backtest_bot import BacktestableBot
+from backtesting.backtest_oi_bot import BacktestableOIBot
 from backtesting.exceptions import BacktestDataCoverageError, StrictBacktestDataError
 from backtesting.metrics import TradeLog, MetricsCalculator, BacktestResult
 from backtesting.trade_logger import BacktestTradeLogger, NullTradeLogger
@@ -22,6 +23,7 @@ class BacktestConfig:
     """Configuration for a backtest run."""
     start_date: datetime
     end_date: datetime
+    strategy_id: Literal["nifty-options", "oi-expiry"] = "nifty-options"
     symbol: str = "NIFTY50"
     db_path: str = "db/trading_bot.db"
     step_interval: timedelta = field(default_factory=lambda: timedelta(minutes=1))
@@ -65,13 +67,7 @@ class BacktestRunner:
         )
 
         # Initialize bot with injected dependencies
-        self.bot = BacktestableBot(
-            data_provider=self.data_provider,
-            current_time_fn=self.get_current_time,
-            trade_log=self.trade_log,
-            symbol=config.symbol,
-            debug_logger=self.trade_logger,
-        )
+        self.bot = self._build_bot()
 
         self._steps_since_equity_update = 0
 
@@ -105,10 +101,20 @@ class BacktestRunner:
         # Adjust start/end if needed
         effective_start = max(self.config.start_date, data_start) if data_start else self.config.start_date
         effective_end = min(self.config.end_date, data_end) if data_end else self.config.end_date
+        
+        # If requested date is beyond available data, clamp start to end
+        if effective_start > effective_end:
+            effective_start = effective_end
+            if self.config.start_date > data_end:
+                print(f"Warning: Requested start date {self.config.start_date} is beyond available data {data_end}.")
+                print(f"Adjusting to run backtest on latest available date: {effective_start.date()}")
+        
+        trading_days = self.data_provider.get_trading_days(effective_start, effective_end)
         requested_effective_end = effective_end
         effective_end, truncation_messages = self._truncate_effective_end_for_supporting_data(
             effective_start,
             effective_end,
+            trading_days,
         )
 
         if effective_end < effective_start:
@@ -127,7 +133,6 @@ class BacktestRunner:
 
         print(f"Running backtest from {effective_start} to {effective_end}...")
 
-        # Get trading days
         trading_days = self.data_provider.get_trading_days(effective_start, effective_end)
         if not trading_days:
             print("Warning: No trading days found in the specified range.")
@@ -161,14 +166,14 @@ class BacktestRunner:
         Returns:
             Number of steps executed
         """
-        # Reset strategy state for new session (mimics 09:15 reset)
-        self.bot.strategy.reset_state()
-
         # Set up trading hours
         day_start = datetime.combine(day.date(), self.config.trading_start)
         day_end = datetime.combine(day.date(), self.config.trading_end)
 
         current = day_start
+        self._current_time = current
+        if hasattr(self.bot, "reset_for_backtest_day"):
+            self.bot.reset_for_backtest_day()
         steps = 0
 
         while current <= day_end:
@@ -212,7 +217,16 @@ class BacktestRunner:
             return
 
         print("Supporting data coverage:")
-        ordered_names = ["market_data_1m", "vix_data", "delta_cache", "option_data"]
+        if self.config.strategy_id == "oi-expiry":
+            ordered_names = [
+                "market_data_1m",
+                "market_data_5m",
+                "option_data",
+                "option_open_interest",
+                "option_open_interest_5m",
+            ]
+        else:
+            ordered_names = ["market_data_1m", "market_data_5m", "vix_data", "delta_cache", "option_data"]
         issues = []
         required_windows = self._required_coverage_windows(effective_start, effective_end)
 
@@ -251,6 +265,7 @@ class BacktestRunner:
         self,
         effective_start: datetime,
         effective_end: datetime,
+        trading_days: Optional[list[datetime]] = None,
     ) -> tuple[datetime, list[str]]:
         coverage = self.data_provider.get_backtest_data_coverage() or {}
         fill_headroom = self.bot.TARGET_FILL_LATENCY + timedelta(minutes=1)
@@ -273,13 +288,38 @@ class BacktestRunner:
                 "fresh VIX snapshots are unavailable after this timestamp.",
             ))
 
-        delta_end = coverage.get("delta_cache", {}).get("end")
-        if delta_end is not None:
-            candidates.append((
-                "delta_cache",
-                delta_end - fill_headroom,
-                f"delta_cache needs post-signal fill headroom through {fill_headroom}.",
-            ))
+        if self.config.strategy_id == "oi-expiry":
+            market_5m_end = coverage.get("market_data_5m", {}).get("end")
+            if market_5m_end is not None:
+                candidates.append((
+                    "market_data_5m",
+                    market_5m_end,
+                    "5m candles are only loaded through this timestamp.",
+                ))
+
+            option_end = coverage.get("option_data", {}).get("end")
+            if option_end is not None:
+                candidates.append((
+                    "option_data",
+                    option_end - fill_headroom,
+                    f"option_data needs post-signal fill headroom through {fill_headroom}.",
+                ))
+
+            oi_end = coverage.get("option_open_interest", {}).get("end")
+            if oi_end is not None:
+                candidates.append((
+                    "option_open_interest",
+                    oi_end,
+                    "OI entry filters are unavailable after this timestamp.",
+                ))
+        else:
+            delta_end = coverage.get("delta_cache", {}).get("end")
+            if delta_end is not None:
+                candidates.append((
+                    "delta_cache",
+                    delta_end - fill_headroom,
+                    f"delta_cache needs post-signal fill headroom through {fill_headroom}.",
+                ))
 
         if not candidates:
             return effective_end, []
@@ -287,6 +327,20 @@ class BacktestRunner:
         adjusted_end = min([effective_end] + [candidate_end for _, candidate_end, _ in candidates])
         if adjusted_end >= effective_end:
             return effective_end, []
+
+        # Check if truncation would eliminate all trading days
+        # If so, warn but proceed without truncation to avoid total data rejection
+        potential_trading_days = self.data_provider.get_trading_days(effective_start, adjusted_end)
+        if not potential_trading_days and trading_days:
+            # Truncation would eliminate all trading days; revert and warn instead
+            messages = []
+            for table_name, candidate_end, detail in candidates:
+                if candidate_end < effective_end:
+                    messages.append(
+                        f"WARNING: {table_name} would limit execution to {candidate_end}, "
+                        f"but this eliminates all runnable days. Proceeding with available data through {effective_end}."
+                    )
+            return effective_end, messages
 
         messages = []
         for table_name, candidate_end, detail in candidates:
@@ -305,7 +359,16 @@ class BacktestRunner:
         required_start: datetime,
         required_end: datetime,
     ) -> tuple[str, Optional[str], Optional[str]]:
+        optional_warning_tables = {"option_open_interest_5m"} if self.config.strategy_id == "oi-expiry" else set()
+        delayed_start_warning_tables = {"vix_data", "delta_cache"} | optional_warning_tables
+
         if available_start is None or available_end is None:
+            if table_name in optional_warning_tables:
+                return "WARNING", self._coverage_warning_message(
+                    table_name,
+                    required_end,
+                    required_start,
+                ), None
             return "MISSING", None, self._coverage_issue_message(
                 table_name,
                 available_start,
@@ -314,21 +377,29 @@ class BacktestRunner:
                 required_end,
             )
 
-        if available_end < required_end:
+        effective_available_end = self._effective_coverage_end(table_name, available_end)
+
+        if effective_available_end < required_end:
+            if table_name in optional_warning_tables:
+                return "WARNING", self._coverage_warning_message(
+                    table_name,
+                    effective_available_end,
+                    required_start,
+                ), None
             return "MISSING", None, self._coverage_issue_message(
                 table_name,
                 available_start,
-                available_end,
+                effective_available_end,
                 required_start,
                 required_end,
             )
 
-        if table_name in {"vix_data", "delta_cache"}:
+        if table_name in delayed_start_warning_tables:
             if available_start > required_end:
                 return "MISSING", None, self._coverage_issue_message(
                     table_name,
                     available_start,
-                    available_end,
+                    effective_available_end,
                     required_start,
                     required_end,
                 )
@@ -344,12 +415,28 @@ class BacktestRunner:
             return "MISSING", None, self._coverage_issue_message(
                 table_name,
                 available_start,
-                available_end,
+                effective_available_end,
                 required_start,
                 required_end,
             )
 
         return "OK", None, None
+
+    @staticmethod
+    def _market_data_interval_for_table(table_name: str) -> Optional[str]:
+        if not table_name.startswith("market_data_"):
+            return None
+        return table_name.removeprefix("market_data_")
+
+    def _effective_coverage_end(self, table_name: str, available_end: Optional[datetime]) -> Optional[datetime]:
+        if available_end is None:
+            return None
+
+        interval = self._market_data_interval_for_table(table_name)
+        if interval is None:
+            return available_end
+
+        return available_end + HistoricalDataProvider.get_interval_duration(interval)
 
     @staticmethod
     def _format_range(start: Optional[datetime], end: Optional[datetime]) -> str:
@@ -362,6 +449,9 @@ class BacktestRunner:
         effective_start: datetime,
         effective_end: datetime,
     ) -> dict[str, tuple[datetime, datetime]]:
+        if self.config.strategy_id == "oi-expiry":
+            return self._required_oi_coverage_windows(effective_start, effective_end)
+
         entry_cutoff_dt = datetime.combine(effective_end.date(), self.bot.ENTRY_CUTOFF_TIME)
         entry_required_end = min(effective_end, entry_cutoff_dt)
         fill_headroom = self.bot.TARGET_FILL_LATENCY + timedelta(minutes=1)
@@ -372,8 +462,38 @@ class BacktestRunner:
 
         return {
             "market_data_1m": (effective_start, effective_end),
+            "market_data_5m": (effective_start, effective_end),
             "vix_data": (effective_start, max(effective_start, entry_required_end)),
             "delta_cache": (fill_required_start, max(fill_required_start, fill_required_end)),
+        }
+
+    def _required_oi_coverage_windows(
+        self,
+        effective_start: datetime,
+        effective_end: datetime,
+    ) -> dict[str, tuple[datetime, datetime]]:
+        trading_days = self.data_provider.get_trading_days(effective_start, effective_end)
+        active_days = [day for day in trading_days if day.weekday() == 1]
+        if not active_days:
+            return {
+                "market_data_1m": (effective_start, effective_end),
+            }
+
+        active_start = max(effective_start, datetime.combine(active_days[0].date(), self.config.trading_start))
+        active_end = min(effective_end, datetime.combine(active_days[-1].date(), self.config.trading_end))
+        entry_start = datetime.combine(active_days[0].date(), self.bot.strategy.ENTRY_START_TIME)
+        entry_end = datetime.combine(active_days[-1].date(), self.bot.strategy.HARD_CLOSE_TIME)
+        entry_required_start = max(active_start, entry_start)
+        entry_required_end = min(active_end, entry_end)
+        fill_headroom = self.bot.TARGET_FILL_LATENCY + timedelta(minutes=1)
+        fill_required_end = min(active_end, entry_required_end + fill_headroom)
+
+        return {
+            "market_data_1m": (effective_start, effective_end),
+            "market_data_5m": (active_start, active_end),
+            "option_data": (entry_required_start, max(entry_required_start, fill_required_end)),
+            "option_open_interest": (entry_required_start, max(entry_required_start, entry_required_end)),
+            "option_open_interest_5m": (entry_required_start, max(entry_required_start, entry_required_end)),
         }
 
     def _coverage_warning_message(
@@ -386,6 +506,11 @@ class BacktestRunner:
             return (
                 f"{table_name} coverage starts at {available_start}, after the preferred start {required_start}. "
                 "Backtest will proceed; early entry checks may log 'VIX regime unavailable' until VIX data becomes available."
+            )
+        if table_name == "option_open_interest_5m":
+            return (
+                f"{table_name} coverage starts at {available_start}, after the preferred start {required_start}. "
+                "Backtest will proceed; Type B trigger_2 may be unavailable until 5m OI snapshots become available."
             )
         return (
             f"{table_name} coverage starts at {available_start}, after the preferred start {required_start}. "
@@ -423,7 +548,34 @@ class BacktestRunner:
                 f"{base} Strict contract validation, fill pricing, and option snapshots depend on delta_cache, "
                 "so entries or exits can fail without it."
             )
+        if table_name == "option_open_interest":
+            return (
+                f"{base} OI entry validation depends on point-in-time open-interest snapshots, "
+                "so OI expiry entries cannot be evaluated safely without this coverage."
+            )
+        if table_name == "option_data":
+            return (
+                f"{base} Strict OI fill pricing and mark-to-market depend on point-in-time option snapshots, "
+                "so entries or exits can fail without it."
+            )
         return base
+
+    def _build_bot(self):
+        if self.config.strategy_id == "oi-expiry":
+            return BacktestableOIBot(
+                data_provider=self.data_provider,
+                current_time_fn=self.get_current_time,
+                trade_log=self.trade_log,
+                symbol=self.config.symbol,
+            )
+
+        return BacktestableBot(
+            data_provider=self.data_provider,
+            current_time_fn=self.get_current_time,
+            trade_log=self.trade_log,
+            symbol=self.config.symbol,
+            debug_logger=self.trade_logger,
+        )
 
 
 def run_backtest(
@@ -431,6 +583,7 @@ def run_backtest(
     end_date: datetime,
     db_path: str = "db/trading_bot.db",
     symbol: str = "NIFTY50",
+    strategy_id: Literal["nifty-options", "oi-expiry"] = "nifty-options",
     verbose: bool = False,
 ) -> BacktestResult:
     """
@@ -449,6 +602,7 @@ def run_backtest(
     config = BacktestConfig(
         start_date=start_date,
         end_date=end_date,
+        strategy_id=strategy_id,
         db_path=db_path,
         symbol=symbol,
         verbose=verbose,

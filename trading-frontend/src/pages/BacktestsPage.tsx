@@ -3,7 +3,7 @@ import { startTransition, useMemo, useState } from "react";
 import { exportBacktestHtml, runBacktest } from "../api/dashboard";
 import PageHeader from "../components/common/PageHeader";
 import ShowcaseReport from "../components/reports/ShowcaseReport";
-import type { BacktestRunResponse } from "../types/dashboard";
+import type { BacktestRunResponse, StrategyId } from "../types/dashboard";
 
 const STORAGE_KEY = "algotrade-latest-backtest";
 const DEFAULT_START_DATE = "2026-03-26";
@@ -43,6 +43,7 @@ export default function BacktestsPage() {
   const initial = useMemo(() => readStoredRun(), []);
   const [startDate, setStartDate] = useState(initial?.meta.startDate ?? DEFAULT_START_DATE);
   const [endDate, setEndDate] = useState(initial?.meta.endDate ?? DEFAULT_END_DATE);
+  const [strategyId, setStrategyId] = useState<StrategyId>(initial?.meta.strategyId ?? "nifty-options");
   const [report, setReport] = useState<BacktestRunResponse | null>(initial);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -54,7 +55,7 @@ export default function BacktestsPage() {
       setLoading(true);
       setError(null);
       const payload = await runBacktest({
-        strategyId: "nifty-options",
+        strategyId,
         startDate,
         endDate,
       });
@@ -78,7 +79,7 @@ export default function BacktestsPage() {
       setLoading(true);
       setError(null);
       const payload = await exportBacktestHtml({
-        strategyId: "nifty-options",
+        strategyId,
         startDate,
         endDate,
         useLatestRun: Boolean(report),
@@ -95,15 +96,16 @@ export default function BacktestsPage() {
     <>
       <PageHeader
         title="Backtests"
-        subtitle="Real synchronous backtests for the Nifty Options Strategy across any supported historical date range."
+        subtitle="Run synchronous historical backtests for the supported live options strategies without leaving the dashboard."
       />
 
       <section className="surface-card">
         <div className="inline-form-grid backtest-grid">
           <div className="field">
             <label htmlFor="strategy">Strategy</label>
-            <select id="strategy" value="nifty-options" disabled>
+            <select id="strategy" value={strategyId} onChange={(event) => setStrategyId(event.target.value as StrategyId)}>
               <option value="nifty-options">Nifty Options Strategy</option>
+              <option value="oi-expiry">OI Expiry Strategy</option>
             </select>
           </div>
           <div className="field">
@@ -140,7 +142,11 @@ export default function BacktestsPage() {
       <ShowcaseReport
         report={report}
         title="Backtest Showcase"
-        subtitle={report ? `${report.meta.startDate} to ${report.meta.endDate}` : "Run a backtest to populate the native React showcase."}
+        subtitle={
+          report
+            ? `${report.meta.strategyId} • ${report.meta.startDate} to ${report.meta.endDate}`
+            : "Run a backtest to populate the native React showcase."
+        }
       />
     </>
   );

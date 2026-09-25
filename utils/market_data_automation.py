@@ -17,6 +17,7 @@ from core.paper_trades import PaperTraderDonchian
 from core.paper_trder_sma import PaperTraderSMA
 from core.equity_trader import EquityPaperTrader
 from core.bot_nifty import NiftyPaperBot
+from core.bot_oi import OIExpiryPaperBot
 import argparse
 import json
 
@@ -142,6 +143,7 @@ class MarketDataAutomation:
         self.sma_trader = PaperTraderSMA("NIFTY50")
         self.equity_trader = EquityPaperTrader("INFY")
         self.nifty_trader = NiftyPaperBot("NIFTY50")
+        self.oi_nifty_trader = OIExpiryPaperBot("NIFTY50")
         logger.info("Paper traders (Donchian, SMA, Equity & Nifty Options) successfully initialised....")
         
         # Market holidays for 2025 (you can update this list)
@@ -325,6 +327,13 @@ class MarketDataAutomation:
     def fetch_open_interest_data(self):
         """Fetch NIFTY option open-interest snapshot."""
         return self.fetch_open_interest_with_retry()
+
+    def use_oi_nifty_strategy(self, current_time=None):
+        current_time = current_time or datetime.now()
+        return current_time.weekday() == 1
+
+    def get_active_nifty_strategy_name(self, current_time=None):
+        return "oi_expiry" if self.use_oi_nifty_strategy(current_time=current_time) else "standard_nifty"
     
     def run_paper_trading_cycle(self):
         """Run one cycle of paper trading logic"""
@@ -470,21 +479,47 @@ class MarketDataAutomation:
 
     def run_nifty_paper_trading_cycle(self):
         """Run one cycle of Nifty Options paper trading logic"""
-        if not self.is_market_open():
+        now = datetime.now()
+        market_open = self.is_market_open()
+
+        if self.use_oi_nifty_strategy(current_time=now) and not market_open:
+            self.oi_nifty_trader.maybe_run_tuesday_safety_cleanup(now=now)
+
+        if not market_open:
             return
 
         try:
-            logger.info("Running Nifty Options paper trading cycle...")
-            self.nifty_trader.run_once()
+            strategy_name = self.get_active_nifty_strategy_name(current_time=now)
+            logger.info(f"Running Nifty Options paper trading cycle via {strategy_name} strategy...")
 
-            # Log position status
-            if not self.nifty_trader.all_lots_flat():
-                lots = self.nifty_trader.position.get("lots", {})
-                lot1_status = lots.get("lot1", {}).get("status", "N/A")
-                lot2_status = lots.get("lot2", {}).get("status", "N/A")
-                logger.info(f"Nifty Position Status - Lot1: {lot1_status}, Lot2: {lot2_status}")
+            if strategy_name == "oi_expiry":
+                self.oi_nifty_trader.run_once()
+                oi_summary = self.oi_nifty_trader.get_status_summary()
+                if (
+                    oi_summary.get("type_a", {}).get("position_1_status") == "OPEN"
+                    or oi_summary.get("type_a", {}).get("position_2_status") == "OPEN"
+                    or oi_summary.get("type_b", {}).get("position_status") == "OPEN"
+                ):
+                    aggregate_open_pnl = oi_summary.get("aggregate_open_pnl", 0.0)
+                    logger.info(
+                        "OI Nifty Status - "
+                        f"A1: {oi_summary.get('type_a', {}).get('position_1_status')} "
+                        f"A2: {oi_summary.get('type_a', {}).get('position_2_status')} "
+                        f"B: {oi_summary.get('type_b', {}).get('position_status')} "
+                        f"OpenPnL: {aggregate_open_pnl:.2f}"
+                    )
+                else:
+                    logger.debug("OI Nifty trader: No active position, waiting for signals")
             else:
-                logger.debug("Nifty trader: No active position, waiting for signals")
+                self.nifty_trader.run_once()
+
+                if not self.nifty_trader.all_lots_flat():
+                    lots = self.nifty_trader.position.get("lots", {})
+                    lot1_status = lots.get("lot1", {}).get("status", "N/A")
+                    lot2_status = lots.get("lot2", {}).get("status", "N/A")
+                    logger.info(f"Nifty Position Status - Lot1: {lot1_status}, Lot2: {lot2_status}")
+                else:
+                    logger.debug("Nifty trader: No active position, waiting for signals")
 
         except Exception as e:
             logger.error(f"Error in Nifty Options paper trading cycle: {e}")
@@ -505,6 +540,7 @@ class MarketDataAutomation:
                     'message': 'No active position'
                 },
                 'nifty': {
+                    'selected_strategy': self.get_active_nifty_strategy_name(),
                     'active_position': False,
                     'message': 'No active position'
                 }
@@ -537,11 +573,36 @@ class MarketDataAutomation:
                 }
 
             # Nifty Options trader status
-            if not self.nifty_trader.all_lots_flat():
+            if self.get_active_nifty_strategy_name() == 'oi_expiry':
+                oi_summary = self.oi_nifty_trader.get_status_summary()
+                type_a = oi_summary.get('type_a', {})
+                type_b = oi_summary.get('type_b', {})
+                active_position = (
+                    type_a.get('position_1_status') == 'OPEN'
+                    or type_a.get('position_2_status') == 'OPEN'
+                    or type_b.get('position_status') == 'OPEN'
+                )
+                summary['nifty'] = {
+                    'selected_strategy': 'oi_expiry',
+                    'active_position': active_position,
+                    'message': 'No active OI position' if not active_position else 'OI expiry strategy active',
+                    'aggregate_open_pnl': oi_summary.get('aggregate_open_pnl'),
+                    'type_a_position_1_status': type_a.get('position_1_status', 'FLAT'),
+                    'type_a_position_2_status': type_a.get('position_2_status', 'FLAT'),
+                    'type_a_position_1_entry_diff': type_a.get('position_1_entry_diff'),
+                    'type_a_position_2_entry_diff': type_a.get('position_2_entry_diff'),
+                    'type_a_entry_flag_on': type_a.get('entry_flag_on', False),
+                    'type_b_position_status': type_b.get('position_status', 'FLAT'),
+                    'type_b_trigger_1_seen': type_b.get('trigger_1_seen', False),
+                    'type_b_trigger_2_seen': type_b.get('trigger_2_seen', False),
+                    'type_b_sell_pe_entry_ltp': type_b.get('sell_pe_entry_ltp'),
+                }
+            elif not self.nifty_trader.all_lots_flat():
                 lots = self.nifty_trader.position.get("lots", {})
                 lot1 = lots.get("lot1", {})
                 lot2 = lots.get("lot2", {})
                 summary['nifty'] = {
+                    'selected_strategy': 'standard_nifty',
                     'active_position': True,
                     'lot1_status': lot1.get("status", "N/A"),
                     'lot2_status': lot2.get("status", "N/A"),
@@ -673,13 +734,20 @@ class MarketDataAutomation:
         donchian_status = self.paper_trader.get_position_status()
         sma_status = self.sma_trader.get_position_status()
         nifty_has_position = not self.nifty_trader.all_lots_flat()
+        oi_summary = self.oi_nifty_trader.get_status_summary()
+        oi_active = (
+            oi_summary.get("type_a", {}).get("position_1_status") == "OPEN"
+            or oi_summary.get("type_a", {}).get("position_2_status") == "OPEN"
+            or oi_summary.get("type_b", {}).get("position_status") == "OPEN"
+        )
         return {
             'is_running': self.is_running,
             'market_open': self.is_market_open(),
             'last_fetch_times': self.last_fetch_times,
             'donchian_trading_status': donchian_status,
             'sma_trading_status': sma_status,
-            'nifty_trading_active': nifty_has_position
+            'nifty_trading_active': oi_active if self.get_active_nifty_strategy_name() == 'oi_expiry' else nifty_has_position,
+            'nifty_selected_strategy': self.get_active_nifty_strategy_name(),
         }
     
     def test_connection(self):
@@ -764,15 +832,27 @@ class MarketDataAutomation:
         # Nifty Options Trader Status
         print(f"\n📉 NIFTY OPTIONS TRADER:")
         nifty = paper_status.get('nifty', {})
+        print(f" Strategy: {nifty.get('selected_strategy', 'standard_nifty')}")
         if nifty.get('active_position'):
             print(f" Position:  ACTIVE")
-            print(f" Lot1 Status: {nifty.get('lot1_status', 'N/A')}")
-            print(f" Lot2 Status: {nifty.get('lot2_status', 'N/A')}")
-            print(f" Lot1 SL Level: {nifty.get('lot1_sl', 'N/A')}")
-            print(f" Lot2 SL Level: {nifty.get('lot2_sl', 'N/A')}")
-            print(f" Opened At: {nifty.get('opened_at', 'N/A')}")
-            print(f" Position Type: {nifty.get('position_type', 'N/A')}")
-            print(f" Num Legs: {nifty.get('num_legs', 0)}")
+            if nifty.get('selected_strategy') == 'oi_expiry':
+                print(f" Type A Position 1: {nifty.get('type_a_position_1_status', 'N/A')}")
+                print(f" Type A Position 2: {nifty.get('type_a_position_2_status', 'N/A')}")
+                print(f" Type A Entry Flag: {nifty.get('type_a_entry_flag_on', False)}")
+                print(f" Type A Entry Diff 1: {nifty.get('type_a_position_1_entry_diff', 'N/A')}")
+                print(f" Type A Entry Diff 2: {nifty.get('type_a_position_2_entry_diff', 'N/A')}")
+                print(f" Type B Position: {nifty.get('type_b_position_status', 'N/A')}")
+                print(f" Type B Trigger 1: {nifty.get('type_b_trigger_1_seen', False)}")
+                print(f" Type B Trigger 2: {nifty.get('type_b_trigger_2_seen', False)}")
+                print(f" Type B Sell PE Entry LTP: {nifty.get('type_b_sell_pe_entry_ltp', 'N/A')}")
+            else:
+                print(f" Lot1 Status: {nifty.get('lot1_status', 'N/A')}")
+                print(f" Lot2 Status: {nifty.get('lot2_status', 'N/A')}")
+                print(f" Lot1 SL Level: {nifty.get('lot1_sl', 'N/A')}")
+                print(f" Lot2 SL Level: {nifty.get('lot2_sl', 'N/A')}")
+                print(f" Opened At: {nifty.get('opened_at', 'N/A')}")
+                print(f" Position Type: {nifty.get('position_type', 'N/A')}")
+                print(f" Num Legs: {nifty.get('num_legs', 0)}")
         else:
             print(f" Position:  NO ACTIVE POSITION")
             print(f" Status: Waiting for trading signals...")

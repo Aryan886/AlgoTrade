@@ -152,11 +152,64 @@ def _select_snapshot_instruments(option_instruments, spot_price, required_contra
         if lower_bound <= strike <= upper_bound:
             filtered_instruments.append(inst)
 
+    explicit_required_instruments = []
+    explicit_seen = set()
+    for contract in required_contracts or []:
+        contract_symbol = str(contract.get("tradingsymbol") or "").upper()
+        contract_option_type = str(contract.get("option_type") or "").upper()
+        contract_expiry = str(contract.get("expiry") or contract.get("expiry_date") or "")[:10]
+        contract_strike = _normalize_strike_value(contract.get("strike_price"))
+
+        matched = None
+        if contract_symbol:
+            matched = next(
+                (
+                    inst for inst in option_instruments
+                    if str(inst.get("tradingsymbol") or "").upper() == contract_symbol
+                ),
+                None,
+            )
+        if matched is None and contract_option_type and contract_strike is not None:
+            matched = next(
+                (
+                    inst for inst in option_instruments
+                    if str(inst.get("instrument_type") or "").upper() == contract_option_type
+                    and _normalize_strike_value(inst.get("strike")) == contract_strike
+                    and (
+                        not contract_expiry
+                        or str(inst.get("expiry") or "")[:10] == contract_expiry
+                    )
+                ),
+                None,
+            )
+
+        if matched is None:
+            continue
+
+        matched_symbol = str(matched.get("tradingsymbol") or "").upper()
+        if matched_symbol in explicit_seen:
+            continue
+        explicit_seen.add(matched_symbol)
+        explicit_required_instruments.append(matched)
+
+    if explicit_required_instruments:
+        merged_filtered = []
+        merged_seen = set()
+        for inst in filtered_instruments + explicit_required_instruments:
+            key = str(inst.get("tradingsymbol") or "").upper()
+            if key in merged_seen:
+                continue
+            merged_seen.add(key)
+            merged_filtered.append(inst)
+        filtered_instruments = merged_filtered
+
     if filtered_instruments:
+        expiries_seen = sorted({str(inst.get("expiry"))[:10] for inst in filtered_instruments if inst.get("expiry")})
         print(
             f"[OPTION SNAPSHOT] Using nearest expiry {nearest_expiry} "
             f"with strike window {lower_bound}-{upper_bound} "
-            f"across {len(filtered_instruments)} instruments"
+            f"across {len(filtered_instruments)} instruments "
+            f"(expiries={expiries_seen})"
         )
         return filtered_instruments, resolved_required_contracts
 

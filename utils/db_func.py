@@ -172,6 +172,221 @@ def inspect_latest_option_snapshot_coverage(
         snapshot_timestamp=latest_timestamp,
     )
 
+
+def _canonical_option_order_by(include_timestamp: bool = True) -> str:
+    order_fields = []
+    if include_timestamp:
+        order_fields.append("timestamp ASC")
+    order_fields.extend([
+        "expiry_date ASC",
+        "strike_price ASC",
+        (
+            "CASE "
+            "WHEN UPPER(option_type) = 'CE' THEN 0 "
+            "WHEN UPPER(option_type) = 'PE' THEN 1 "
+            "ELSE 2 END ASC"
+        ),
+        "tradingsymbol ASC",
+    ])
+    return ", ".join(order_fields)
+
+
+def _sort_option_like_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy sorted by the canonical timestamp/expiry/strike/type order."""
+    if df is None or df.empty:
+        return df
+
+    working = df.copy()
+    temp_columns: List[str] = []
+    sort_columns: List[str] = []
+
+    if "timestamp" in working.columns:
+        sort_columns.append("timestamp")
+    if "expiry_date" in working.columns:
+        sort_columns.append("expiry_date")
+    if "strike_price" in working.columns:
+        strike_sort_column = "__strike_price_sort"
+        working[strike_sort_column] = pd.to_numeric(working["strike_price"], errors="coerce")
+        sort_columns.append(strike_sort_column)
+        temp_columns.append(strike_sort_column)
+    if "option_type" in working.columns:
+        option_type_sort_column = "__option_type_sort"
+        working[option_type_sort_column] = (
+            working["option_type"]
+            .astype(str)
+            .str.upper()
+            .map({"CE": 0, "PE": 1})
+            .fillna(2)
+        )
+        sort_columns.append(option_type_sort_column)
+        temp_columns.append(option_type_sort_column)
+    if "tradingsymbol" in working.columns:
+        sort_columns.append("tradingsymbol")
+
+    if sort_columns:
+        working = working.sort_values(sort_columns, kind="mergesort").reset_index(drop=True)
+    if temp_columns:
+        working = working.drop(columns=temp_columns)
+    return working
+
+
+def _normalize_required_contracts(required_contracts: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    seen = set()
+
+    for contract in required_contracts or []:
+        normalized_contract: Dict[str, Any] = {}
+
+        tradingsymbol = contract.get("tradingsymbol")
+        if tradingsymbol:
+            normalized_contract["tradingsymbol"] = str(tradingsymbol).upper()
+
+        option_type = contract.get("option_type")
+        if option_type:
+            normalized_contract["option_type"] = str(option_type).upper()
+
+        strike_price = contract.get("strike_price")
+        if strike_price is not None:
+            try:
+                normalized_contract["strike_price"] = int(float(strike_price))
+            except Exception:
+                pass
+
+        expiry = contract.get("expiry") or contract.get("expiry_date")
+        if expiry:
+            normalized_contract["expiry_date"] = str(expiry)[:10]
+
+        if not normalized_contract:
+            continue
+
+        key = (
+            normalized_contract.get("tradingsymbol"),
+            normalized_contract.get("option_type"),
+            normalized_contract.get("strike_price"),
+            normalized_contract.get("expiry_date"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(normalized_contract)
+
+    return normalized
+
+
+def _merge_required_contracts(*contract_sets: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen = set()
+
+    for contract_set in contract_sets:
+        for contract in _normalize_required_contracts(contract_set):
+            key = (
+                contract.get("tradingsymbol"),
+                contract.get("option_type"),
+                contract.get("strike_price"),
+                contract.get("expiry_date"),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(contract)
+
+    return merged
+
+
+def _row_matches_required_contract(row: Dict[str, Any], contract: Dict[str, Any]) -> bool:
+    row_tradingsymbol = str(row.get("tradingsymbol") or "").upper()
+    contract_tradingsymbol = contract.get("tradingsymbol")
+    if contract_tradingsymbol:
+        return row_tradingsymbol == contract_tradingsymbol
+
+    row_option_type = str(row.get("option_type") or "").upper()
+    row_expiry = str(row.get("expiry_date") or row.get("expiry") or "")[:10]
+    row_strike = row.get("strike_price")
+    try:
+        row_strike_int = int(float(row_strike)) if row_strike is not None else None
+    except Exception:
+        row_strike_int = None
+
+    if contract.get("option_type") and row_option_type != contract.get("option_type"):
+        return False
+    if contract.get("strike_price") is not None and row_strike_int != contract.get("strike_price"):
+        return False
+    if contract.get("expiry_date") and row_expiry != contract.get("expiry_date"):
+        return False
+    return True
+
+
+def find_missing_required_contracts(
+    option_rows: List[Dict[str, Any]],
+    required_contracts: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    missing: List[Dict[str, Any]] = []
+    normalized_required = _normalize_required_contracts(required_contracts)
+    if not normalized_required:
+        return missing
+
+    for contract in normalized_required:
+        if any(_row_matches_required_contract(row, contract) for row in option_rows or []):
+            continue
+        missing.append(contract)
+
+    return missing
+
+
+def _build_exact_contract_delta_rows(
+    option_rows: List[Dict[str, Any]],
+    required_contracts: Optional[List[Dict[str, Any]]],
+    spot_price: float,
+) -> List[Dict[str, Any]]:
+    exact_rows: List[Dict[str, Any]] = []
+    iv_calc = ProductionIVCalculator()
+
+    for contract in _normalize_required_contracts(required_contracts):
+        matched_row = next(
+            (row for row in option_rows or [] if _row_matches_required_contract(row, contract)),
+            None,
+        )
+        if not matched_row:
+            continue
+
+        strike_price = matched_row.get("strike_price")
+        option_type = str(matched_row.get("option_type") or "").upper()
+        expiry_date = matched_row.get("expiry_date")
+        iv_value = matched_row.get("iv")
+        tradingsymbol = matched_row.get("tradingsymbol")
+        ltp_value = matched_row.get("ltp")
+
+        if strike_price is None or not option_type or not expiry_date or iv_value is None or tradingsymbol is None:
+            continue
+
+        try:
+            strike_int = int(float(strike_price))
+            iv_float = float(iv_value)
+            T = iv_calc.calculate_time_to_expiry(str(expiry_date))
+            if T is None or T <= 0:
+                continue
+            delta_value = iv_calc.calculate_delta(
+                spot=float(spot_price),
+                strike=strike_int,
+                T=T,
+                iv=iv_float,
+                option_type=option_type,
+            )
+        except Exception:
+            continue
+
+        exact_rows.append({
+            "strike_price": strike_int,
+            "option_type": option_type,
+            "delta": delta_value,
+            "expiry_date": str(expiry_date),
+            "spot_price": float(spot_price),
+            "ltp": ltp_value,
+            "tradingsymbol": str(tradingsymbol),
+        })
+
+    return exact_rows
+
 def ensure_db_dir(path=DB_PATH):
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
@@ -954,7 +1169,7 @@ def fetch_latest_open_interest_snapshot(
             SELECT *
             FROM option_open_interest
             WHERE symbol = ? AND timestamp = ?
-            ORDER BY expiry_date, strike_price, option_type
+            ORDER BY """ + _canonical_option_order_by(include_timestamp=True) + """
         """, (symbol, latest_timestamp))
         return _open_interest_rows_to_dicts(cursor.fetchall())
     finally:
@@ -980,7 +1195,7 @@ def fetch_open_interest_data(
             query += " AND timestamp <= ?"
             params.append(_safe_db_timestamp(end))
 
-        query += " ORDER BY timestamp, expiry_date, strike_price, option_type"
+        query += f" ORDER BY {_canonical_option_order_by(include_timestamp=True)}"
         try:
             df = pd.read_sql_query(query, conn, params=params, parse_dates=["timestamp", "last_trade_time"])
         except (sqlite3.OperationalError, ValueError):
@@ -990,6 +1205,7 @@ def fetch_open_interest_data(
 
     if df.empty:
         return df
+    df = _sort_option_like_dataframe(df)
     df.set_index("timestamp", inplace=True)
     return df
 
@@ -1025,7 +1241,7 @@ def fetch_latest_open_interest_5m_snapshot(
             SELECT *
             FROM option_open_interest_5m
             WHERE symbol = ? AND timestamp = ?
-            ORDER BY expiry_date, strike_price, option_type
+            ORDER BY """ + _canonical_option_order_by(include_timestamp=True) + """
             """,
             (symbol, latest_timestamp),
         )
@@ -1054,7 +1270,7 @@ def fetch_open_interest_5m_data(
             query += " AND timestamp <= ?"
             params.append(_safe_db_timestamp(_floor_to_5m_bucket(end) or end))
 
-        query += " ORDER BY timestamp, expiry_date, strike_price, option_type"
+        query += f" ORDER BY {_canonical_option_order_by(include_timestamp=True)}"
         try:
             df = pd.read_sql_query(query, conn, params=params, parse_dates=["timestamp", "last_trade_time", "source_start_timestamp", "source_end_timestamp"])
         except (sqlite3.OperationalError, ValueError):
@@ -1064,6 +1280,7 @@ def fetch_open_interest_5m_data(
 
     if df.empty:
         return df
+    df = _sort_option_like_dataframe(df)
     df.set_index("timestamp", inplace=True)
     return df
 
@@ -1119,7 +1336,13 @@ def _parse_option_expiry_date(expiry_value: Any) -> Optional[date]:
     return None
 
 
-def store_high_accuracy_options_data(options_list: List[Dict], symbol: str, spot_price: float, db_path=DB_PATH):
+def store_high_accuracy_options_data(
+    options_list: List[Dict],
+    symbol: str,
+    spot_price: float,
+    db_path=DB_PATH,
+    required_contracts: Optional[List[Dict[str, Any]]] = None,
+):
     """
     Store high-accuracy options data for Black-Scholes delta calculations.
     Appends near-expiry option-chain snapshots for historical use.
@@ -1131,13 +1354,24 @@ def store_high_accuracy_options_data(options_list: List[Dict], symbol: str, spot
     max_expiry_date = date.today() + timedelta(days=14)
     skipped_invalid_expiry = 0
     skipped_far_expiry = 0
+    normalized_required_contracts = _normalize_required_contracts(required_contracts)
 
     for option in options_list:
         expiry_date = _parse_option_expiry_date(option.get('expiry_date'))
         if expiry_date is None:
             skipped_invalid_expiry += 1
             continue
-        if expiry_date > max_expiry_date:
+        option_identity = {
+            "tradingsymbol": option.get("tradingsymbol"),
+            "option_type": option.get("option_type"),
+            "strike_price": option.get("strike_price"),
+            "expiry_date": expiry_date.isoformat(),
+        }
+        is_explicitly_required = any(
+            _row_matches_required_contract(option_identity, contract)
+            for contract in normalized_required_contracts
+        )
+        if expiry_date > max_expiry_date and not is_explicitly_required:
             skipped_far_expiry += 1
             continue
 
@@ -1219,7 +1453,7 @@ def fetch_latest_option_snapshot(symbol: str = 'NIFTY50', db_path=DB_PATH) -> Li
         SELECT *
         FROM option_data
         WHERE symbol = ? AND timestamp = ?
-        ORDER BY strike_price, option_type, expiry_date
+        ORDER BY """ + _canonical_option_order_by(include_timestamp=True) + """
     """, (symbol, latest_timestamp))
     rows = cursor.fetchall()
     conn.close()
@@ -1242,7 +1476,9 @@ def _log_option_snapshot_coverage(context: str, coverage: Dict[str, Any]) -> Non
 def calculate_and_store_high_accuracy_delta(
     symbol: str = 'NIFTY50',
     strike_band: Optional[List[int]] = None,
-    db_path=DB_PATH
+    db_path=DB_PATH,
+    required_contracts: Optional[List[Dict[str, Any]]] = None,
+    force_refresh: bool = False,
 ) -> Optional[Dict]:
     """
     Calculate and store high-accuracy delta using Black-Scholes formula.
@@ -1298,7 +1534,6 @@ def calculate_and_store_high_accuracy_delta(
 
         newest_age = None
         if cached_options:
-            import sqlite3
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
             cursor.execute("SELECT timestamp FROM option_data WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1", (symbol,))
@@ -1331,6 +1566,17 @@ def calculate_and_store_high_accuracy_delta(
                 all_expired = False
                 break
                 
+        strategy_required_contracts = build_required_contracts(cached_options) if cached_options else []
+        requested_required_contracts = _normalize_required_contracts(required_contracts)
+        combined_required_contracts = _merge_required_contracts(
+            strategy_required_contracts,
+            requested_required_contracts,
+        )
+        missing_requested_contracts = find_missing_required_contracts(
+            cached_options,
+            requested_required_contracts,
+        )
+
         # Refresh cache if expired/empty OR too stale by age.
         # Keep the shared live path permissive so existing consumers continue to
         # see the same behavior as before; stricter completeness checks belong
@@ -1338,10 +1584,13 @@ def calculate_and_store_high_accuracy_delta(
         #STALE_THRESHOLD_SECONDS = OPTION_CACHE_REFRESH_SECONDS + OPTION_CACHE_STALE_GRACE_SECONDS
         STALE_THRESHOLD_SECONDS = 60  # 1 minute freshness threshold for option data
         is_stale_by_age = newest_age is not None and newest_age > STALE_THRESHOLD_SECONDS
-        if all_expired or not cached_options or is_stale_by_age:
+        if all_expired or not cached_options or is_stale_by_age or force_refresh or missing_requested_contracts:
             print("All cached options are expired or cache is empty. Fetching fresh option data...")
             from utils.vix_fetcher import fetch_live_option_chain
-            fresh_options = fetch_live_option_chain(spot_price=spot_price)
+            fresh_options = fetch_live_option_chain(
+                spot_price=spot_price,
+                required_contracts=combined_required_contracts or None,
+            )
             if not fresh_options:
                 print("Failed to fetch fresh option data.")
                 return None
@@ -1373,16 +1622,32 @@ def calculate_and_store_high_accuracy_delta(
                     'tradingsymbol': opt.get('tradingsymbol'),
                     'open_interest': opt.get('openInterest', 0)
                 })
-            store_high_accuracy_options_data(formatted_options, symbol, spot_price, db_path)
+            store_high_accuracy_options_data(
+                formatted_options,
+                symbol,
+                spot_price,
+                db_path,
+                required_contracts=combined_required_contracts or None,
+            )
             cached_options = fetch_latest_option_snapshot(symbol, db_path)
             
         if not cached_options:
             print("No options data available after refresh.")
             return None
 
+        strategy_required_contracts = build_required_contracts(cached_options)
+        combined_required_contracts = _merge_required_contracts(
+            strategy_required_contracts,
+            requested_required_contracts,
+        )
+
         coverage = summarize_option_snapshot_coverage(
             cached_options,
-            required_contracts=build_required_contracts(cached_options),
+            required_contracts=strategy_required_contracts,
+        )
+        missing_requested_contracts = find_missing_required_contracts(
+            cached_options,
+            requested_required_contracts,
         )
             
         if strike_band is None:
@@ -1391,12 +1656,36 @@ def calculate_and_store_high_accuracy_delta(
             band = STRIKE_BAND
             interval = STRIKE_INTERVAL
             strike_band = [atm_strike + i*interval for i in range(-band//interval, band//interval+1)]
+        else:
+            strike_band = list(strike_band)
+
+        required_strikes = set(int(float(strike)) for strike in strike_band)
+        for contract in combined_required_contracts:
+            strike_price = contract.get("strike_price")
+            if strike_price is not None:
+                required_strikes.add(int(strike_price))
+                continue
+            tradingsymbol = contract.get("tradingsymbol")
+            if not tradingsymbol:
+                continue
+            matched_row = next(
+                (row for row in cached_options if str(row.get("tradingsymbol") or "").upper() == tradingsymbol),
+                None,
+            )
+            if matched_row and matched_row.get("strike_price") is not None:
+                required_strikes.add(int(float(matched_row["strike_price"])))
+        strike_band = sorted(required_strikes)
             
         # Calculate deltas for the strike band
         delta_results = calculate_delta_for_strike_band(
             spot_price=spot_price,
             strike_band=strike_band,
             option_data=cached_options
+        )
+        exact_contract_rows = _build_exact_contract_delta_rows(
+            cached_options,
+            requested_required_contracts,
+            spot_price,
         )
         
         # Store delta results in delta_cache table if logging enabled
@@ -1406,9 +1695,10 @@ def calculate_and_store_high_accuracy_delta(
             timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             cursor.execute("SELECT MAX(timestamp) FROM delta_cache WHERE symbol = ?", (symbol,))
             latest_delta_timestamp = cursor.fetchone()[0]
-            if latest_delta_timestamp and str(latest_delta_timestamp).startswith(timestamp_str[:16]):
+            if latest_delta_timestamp and str(latest_delta_timestamp).startswith(timestamp_str[:16]) and not force_refresh:
                 print(f"[DELTA CACHE] Snapshot already stored for {timestamp_str[:16]}; skipping duplicate write.")
             else:
+                stored_exact_keys = set()
                 for strike, strike_data in delta_results.items():
                     for option_type, option_data in strike_data.items():
                         #print(f"[DEBUG] Looking for: strike={strike}, type={option_type}")
@@ -1441,6 +1731,12 @@ def calculate_and_store_high_accuracy_delta(
                             selected_tradingsymbol = 'N/A'
                             selected_expiry = None
                         if delta_value is not None:
+                            stored_exact_keys.add((
+                                str(selected_tradingsymbol or "").upper(),
+                                str(selected_expiry or ""),
+                                int(strike),
+                                str(option_type).upper(),
+                            ))
                             """
                             correct_tradingsymbol = 'N/A'
                             for opt in cached_options:
@@ -1458,6 +1754,31 @@ def calculate_and_store_high_accuracy_delta(
                                 selected_expiry, spot_price, symbol, ltp_value,
                                 selected_tradingsymbol
                             ))
+                for exact_row in exact_contract_rows:
+                    exact_key = (
+                        str(exact_row["tradingsymbol"]).upper(),
+                        str(exact_row["expiry_date"]),
+                        int(exact_row["strike_price"]),
+                        str(exact_row["option_type"]).upper(),
+                    )
+                    if exact_key in stored_exact_keys:
+                        continue
+                    cursor.execute("""
+                        INSERT INTO delta_cache (
+                            timestamp, strike_price, option_type, delta,
+                            expiry_date, spot_price, symbol, ltp, tradingsymbol
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        timestamp_str,
+                        exact_row["strike_price"],
+                        exact_row["option_type"],
+                        float(exact_row["delta"]) * 100,
+                        exact_row["expiry_date"],
+                        exact_row["spot_price"],
+                        symbol,
+                        exact_row["ltp"],
+                        exact_row["tradingsymbol"],
+                    ))
             conn.commit()
             conn.close()
         print("Delta calculations completed and stored successfully.")
@@ -1467,6 +1788,7 @@ def calculate_and_store_high_accuracy_delta(
             'delta_results': delta_results,
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             'coverage': coverage,
+            'missing_requested_contracts': missing_requested_contracts,
         }
     except Exception as e:
         print(f"Error in delta calculation: {e}")
@@ -1530,10 +1852,13 @@ def print_latest_market_data_timestamps(db_path=DB_PATH):
         finally:
             conn.close()
 
-def fetch_latest_delta_data(symbol: str = 'NIFTY50', db_path=DB_PATH) -> List[Dict]:
-    """
-    Fetches the most recent delta data for all strikes from the delta_cache table.
-    """
+def fetch_latest_delta_snapshot(
+    symbol: str = 'NIFTY50',
+    db_path=DB_PATH,
+    required_contracts: Optional[List[Dict[str, Any]]] = None,
+    refresh_if_missing: bool = False,
+) -> Dict[str, Any]:
+    """Fetch the latest delta snapshot with timestamp and required-contract coverage."""
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
@@ -1543,7 +1868,26 @@ def fetch_latest_delta_data(symbol: str = 'NIFTY50', db_path=DB_PATH) -> List[Di
 
     if not latest_timestamp:
         conn.close()
-        return []
+        missing_required_contracts = _normalize_required_contracts(required_contracts)
+        if refresh_if_missing:
+            refresh_result = calculate_and_store_high_accuracy_delta(
+                symbol=symbol,
+                db_path=db_path,
+                required_contracts=required_contracts,
+                force_refresh=True,
+            )
+            if refresh_result is not None:
+                return fetch_latest_delta_snapshot(
+                    symbol=symbol,
+                    db_path=db_path,
+                    required_contracts=required_contracts,
+                    refresh_if_missing=False,
+                )
+        return {
+            "timestamp": None,
+            "options_data": [],
+            "missing_required_contracts": missing_required_contracts,
+        }
 
     # Fetch all records with that timestamp
     cursor.execute("""
@@ -1565,7 +1909,46 @@ def fetch_latest_delta_data(symbol: str = 'NIFTY50', db_path=DB_PATH) -> List[Di
             'tradingsymbol': row[4],
             'expiry': row[5],
         })
-    return options_data
+    missing_required_contracts = find_missing_required_contracts(options_data, required_contracts)
+
+    if refresh_if_missing and missing_required_contracts:
+        refresh_result = calculate_and_store_high_accuracy_delta(
+            symbol=symbol,
+            db_path=db_path,
+            required_contracts=required_contracts,
+            force_refresh=True,
+        )
+        if refresh_result is not None:
+            return fetch_latest_delta_snapshot(
+                symbol=symbol,
+                db_path=db_path,
+                required_contracts=required_contracts,
+                refresh_if_missing=False,
+            )
+
+    return {
+        "timestamp": latest_timestamp,
+        "options_data": options_data,
+        "missing_required_contracts": missing_required_contracts,
+    }
+
+
+def fetch_latest_delta_data(
+    symbol: str = 'NIFTY50',
+    db_path=DB_PATH,
+    required_contracts: Optional[List[Dict[str, Any]]] = None,
+    refresh_if_missing: bool = False,
+) -> List[Dict]:
+    """
+    Fetches the most recent delta data for all strikes from the delta_cache table.
+    """
+    snapshot = fetch_latest_delta_snapshot(
+        symbol=symbol,
+        db_path=db_path,
+        required_contracts=required_contracts,
+        refresh_if_missing=refresh_if_missing,
+    )
+    return snapshot["options_data"]
 
 
 def fetch_latest_option_price(
@@ -1621,6 +2004,229 @@ def fetch_latest_option_price(
         return None
     finally:
         conn.close()
+
+
+def floor_to_100_strike(value: float) -> int:
+    """Floor spot price to the nearest 100-point strike."""
+    return int(float(value) // 100.0) * 100
+
+
+def _resolve_nearest_expiry_value(
+    rows: Optional[List[Dict[str, Any]]],
+    current_date: Optional[date] = None,
+) -> Optional[str]:
+    current_date = current_date or date.today()
+    valid_expiries: List[date] = []
+
+    for row in rows or []:
+        expiry_value = _parse_option_expiry_date(row.get("expiry_date") or row.get("expiry"))
+        if expiry_value is None or expiry_value < current_date:
+            continue
+        valid_expiries.append(expiry_value)
+
+    if not valid_expiries:
+        return None
+    return min(valid_expiries).isoformat()
+
+
+def _match_exact_contract_from_rows(
+    rows: Optional[List[Dict[str, Any]]],
+    strike_price: int,
+    option_type: str,
+    expiry_date: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    option_type = str(option_type or "").upper()
+    target_expiry = str(expiry_date)[:10] if expiry_date else None
+    candidates: List[Dict[str, Any]] = []
+
+    for row in rows or []:
+        row_type = str(row.get("option_type") or "").upper()
+        if row_type != option_type:
+            continue
+
+        row_strike = row.get("strike_price")
+        try:
+            row_strike_int = int(float(row_strike))
+        except Exception:
+            continue
+        if row_strike_int != int(strike_price):
+            continue
+
+        row_expiry = str(row.get("expiry_date") or row.get("expiry") or "")[:10]
+        if target_expiry and row_expiry != target_expiry:
+            continue
+
+        candidates.append(dict(row))
+
+    if not candidates:
+        return None
+
+    def _candidate_sort_key(row: Dict[str, Any]) -> tuple:
+        return (
+            str(row.get("expiry_date") or row.get("expiry") or ""),
+            str(row.get("tradingsymbol") or ""),
+        )
+
+    chosen = dict(sorted(candidates, key=_candidate_sort_key)[0])
+    if chosen.get("strike_price") is not None:
+        try:
+            chosen["strike_price"] = int(float(chosen["strike_price"]))
+        except Exception:
+            pass
+    return chosen
+
+
+def find_nearest_expiry_option_contract(
+    strike_price: int,
+    option_type: str,
+    symbol: str = "NIFTY50",
+    option_rows: Optional[List[Dict[str, Any]]] = None,
+    current_date: Optional[date] = None,
+    db_path=DB_PATH,
+) -> Optional[Dict[str, Any]]:
+    """Return the exact nearest-expiry option snapshot row for a strike/type."""
+    rows = option_rows if option_rows is not None else fetch_latest_option_snapshot(symbol=symbol, db_path=db_path)
+    nearest_expiry = _resolve_nearest_expiry_value(rows, current_date=current_date)
+    if not nearest_expiry:
+        return None
+    return _match_exact_contract_from_rows(rows, strike_price=int(strike_price), option_type=option_type, expiry_date=nearest_expiry)
+
+
+def find_nearest_expiry_open_interest_contract(
+    strike_price: int,
+    option_type: str,
+    symbol: str = "NIFTY50",
+    oi_rows: Optional[List[Dict[str, Any]]] = None,
+    current_time=None,
+    current_date: Optional[date] = None,
+    db_path=DB_PATH,
+) -> Optional[Dict[str, Any]]:
+    """Return the exact nearest-expiry OI snapshot row for a strike/type."""
+    rows = oi_rows if oi_rows is not None else fetch_latest_open_interest_snapshot(
+        symbol=symbol,
+        current_time=current_time,
+        db_path=db_path,
+    )
+    nearest_expiry = _resolve_nearest_expiry_value(rows, current_date=current_date)
+    if not nearest_expiry:
+        return None
+    return _match_exact_contract_from_rows(rows, strike_price=int(strike_price), option_type=option_type, expiry_date=nearest_expiry)
+
+
+def fetch_latest_oi_vwap_5m_for_contract(
+    strike_price: int,
+    option_type: str,
+    symbol: str = "NIFTY50",
+    oi_5m_rows: Optional[List[Dict[str, Any]]] = None,
+    current_time=None,
+    current_date: Optional[date] = None,
+    db_path=DB_PATH,
+) -> Optional[float]:
+    """Return the latest completed 5m OI VWAP for the exact nearest-expiry contract."""
+    rows = oi_5m_rows if oi_5m_rows is not None else fetch_latest_open_interest_5m_snapshot(
+        symbol=symbol,
+        current_time=current_time,
+        db_path=db_path,
+    )
+    row = find_nearest_expiry_open_interest_contract(
+        strike_price=strike_price,
+        option_type=option_type,
+        symbol=symbol,
+        oi_rows=rows,
+        current_time=current_time,
+        current_date=current_date,
+        db_path=db_path,
+    )
+    if not row:
+        return None
+    vwap = row.get("vwap")
+    try:
+        return float(vwap) if vwap is not None else None
+    except Exception:
+        return None
+
+
+def scan_first_lower_pe_contract_below_ltp(
+    buy_strike_price: int,
+    max_ltp: float,
+    symbol: str = "NIFTY50",
+    option_rows: Optional[List[Dict[str, Any]]] = None,
+    current_date: Optional[date] = None,
+    db_path=DB_PATH,
+) -> Optional[Dict[str, Any]]:
+    """Scan downward in 100-point PE strikes and return the first contract below max_ltp."""
+    rows = option_rows if option_rows is not None else fetch_latest_option_snapshot(symbol=symbol, db_path=db_path)
+    nearest_expiry = _resolve_nearest_expiry_value(rows, current_date=current_date)
+    if not nearest_expiry:
+        return None
+
+    pe_candidates: List[Dict[str, Any]] = []
+    for row in rows or []:
+        if str(row.get("option_type") or "").upper() != "PE":
+            continue
+        row_expiry = str(row.get("expiry_date") or row.get("expiry") or "")[:10]
+        if row_expiry != nearest_expiry:
+            continue
+        try:
+            strike_int = int(float(row.get("strike_price")))
+            ltp_value = float(row.get("ltp"))
+        except Exception:
+            continue
+        if strike_int >= int(buy_strike_price):
+            continue
+        pe_candidates.append(dict(row, strike_price=strike_int, ltp=ltp_value))
+
+    pe_candidates.sort(key=lambda row: row["strike_price"], reverse=True)
+    for row in pe_candidates:
+        if float(row["ltp"]) < float(max_ltp):
+            return row
+    return None
+
+
+def fetch_current_exact_option_ltp(
+    symbol: str = "NIFTY50",
+    tradingsymbol: Optional[str] = None,
+    strike_price: Optional[int] = None,
+    option_type: Optional[str] = None,
+    expiry: Optional[str] = None,
+    option_rows: Optional[List[Dict[str, Any]]] = None,
+    db_path=DB_PATH,
+) -> Optional[float]:
+    """Resolve the latest LTP for an exact option contract from the latest snapshot with DB fallback."""
+    rows = option_rows if option_rows is not None else fetch_latest_option_snapshot(symbol=symbol, db_path=db_path)
+
+    if tradingsymbol:
+        for row in rows or []:
+            if str(row.get("tradingsymbol") or "") != str(tradingsymbol):
+                continue
+            try:
+                ltp_value = row.get("ltp")
+                return float(ltp_value) if ltp_value is not None else None
+            except Exception:
+                break
+
+    if strike_price is not None and option_type:
+        contract = _match_exact_contract_from_rows(
+            rows,
+            strike_price=int(strike_price),
+            option_type=str(option_type).upper(),
+            expiry_date=str(expiry)[:10] if expiry else None,
+        )
+        if contract:
+            try:
+                ltp_value = contract.get("ltp")
+                return float(ltp_value) if ltp_value is not None else None
+            except Exception:
+                pass
+
+    return fetch_latest_option_price(
+        symbol=symbol,
+        tradingsymbol=tradingsymbol,
+        strike_price=strike_price,
+        option_type=option_type,
+        expiry=expiry,
+        db_path=db_path,
+    )
 
 def sma_table_name(interval : str) -> str:
     # Replace any characters not letters/numbers with underscore

@@ -159,6 +159,200 @@ class OpenInterestPipelineTests(unittest.TestCase):
             self.assertIn("vwap", history.columns)
             self.assertNotIn("quote_timestamp", history.columns)
 
+    def test_open_interest_readers_pair_ce_and_pe_by_timestamp_even_with_mixed_insert_order(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = os.path.join(temp_dir, "oi_order.db")
+            mixed_rows = [
+                {
+                    "timestamp": datetime(2026, 4, 12, 9, 20, 0),
+                    "symbol": "NIFTY50",
+                    "exchange": "NFO",
+                    "tradingsymbol": "NIFTY16APR22600PE",
+                    "instrument_token": 2004,
+                    "expiry_date": "2026-04-16",
+                    "strike_price": 22600,
+                    "option_type": "PE",
+                    "spot_price": 22580.0,
+                    "last_price": 204.0,
+                    "open_interest": 204,
+                    "last_trade_time": datetime(2026, 4, 12, 9, 20, 0),
+                    "volume": 40,
+                },
+                {
+                    "timestamp": datetime(2026, 4, 12, 9, 15, 0),
+                    "symbol": "NIFTY50",
+                    "exchange": "NFO",
+                    "tradingsymbol": "NIFTY16APR22600PE",
+                    "instrument_token": 2002,
+                    "expiry_date": "2026-04-16",
+                    "strike_price": 22600,
+                    "option_type": "PE",
+                    "spot_price": 22580.0,
+                    "last_price": 202.0,
+                    "open_interest": 202,
+                    "last_trade_time": datetime(2026, 4, 12, 9, 15, 0),
+                    "volume": 20,
+                },
+                {
+                    "timestamp": datetime(2026, 4, 12, 9, 15, 0),
+                    "symbol": "NIFTY50",
+                    "exchange": "NFO",
+                    "tradingsymbol": "NIFTY16APR22500CE",
+                    "instrument_token": 1001,
+                    "expiry_date": "2026-04-16",
+                    "strike_price": 22500,
+                    "option_type": "CE",
+                    "spot_price": 22580.0,
+                    "last_price": 101.0,
+                    "open_interest": 101,
+                    "last_trade_time": datetime(2026, 4, 12, 9, 15, 0),
+                    "volume": 10,
+                },
+                {
+                    "timestamp": datetime(2026, 4, 12, 9, 20, 0),
+                    "symbol": "NIFTY50",
+                    "exchange": "NFO",
+                    "tradingsymbol": "NIFTY16APR22500CE",
+                    "instrument_token": 1003,
+                    "expiry_date": "2026-04-16",
+                    "strike_price": 22500,
+                    "option_type": "CE",
+                    "spot_price": 22580.0,
+                    "last_price": 103.0,
+                    "open_interest": 103,
+                    "last_trade_time": datetime(2026, 4, 12, 9, 20, 0),
+                    "volume": 30,
+                },
+                {
+                    "timestamp": datetime(2026, 4, 12, 9, 15, 0),
+                    "symbol": "NIFTY50",
+                    "exchange": "NFO",
+                    "tradingsymbol": "NIFTY16APR22500PE",
+                    "instrument_token": 1002,
+                    "expiry_date": "2026-04-16",
+                    "strike_price": 22500,
+                    "option_type": "PE",
+                    "spot_price": 22580.0,
+                    "last_price": 102.0,
+                    "open_interest": 102,
+                    "last_trade_time": datetime(2026, 4, 12, 9, 15, 0),
+                    "volume": 15,
+                },
+                {
+                    "timestamp": datetime(2026, 4, 12, 9, 20, 0),
+                    "symbol": "NIFTY50",
+                    "exchange": "NFO",
+                    "tradingsymbol": "NIFTY16APR22500PE",
+                    "instrument_token": 1004,
+                    "expiry_date": "2026-04-16",
+                    "strike_price": 22500,
+                    "option_type": "PE",
+                    "spot_price": 22580.0,
+                    "last_price": 104.0,
+                    "open_interest": 104,
+                    "last_trade_time": datetime(2026, 4, 12, 9, 20, 0),
+                    "volume": 35,
+                },
+                {
+                    "timestamp": datetime(2026, 4, 12, 9, 15, 0),
+                    "symbol": "NIFTY50",
+                    "exchange": "NFO",
+                    "tradingsymbol": "NIFTY16APR22600CE",
+                    "instrument_token": 2001,
+                    "expiry_date": "2026-04-16",
+                    "strike_price": 22600,
+                    "option_type": "CE",
+                    "spot_price": 22580.0,
+                    "last_price": 201.0,
+                    "open_interest": 201,
+                    "last_trade_time": datetime(2026, 4, 12, 9, 15, 0),
+                    "volume": 18,
+                },
+                {
+                    "timestamp": datetime(2026, 4, 12, 9, 20, 0),
+                    "symbol": "NIFTY50",
+                    "exchange": "NFO",
+                    "tradingsymbol": "NIFTY16APR22600CE",
+                    "instrument_token": 2003,
+                    "expiry_date": "2026-04-16",
+                    "strike_price": 22600,
+                    "option_type": "CE",
+                    "spot_price": 22580.0,
+                    "last_price": 203.0,
+                    "open_interest": 203,
+                    "last_trade_time": datetime(2026, 4, 12, 9, 20, 0),
+                    "volume": 38,
+                },
+            ]
+
+            self.assertEqual(store_open_interest_snapshot(mixed_rows, db_path=db_path), len(mixed_rows))
+
+            latest = fetch_latest_open_interest_snapshot(
+                "NIFTY50",
+                current_time=datetime(2026, 4, 12, 9, 20, 30),
+                db_path=db_path,
+            )
+            self.assertEqual(
+                [(row["timestamp"], row["strike_price"], row["option_type"]) for row in latest],
+                [
+                    ("2026-04-12 09:20:00", 22500.0, "CE"),
+                    ("2026-04-12 09:20:00", 22500.0, "PE"),
+                    ("2026-04-12 09:20:00", 22600.0, "CE"),
+                    ("2026-04-12 09:20:00", 22600.0, "PE"),
+                ],
+            )
+
+            history = fetch_open_interest_data("NIFTY50", db_path=db_path).reset_index()
+            self.assertEqual(
+                [
+                    (row["timestamp"].strftime("%Y-%m-%d %H:%M:%S"), row["strike_price"], row["option_type"])
+                    for _, row in history.iterrows()
+                ],
+                [
+                    ("2026-04-12 09:15:00", 22500.0, "CE"),
+                    ("2026-04-12 09:15:00", 22500.0, "PE"),
+                    ("2026-04-12 09:15:00", 22600.0, "CE"),
+                    ("2026-04-12 09:15:00", 22600.0, "PE"),
+                    ("2026-04-12 09:20:00", 22500.0, "CE"),
+                    ("2026-04-12 09:20:00", 22500.0, "PE"),
+                    ("2026-04-12 09:20:00", 22600.0, "CE"),
+                    ("2026-04-12 09:20:00", 22600.0, "PE"),
+                ],
+            )
+
+            provider = HistoricalDataProvider(db_path=":memory:")
+            provider._data_loaded = True
+            provider._open_interest_data = pd.DataFrame(list(reversed(mixed_rows)))
+            provider._open_interest_data["timestamp"] = pd.to_datetime(provider._open_interest_data["timestamp"])
+            provider_snapshot = provider.fetch_open_interest_snapshot(datetime(2026, 4, 12, 9, 20, 30))
+            provider_history = provider.fetch_open_interest_history(datetime(2026, 4, 12, 9, 20, 30))
+
+            self.assertEqual(
+                [(row["timestamp"].strftime("%Y-%m-%d %H:%M:%S"), row["strike_price"], row["option_type"]) for row in provider_snapshot],
+                [
+                    ("2026-04-12 09:20:00", 22500, "CE"),
+                    ("2026-04-12 09:20:00", 22500, "PE"),
+                    ("2026-04-12 09:20:00", 22600, "CE"),
+                    ("2026-04-12 09:20:00", 22600, "PE"),
+                ],
+            )
+            self.assertEqual(
+                [
+                    (row["timestamp"].strftime("%Y-%m-%d %H:%M:%S"), row["strike_price"], row["option_type"])
+                    for _, row in provider_history.iterrows()
+                ],
+                [
+                    ("2026-04-12 09:15:00", 22500, "CE"),
+                    ("2026-04-12 09:15:00", 22500, "PE"),
+                    ("2026-04-12 09:15:00", 22600, "CE"),
+                    ("2026-04-12 09:15:00", 22600, "PE"),
+                    ("2026-04-12 09:20:00", 22500, "CE"),
+                    ("2026-04-12 09:20:00", 22500, "PE"),
+                    ("2026-04-12 09:20:00", 22600, "CE"),
+                    ("2026-04-12 09:20:00", 22600, "PE"),
+                ],
+            )
+
     def test_open_interest_schema_migrates_quote_timestamp_to_nullable_vwap(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = os.path.join(temp_dir, "oi_old.db")
@@ -573,6 +767,109 @@ class OpenInterestPipelineTests(unittest.TestCase):
             self.assertEqual(float(snapshot[0]["vwap"]), 101.5)
             self.assertEqual(len(history), 2)
             self.assertNotIn(999, set(history["open_interest"]))
+
+    def test_open_interest_5m_readers_pair_ce_and_pe_by_bucket_even_with_mixed_insert_order(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = os.path.join(temp_dir, "oi_5m_order.db")
+            conn = sqlite3.connect(db_path)
+            try:
+                create_open_interest_5m_table(conn)
+                conn.executemany("""
+                    INSERT INTO option_open_interest_5m (
+                        timestamp, symbol, exchange, tradingsymbol, instrument_token,
+                        expiry_date, strike_price, option_type, spot_price, last_price,
+                        open_interest, oi_day_high, oi_day_low, vwap, bucket_volume,
+                        is_carry_forward, source_start_timestamp, source_end_timestamp,
+                        source_snapshot_count, last_trade_time
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, [
+                    ("2026-04-12 09:20:00", "NIFTY50", "NFO", "NIFTY16APR22600PE", 2004, "2026-04-16", 22600, "PE", 22580.0, 204.0, 204, 220, 180, 204.0, 40, 0, None, None, 1, None),
+                    ("2026-04-12 09:15:00", "NIFTY50", "NFO", "NIFTY16APR22600PE", 2002, "2026-04-16", 22600, "PE", 22580.0, 202.0, 202, 220, 180, 202.0, 20, 0, None, None, 1, None),
+                    ("2026-04-12 09:15:00", "NIFTY50", "NFO", "NIFTY16APR22500CE", 1001, "2026-04-16", 22500, "CE", 22580.0, 101.0, 101, 120, 80, 101.0, 10, 0, None, None, 1, None),
+                    ("2026-04-12 09:20:00", "NIFTY50", "NFO", "NIFTY16APR22500CE", 1003, "2026-04-16", 22500, "CE", 22580.0, 103.0, 103, 120, 80, 103.0, 30, 0, None, None, 1, None),
+                    ("2026-04-12 09:15:00", "NIFTY50", "NFO", "NIFTY16APR22500PE", 1002, "2026-04-16", 22500, "PE", 22580.0, 102.0, 102, 120, 80, 102.0, 15, 0, None, None, 1, None),
+                    ("2026-04-12 09:20:00", "NIFTY50", "NFO", "NIFTY16APR22500PE", 1004, "2026-04-16", 22500, "PE", 22580.0, 104.0, 104, 120, 80, 104.0, 35, 0, None, None, 1, None),
+                    ("2026-04-12 09:15:00", "NIFTY50", "NFO", "NIFTY16APR22600CE", 2001, "2026-04-16", 22600, "CE", 22580.0, 201.0, 201, 220, 180, 201.0, 18, 0, None, None, 1, None),
+                    ("2026-04-12 09:20:00", "NIFTY50", "NFO", "NIFTY16APR22600CE", 2003, "2026-04-16", 22600, "CE", 22580.0, 203.0, 203, 220, 180, 203.0, 38, 0, None, None, 1, None),
+                ])
+                conn.commit()
+            finally:
+                conn.close()
+
+            latest = fetch_latest_open_interest_5m_snapshot(
+                "NIFTY50",
+                current_time=datetime(2026, 4, 12, 9, 24, 59),
+                db_path=db_path,
+            )
+            self.assertEqual(
+                [(row["timestamp"], row["strike_price"], row["option_type"]) for row in latest],
+                [
+                    ("2026-04-12 09:20:00", 22500.0, "CE"),
+                    ("2026-04-12 09:20:00", 22500.0, "PE"),
+                    ("2026-04-12 09:20:00", 22600.0, "CE"),
+                    ("2026-04-12 09:20:00", 22600.0, "PE"),
+                ],
+            )
+
+            history = fetch_open_interest_5m_data("NIFTY50", db_path=db_path).reset_index()
+            self.assertEqual(
+                [
+                    (row["timestamp"].strftime("%Y-%m-%d %H:%M:%S"), row["strike_price"], row["option_type"])
+                    for _, row in history.iterrows()
+                ],
+                [
+                    ("2026-04-12 09:15:00", 22500.0, "CE"),
+                    ("2026-04-12 09:15:00", 22500.0, "PE"),
+                    ("2026-04-12 09:15:00", 22600.0, "CE"),
+                    ("2026-04-12 09:15:00", 22600.0, "PE"),
+                    ("2026-04-12 09:20:00", 22500.0, "CE"),
+                    ("2026-04-12 09:20:00", 22500.0, "PE"),
+                    ("2026-04-12 09:20:00", 22600.0, "CE"),
+                    ("2026-04-12 09:20:00", 22600.0, "PE"),
+                ],
+            )
+
+            provider = HistoricalDataProvider(db_path=":memory:")
+            provider._data_loaded = True
+            provider._open_interest_5m_data = pd.DataFrame([
+                {"timestamp": pd.Timestamp("2026-04-12 09:20:00"), "tradingsymbol": "NIFTY16APR22600PE", "strike_price": 22600, "option_type": "PE", "open_interest": 204, "vwap": 204.0},
+                {"timestamp": pd.Timestamp("2026-04-12 09:15:00"), "tradingsymbol": "NIFTY16APR22600PE", "strike_price": 22600, "option_type": "PE", "open_interest": 202, "vwap": 202.0},
+                {"timestamp": pd.Timestamp("2026-04-12 09:15:00"), "tradingsymbol": "NIFTY16APR22500CE", "strike_price": 22500, "option_type": "CE", "open_interest": 101, "vwap": 101.0},
+                {"timestamp": pd.Timestamp("2026-04-12 09:20:00"), "tradingsymbol": "NIFTY16APR22500CE", "strike_price": 22500, "option_type": "CE", "open_interest": 103, "vwap": 103.0},
+                {"timestamp": pd.Timestamp("2026-04-12 09:15:00"), "tradingsymbol": "NIFTY16APR22500PE", "strike_price": 22500, "option_type": "PE", "open_interest": 102, "vwap": 102.0},
+                {"timestamp": pd.Timestamp("2026-04-12 09:20:00"), "tradingsymbol": "NIFTY16APR22500PE", "strike_price": 22500, "option_type": "PE", "open_interest": 104, "vwap": 104.0},
+                {"timestamp": pd.Timestamp("2026-04-12 09:15:00"), "tradingsymbol": "NIFTY16APR22600CE", "strike_price": 22600, "option_type": "CE", "open_interest": 201, "vwap": 201.0},
+                {"timestamp": pd.Timestamp("2026-04-12 09:20:00"), "tradingsymbol": "NIFTY16APR22600CE", "strike_price": 22600, "option_type": "CE", "open_interest": 203, "vwap": 203.0},
+            ])
+
+            provider_snapshot = provider.fetch_open_interest_5m_snapshot(datetime(2026, 4, 12, 9, 24, 59))
+            provider_history = provider.fetch_open_interest_5m_history(datetime(2026, 4, 12, 9, 24, 59))
+
+            self.assertEqual(
+                [(row["timestamp"].strftime("%Y-%m-%d %H:%M:%S"), row["strike_price"], row["option_type"]) for row in provider_snapshot],
+                [
+                    ("2026-04-12 09:20:00", 22500, "CE"),
+                    ("2026-04-12 09:20:00", 22500, "PE"),
+                    ("2026-04-12 09:20:00", 22600, "CE"),
+                    ("2026-04-12 09:20:00", 22600, "PE"),
+                ],
+            )
+            self.assertEqual(
+                [
+                    (row["timestamp"].strftime("%Y-%m-%d %H:%M:%S"), row["strike_price"], row["option_type"])
+                    for _, row in provider_history.iterrows()
+                ],
+                [
+                    ("2026-04-12 09:15:00", 22500, "CE"),
+                    ("2026-04-12 09:15:00", 22500, "PE"),
+                    ("2026-04-12 09:15:00", 22600, "CE"),
+                    ("2026-04-12 09:15:00", 22600, "PE"),
+                    ("2026-04-12 09:20:00", 22500, "CE"),
+                    ("2026-04-12 09:20:00", 22500, "PE"),
+                    ("2026-04-12 09:20:00", 22600, "CE"),
+                    ("2026-04-12 09:20:00", 22600, "PE"),
+                ],
+            )
 
 
 if __name__ == "__main__":

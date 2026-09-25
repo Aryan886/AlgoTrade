@@ -82,6 +82,13 @@ class BacktestableBotStrictFillTests(unittest.TestCase):
         self.assertEqual(len(bot.trade_log.trades), 2)
         self.assertEqual(bot.trade_log.trades[0].entry_signal_time, signal_time)
         self.assertEqual(bot.trade_log.trades[0].entry_fill_time, fill_time)
+        self.assertEqual(bot._last_options_snapshot_timestamp, "2026-03-20 09:20:31")
+
+    def test_backtest_bot_initializes_last_options_snapshot_timestamp(self):
+        provider = Mock()
+        bot = self._make_bot(provider, datetime(2026, 3, 20, 9, 20, 0))
+
+        self.assertIsNone(bot._last_options_snapshot_timestamp)
 
     def test_open_two_lots_skips_when_post_signal_snapshot_is_missing(self):
         signal_time = datetime(2026, 3, 20, 9, 20, 0)
@@ -108,10 +115,41 @@ class BacktestableBotStrictFillTests(unittest.TestCase):
 
         bot._open_two_lots(intent)
 
-    provider.fetch_next_delta_snapshot.assert_called_once_with(signal_time + timedelta(seconds=5))
+        provider.fetch_next_delta_snapshot.assert_called_once_with(signal_time + timedelta(seconds=5))
         self.assertEqual(bot.position["lots"], {})
         self.assertEqual(bot.trade_log._skipped_entries, 1)
         self.assertEqual(len(bot.trade_log.trades), 0)
+
+    def test_open_two_lots_waits_for_first_closed_5m_candle_without_warning(self):
+        signal_time = datetime(2026, 3, 20, 9, 19, 0)
+        provider = Mock()
+        provider.fetch_market_data.side_effect = lambda current_time, interval, limit: (
+            make_market_df("2026-03-20 09:15:00", 4, "1min", 100.0)
+            if interval == "1m"
+            else pd.DataFrame()
+        )
+
+        bot = self._make_bot(provider, signal_time)
+        bot.logger = Mock()
+        intent = {
+            "timestamp": "2026-03-20 09:19:00",
+            "position_type": "A",
+            "reason": {"section": "section1", "subcat": "a"},
+            "spot": 22450.0,
+            "strikes": {"pe_strike": 22400, "ce_strike_near": 22500, "pe_strike_upper": 22600},
+            "legs": [
+                {"tradingsymbol": "OPTPE", "action": "SELL", "option_type": "PE", "strike_price": 22400, "expiry": "2026-03-26", "last_price": 999.0},
+            ],
+            "_gate_checks": [],
+        }
+
+        bot._open_two_lots(intent)
+
+        bot.logger.info.assert_called_once_with("Waiting for first closed 5m candle before evaluating entry.")
+        bot.logger.warning.assert_not_called()
+        provider.fetch_next_delta_snapshot.assert_not_called()
+        self.assertEqual(bot.trade_log._skipped_entries, 0)
+        self.assertEqual(bot.position["lots"], {})
 
     def test_close_lot_uses_first_post_signal_snapshot(self):
         signal_time = datetime(2026, 3, 20, 9, 45, 0)
@@ -159,7 +197,7 @@ class BacktestableBotStrictFillTests(unittest.TestCase):
 
         lot1 = bot.position["lots"]["lot1"]
         closed_trade = bot.trade_log.get_closed_trades()[0]
-    provider.fetch_next_delta_snapshot.assert_called_once_with(signal_time + timedelta(seconds=5))
+        provider.fetch_next_delta_snapshot.assert_called_once_with(signal_time + timedelta(seconds=5))
         self.assertEqual(lot1["closed_at"], "2026-03-20 09:45:09")
         self.assertEqual(lot1["legs"][0]["exit_price"], 120.0)
         self.assertEqual(closed_trade.exit_signal_time, signal_time)

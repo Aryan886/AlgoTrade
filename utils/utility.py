@@ -2,6 +2,7 @@ import os
 import yaml
 from pathlib import Path
 import logging
+from logging.handlers import RotatingFileHandler
 
 def load_config():
     base_path = os.path.dirname(os.path.abspath(__file__))
@@ -27,113 +28,154 @@ def save_debug_csv(df, name, folder="debug"):
     print(f"Saved debug file: {path}")
 
 
+def _ensure_logs_dir() -> None:
+    os.makedirs("logs", exist_ok=True)
+
+
+def _handler_matches_path(handler: logging.Handler, filename: str) -> bool:
+    handler_path = getattr(handler, "baseFilename", None)
+    if not handler_path:
+        return False
+    return os.path.abspath(handler_path) == os.path.abspath(filename)
+
+
+def _configure_logger(
+    name: str,
+    level: int,
+    filename: str,
+    formatter: logging.Formatter,
+    *,
+    max_bytes: int,
+    backup_count: int,
+    propagate: bool = False,
+) -> logging.Logger:
+    _ensure_logs_dir()
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    logger.propagate = propagate
+
+    for handler in list(logger.handlers):
+        if isinstance(handler, RotatingFileHandler) and _handler_matches_path(handler, filename):
+            handler.setLevel(level)
+            handler.setFormatter(formatter)
+            return logger
+
+    handler = RotatingFileHandler(
+        filename,
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+    )
+    handler.setLevel(level)
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    return logger
+
+
 # Setup dedicated paper trading logger
 def setup_paper_trading_logger():
     """Setup dedicated logger for paper trading with separate files"""
-    
-    # Create paper trading logger
-    paper_logger = logging.getLogger('paper_trading')
-    paper_logger.setLevel(logging.INFO)
-    paper_logger.handlers.clear()  # Clear any existing handlers
-    
+
     # Create formatters
     detailed_formatter = logging.Formatter(
         '%(asctime)s - %(levelname)s - %(message)s'
     )
-    
+
     trade_formatter = logging.Formatter(
         '%(asctime)s - %(message)s'
     )
-    
-    # 1. Main paper trading log (all paper trading activities)
-    from logging.handlers import RotatingFileHandler
-    main_handler = RotatingFileHandler(
-        'logs/paper_trading_main.log', 
-        maxBytes=10*1024*1024, 
-        backupCount=5
+
+    paper_logger = _configure_logger(
+        'paper_trading',
+        logging.INFO,
+        'logs/paper_trading_main.log',
+        detailed_formatter,
+        max_bytes=10 * 1024 * 1024,
+        backup_count=5,
+        propagate=False,
     )
-    main_handler.setFormatter(detailed_formatter)
-    main_handler.setLevel(logging.INFO)
-    
-    # 2. Trade actions only (entries, exits, adjustments)
-    trade_handler = RotatingFileHandler(
+
+    trade_logger = _configure_logger(
+        'paper_trading.trades',
+        logging.INFO,
         'logs/paper_trading_actions.log',
-        maxBytes=5*1024*1024,
-        backupCount=3
+        trade_formatter,
+        max_bytes=5 * 1024 * 1024,
+        backup_count=3,
     )
-    trade_handler.setFormatter(trade_formatter)
-    trade_handler.setLevel(logging.INFO)
-    
-    # 3. Position management (profit checks, adjustments, etc.)
-    position_handler = RotatingFileHandler(
+
+    position_logger = _configure_logger(
+        'paper_trading.positions',
+        logging.DEBUG,
         'logs/paper_trading_positions.log',
-        maxBytes=5*1024*1024,
-        backupCount=3
+        detailed_formatter,
+        max_bytes=5 * 1024 * 1024,
+        backup_count=3,
     )
-    position_handler.setFormatter(detailed_formatter)
-    position_handler.setLevel(logging.DEBUG)
 
-    # 4. Logger for sma strategy specific logs
-    sma_strategy_handler = RotatingFileHandler(
+    sma_logger = _configure_logger(
+        'paper_trading.strat_sma',
+        logging.DEBUG,
         'logs/strat_sma.log',
-        maxBytes=5*1024*1024,
-        backupCount=3
+        detailed_formatter,
+        max_bytes=5 * 1024 * 1024,
+        backup_count=3,
     )
-    sma_strategy_handler.setFormatter(detailed_formatter)
-    sma_strategy_handler.setLevel(logging.DEBUG)
-    
-    #5. Logger for equity donchian strategy specific logs
-    equity_handler = RotatingFileHandler(
+
+    equity_logger = _configure_logger(
+        'paper_trading.strat_equity_donchian',
+        logging.DEBUG,
         'logs/strat_equity.log',
-        maxBytes=5*1024*1024,
-        backupCount=3
+        detailed_formatter,
+        max_bytes=5 * 1024 * 1024,
+        backup_count=3,
     )
-    equity_handler.setFormatter(detailed_formatter)
-    equity_handler.setLevel(logging.DEBUG)
 
-    # Add handlers to logger
-    paper_logger.addHandler(main_handler)
-    
-    # Create separate loggers for specific activities
-    trade_logger = logging.getLogger('paper_trading.trades')
-    trade_logger.setLevel(logging.INFO)
-    trade_logger.handlers.clear()
-    trade_logger.addHandler(trade_handler)
-    trade_logger.propagate = False  # Don't propagate to parent logger
-    
-    position_logger = logging.getLogger('paper_trading.positions')
-    position_logger.setLevel(logging.DEBUG)
-    position_logger.handlers.clear()
-    position_logger.addHandler(position_handler)
-    position_logger.propagate = False
-    
-    sma_logger = logging.getLogger('paper_trading.strat_sma')
-    sma_logger.setLevel(logging.DEBUG)
-    sma_logger.handlers.clear()
-    sma_logger.addHandler(sma_strategy_handler)
-    sma_logger.propagate = False  # Don't propagate to parent logger
-
-    equity_logger = logging.getLogger('paper_trading.strat_equity_donchian')
-    equity_logger.setLevel(logging.DEBUG)
-    equity_logger.handlers.clear()
-    equity_logger.addHandler(equity_handler)
-
-    # 6. Logger for nifty options strategy specific logs
-    nifty_handler = RotatingFileHandler(
+    nifty_logger = _configure_logger(
+        'paper_trading.strat_nifty',
+        logging.DEBUG,
         'logs/strat_nifty.log',
-        maxBytes=5*1024*1024,
-        backupCount=3
+        detailed_formatter,
+        max_bytes=5 * 1024 * 1024,
+        backup_count=3,
     )
-    nifty_handler.setFormatter(detailed_formatter)
-    nifty_handler.setLevel(logging.DEBUG)
-
-    nifty_logger = logging.getLogger('paper_trading.strat_nifty')
-    nifty_logger.setLevel(logging.DEBUG)
-    nifty_logger.handlers.clear()
-    nifty_logger.addHandler(nifty_handler)
-    nifty_logger.propagate = False
 
     return paper_logger, trade_logger, position_logger, sma_logger, equity_logger, nifty_logger
+
+
+def setup_oi_logging():
+    """Setup dedicated rotating loggers for OI strategy evaluation, trades, and position monitoring."""
+    detailed_formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s'
+    )
+    trade_formatter = logging.Formatter(
+        '%(asctime)s - %(message)s'
+    )
+
+    oi_strategy_logger = _configure_logger(
+        'paper_trading.strat_oi',
+        logging.DEBUG,
+        'logs/strat_oi.log',
+        detailed_formatter,
+        max_bytes=5 * 1024 * 1024,
+        backup_count=3,
+    )
+    oi_trade_logger = _configure_logger(
+        'paper_trading.oi_trades',
+        logging.INFO,
+        'logs/oi_trade_actions.log',
+        trade_formatter,
+        max_bytes=5 * 1024 * 1024,
+        backup_count=3,
+    )
+    oi_position_logger = _configure_logger(
+        'paper_trading.oi_positions',
+        logging.DEBUG,
+        'logs/oi_position_monitor.log',
+        detailed_formatter,
+        max_bytes=5 * 1024 * 1024,
+        backup_count=3,
+    )
+    return oi_strategy_logger, oi_trade_logger, oi_position_logger
 
 def standardize_column_names(df):
     """

@@ -78,6 +78,7 @@ class BacktestableBot(NiftyPaperBot):
         self.position_file = ""  # No file persistence
         self.dry_run = False
         self.position: Dict[str, Any] = {"symbol": symbol, "lots": {}, "meta": {}}
+        self._last_options_snapshot_timestamp: Optional[str] = None
 
         # Create backtestable strategy
         self.strategy = BacktestableStrategy(
@@ -115,10 +116,42 @@ class BacktestableBot(NiftyPaperBot):
     def _fetch_options_data(self) -> List[Dict[str, Any]]:
         """Override to use historical options data."""
         current_time = self._current_time_fn()
-        return self._data_provider.fetch_delta_data(current_time)
+        options_data = self._data_provider.fetch_delta_data(current_time)
+        self._set_last_options_snapshot_timestamp(options_data)
+        return options_data
 
     def _now(self) -> datetime:
         return self._current_time_fn()
+
+    def _set_last_options_snapshot_timestamp(self, options_data: List[Dict[str, Any]], fallback: Optional[datetime] = None) -> None:
+        snapshot_ts = None
+        for row in options_data or []:
+            snapshot_ts = row.get("timestamp")
+            if snapshot_ts is not None:
+                break
+
+        if snapshot_ts is None:
+            snapshot_ts = fallback
+
+        if snapshot_ts is None:
+            self._last_options_snapshot_timestamp = None
+            return
+
+        if hasattr(snapshot_ts, "strftime"):
+            self._last_options_snapshot_timestamp = snapshot_ts.strftime("%Y-%m-%d %H:%M:%S")
+            return
+
+        self._last_options_snapshot_timestamp = str(snapshot_ts)
+
+    def _waiting_for_first_closed_candle(self, current_time: datetime, interval: str) -> bool:
+        session_start = current_time.replace(
+            hour=self.SESSION_RESET_TIME.hour,
+            minute=self.SESSION_RESET_TIME.minute,
+            second=0,
+            microsecond=0,
+        )
+        interval_duration = HistoricalDataProvider.get_interval_duration(interval)
+        return session_start <= current_time < (session_start + interval_duration)
 
     def save_position(self) -> None:
         """Override to prevent file I/O during backtesting."""
@@ -136,6 +169,7 @@ class BacktestableBot(NiftyPaperBot):
             raise StrictBacktestDataError(
                 f"Missing post-signal options snapshot for {phase} after target fill time {target_fill_time:%Y-%m-%d %H:%M:%S}"
             )
+        self._set_last_options_snapshot_timestamp(options_data, fallback=fill_time)
         return fill_time, options_data, _mark_to_market_price_map(options_data)
 
     def _strict_leg_prices(
@@ -182,6 +216,12 @@ class BacktestableBot(NiftyPaperBot):
         df_1m = self._get_df("1m", limit=200)
         df_5m = self._get_df("5m", limit=200)
         if df_1m.empty or df_5m.empty:
+            if df_1m.empty and self._waiting_for_first_closed_candle(signal_time, "1m"):
+                self.logger.info("Waiting for first closed 1m candle before evaluating entry.")
+                return
+            if not df_1m.empty and df_5m.empty and self._waiting_for_first_closed_candle(signal_time, "5m"):
+                self.logger.info("Waiting for first closed 5m candle before evaluating entry.")
+                return
             self.logger.warning("Cannot open lots: missing 1m/5m market data.")
             return
 
@@ -531,6 +571,10 @@ class BacktestableBot(NiftyPaperBot):
         self.position = {"symbol": self.symbol, "lots": {}, "meta": {}}
         self._active_trade_ids = {}
         self._pending_sl_exit = set()
+
+    def reset_for_backtest_day(self) -> None:
+        """Reset per-session strategy state at the start of a simulated trading day."""
+        self.strategy.reset_state()
 
     def get_unrealized_pnl(self) -> float:
         """Calculate unrealized P&L for open positions."""

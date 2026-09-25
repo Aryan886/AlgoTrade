@@ -35,7 +35,7 @@ export interface PnlSummary {
   closedTrades: number;
 }
 
-export type StrategyId = "nifty-options" | "donchian-options" | "sma-spread";
+export type StrategyId = "nifty-options" | "oi-expiry" | "donchian-options" | "sma-spread";
 
 export interface StrategyCard {
   strategyId: StrategyId;
@@ -102,7 +102,7 @@ export interface DashboardOverview {
 }
 
 export interface BacktestRunRequest {
-  strategyId: "nifty-options";
+  strategyId: "nifty-options" | "oi-expiry";
   startDate: string;
   endDate: string;
 }
@@ -149,7 +149,7 @@ export interface DataQualitySummary {
 }
 
 export interface BacktestMeta {
-  strategyId: "nifty-options";
+  strategyId: "nifty-options" | "oi-expiry";
   startDate: string;
   endDate: string;
   executedAt: string;
