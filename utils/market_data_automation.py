@@ -7,6 +7,7 @@ from utils.data_fetcher import fetch_and_save_data, fetch_and_save_equity
 from utils.vix_fetcher import calculate_and_store_vix
 from utils.open_interest_fetcher import fetch_and_store_open_interest
 from utils.db_func import store_market_data, store_signal
+from utils.db_setup import prepare_database
 from utils.db_func import  calculate_and_store_high_accuracy_delta
 from core.indicators import compute_indicators, generate_signals
 import os
@@ -324,6 +325,18 @@ class MarketDataAutomation:
         """Fetch 15minute equity data"""
         return self.fetch_equity_with_retry('15m')
 
+    def run_vix_job(self):
+        """VIX calculation, only while the market is open."""
+        if not self.is_market_open():
+            return
+        calculate_vix_separately()
+
+    def run_delta_job(self):
+        """High-accuracy delta snapshot, only while the market is open."""
+        if not self.is_market_open():
+            return
+        calculate_high_accuracy_delta()
+
     def fetch_open_interest_data(self):
         """Fetch NIFTY option open-interest snapshot."""
         return self.fetch_open_interest_with_retry()
@@ -635,16 +648,16 @@ class MarketDataAutomation:
         #schedule.every(15).minutes.do(self.fetch_15m_equity_data)
         
         # VIX calculation (every 5 minutes, independent of market data)
-        schedule.every(5).minutes.do(calculate_vix_separately)
+        schedule.every(5).minutes.do(self.run_vix_job)
         
         # High-accuracy delta calculation (for delta neutral strategies)
-        schedule.every().minute.do(calculate_high_accuracy_delta)
+        schedule.every().minute.do(self.run_delta_job)
 
         # NIFTY option open interest snapshots (independent append-only stream)
         schedule.every().minute.do(self.fetch_open_interest_data)
         
-        # Run the main trading strategy
-        schedule.every().minute.do(run_trading_strategy)
+        # The Donchian strategy runs inside run_paper_trading_cycle only; a second
+        # log-only run doubled the work and could trip the signal cooldown first.
 
         #PAPER TRADING - Run every minute during market hours
         schedule.every().minute.do(self.run_paper_trading_cycle)
@@ -666,7 +679,6 @@ class MarketDataAutomation:
         logger.info("- VIX calculation: Every 5 minutes (independent)")
         logger.info("- High-accuracy delta: Every minute (Black-Scholes)")
         logger.info("- NIFTY option OI: Every minute (nearest expiry, ATM +/- 300)")
-        logger.info("- Trading Strategy: Every minute")
         logger.info("- Donchian Paper Trading: Every minute")
         logger.info("- SMA Paper Trading: Every minute")
         logger.info("- Nifty Options Paper Trading: Every minute")
@@ -701,6 +713,13 @@ class MarketDataAutomation:
             logger.error("Connection test failed. Please check your Kite API credentials.")
             return
         
+        # One-time database tuning (WAL journal, lookup indexes). A failure here
+        # must not stop trading; the loop still works, just slower.
+        try:
+            prepare_database()
+        except Exception as e:
+            logger.error(f"Database preparation failed, continuing without it: {e}")
+
         # Setup schedule
         self.setup_schedule()
         

@@ -1,6 +1,8 @@
 import sqlite3
 import os
 
+from config.config import DB_PATH
+
 MARKET_DATA_COLUMNS = {
     "open": "REAL",
     "high": "REAL",
@@ -252,7 +254,48 @@ def create_open_interest_table(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def create_tables(db_path='db/trading_bot.db'):
+def prepare_database(db_path=DB_PATH) -> None:
+    """One-time startup tuning for the live database. Safe to call repeatedly."""
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+
+        tables = {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        for table in ("option_data", "delta_cache"):
+            if table in tables:
+                conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS ix_{table}_symbol_timestamp "
+                    f"ON {table} (symbol, timestamp)"
+                )
+
+        # Held-leg price lookups filter delta_cache by tradingsymbol.
+        if "delta_cache" in tables:
+            delta_columns = {row[1] for row in conn.execute("PRAGMA table_info(delta_cache)")}
+            if "tradingsymbol" in delta_columns:
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS ix_delta_cache_symbol_tradingsymbol_timestamp "
+                    "ON delta_cache (symbol, tradingsymbol, timestamp)"
+                )
+
+        # Older databases carry a plain index duplicating the unique candle index;
+        # it doubles the write cost for no read benefit.
+        indexes = {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+        }
+        for interval in ("1m", "5m", "15m", "1h"):
+            unique_name = f"ux_market_data_{interval}_symbol_timestamp"
+            redundant_name = f"idx_market_data_{interval}_symbol_timestamp"
+            if unique_name in indexes and redundant_name in indexes:
+                conn.execute(f"DROP INDEX {redundant_name}")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def create_tables(db_path=DB_PATH):
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()

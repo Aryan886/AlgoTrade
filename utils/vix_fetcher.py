@@ -6,7 +6,7 @@ Fetches live option chain data from Kite API, calculates VIX, and stores in data
 import pandas as pd
 import math
 from datetime import date, datetime, timedelta
-from config.config import CONFIG
+from config.config import CONFIG, DB_PATH
 from utils.db_func import (
     store_vix_data_bulk,
     fetch_vix_data,
@@ -14,7 +14,7 @@ from utils.db_func import (
     build_nifty_strategy_required_contracts,
     summarize_option_snapshot_coverage,
 )
-from broker.zerodha_client import kite_from_saved_token
+from broker.zerodha_client import get_instruments, kite_from_saved_token
 import time
 import sqlite3
 from utils.iv import ProductionIVCalculator
@@ -34,7 +34,7 @@ def get_nearest_nifty_futures_price(kite=None):
             kite = kite_from_saved_token()
             if not kite:
                 return None
-        instruments = kite.instruments("NFO")
+        instruments = get_instruments(kite, "NFO")
         # Filter FUT instruments for NIFTY
         futs = [inst for inst in instruments if inst.get('name') == 'NIFTY' and inst.get('instrument_type') == 'FUT']
         if not futs:
@@ -253,7 +253,7 @@ def fetch_live_option_chain(spot_price=None, required_contracts=None):
             print("Failed to connect to Kite API")
             return None
 
-        instruments = kite.instruments("NFO")
+        instruments = get_instruments(kite, "NFO")
         current_date = datetime.now().date()
 
         nifty_option_symbols = []
@@ -536,8 +536,6 @@ def calculate_and_store_vix(symbol: str = "NIFTY50", spot_price: float = None, s
     if not symbol or not isinstance(symbol, str):
         symbol = "NIFTY50"
     if symbol == "NIFTY50" or symbol == "^NIFTY50":
-        vix_check = calculate_live_vix(spot_price, strike_window)
-        #print(f"Calculated vix is : {vix_check}")
         return calculate_live_vix(spot_price, strike_window)
     else:
         print(f"Live VIX calculation not supported for symbol: {symbol}")
@@ -654,7 +652,7 @@ def debug_print_iv_values():
     print("[INFO] If you see IV values > 100, the API is returning them as percent or there is a data issue.")
 
 # Update store_vix_data to accept new columns
-def store_vix_data(timestamp, symbol, vix_value, vix_ao_value=None, vix_donchian_upper=None, vix_donchian_lower=None, vix_donchian_mid=None, db_path='db/trading_bot.db'):
+def store_vix_data(timestamp, symbol, vix_value, vix_ao_value=None, vix_donchian_upper=None, vix_donchian_lower=None, vix_donchian_mid=None, db_path=DB_PATH):
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     cursor.execute("""

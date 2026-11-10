@@ -3,12 +3,12 @@ import os
 import pandas as pd
 from datetime import datetime, timedelta
 from utils.utility import get_data_path
-from broker.zerodha_client import kite_from_saved_token
+from broker.zerodha_client import get_instruments, kite_from_saved_token
 from utils.db_func import store_market_data, store_signal, store_sma_from_df, store_equity_data
 from core.indicators import compute_indicators, generate_signals, compute_smas, compute_smas_with_high_low
 
 
-DB_PATH = 'db/trading_bot.db'
+from config.config import DB_PATH
 
 class Nifty50DataFetcher:
     def __init__(self):
@@ -36,7 +36,7 @@ class Nifty50DataFetcher:
                 print("Kite connection not established")
                 return None
                 
-            instruments = self.kite.instruments("NSE")
+            instruments = get_instruments(self.kite, "NSE")
             print(f"[DEBUG] Total instruments found: {len(instruments)}")
             
             # Look for NIFTY 50 with different possible symbols
@@ -334,7 +334,7 @@ class EquityDataFetcher:
 
         try:
             #Find instrument token
-            instruments = self.kite.instruments("NSE")
+            instruments = get_instruments(self.kite, "NSE")
             token = None
             for inst in instruments:
                 if inst['tradingsymbol'] == symbol:

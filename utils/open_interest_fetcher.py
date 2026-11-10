@@ -11,7 +11,7 @@ import logging
 from datetime import date, datetime
 from typing import Any, Dict, Iterable, List, Optional
 
-from broker.zerodha_client import kite_from_saved_token
+from broker.zerodha_client import get_instruments, kite_from_saved_token
 from config.config import CONFIG
 from utils.db_func import DB_PATH, rebuild_open_interest_5m_for_rows, store_open_interest_snapshot
 
@@ -157,7 +157,7 @@ class NiftyOpenInterestFetcher:
             logger.warning("Could not fetch NIFTY spot price for OI snapshot")
             return []
 
-        instruments = self.kite.instruments(NFO_EXCHANGE)
+        instruments = get_instruments(self.kite, NFO_EXCHANGE)
         nearest = select_nearest_expiry_instruments(instruments, current_date=current_date)
         if not nearest:
             logger.warning("No active nearest-expiry NIFTY option instruments found")

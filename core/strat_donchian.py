@@ -14,6 +14,11 @@ paper_logger, trade_logger, position_logger, sma_logger, equity_logger, _nifty_l
 
 CUTOFF_TIME = pd.to_datetime("13:00").time()
 
+# Candles loaded per timeframe. Only the latest row is evaluated; the longest
+# rolling window is the 34-bar AO, so 200 rows gives identical values to a
+# full-table load.
+CANDLE_LOOKBACK = 200
+
 # GLOBAL SIGNAL TRACKING
 last_signal_time = None
 last_signal_options = None
@@ -201,8 +206,8 @@ def donchian_ao_strategy(symbol="NIFTY50"):
     try:
         # 1. Fetch Data from database
         print(f"[DEBUG] Fetching market data for symbol: {symbol}")
-        df_5min = fetch_market_data(symbol=symbol, interval="5m", limit=None)
-        df_15min = fetch_market_data(symbol=symbol, interval="15m", limit= None)
+        df_5min = fetch_market_data(symbol=symbol, interval="5m", limit=CANDLE_LOOKBACK)
+        df_15min = fetch_market_data(symbol=symbol, interval="15m", limit=CANDLE_LOOKBACK)
         vix_data = fetch_vix_data(symbol=symbol)
 
         # Calculate indicators for 15m only
@@ -452,8 +457,8 @@ def select_options_for_trade(options_data):
 def get_current_entry_criteria(symbol):
     """Get current entry criteria for position validation"""
     try:
-        df_5min = fetch_market_data(symbol=symbol, interval="5m", limit=None)
-        df_15min = fetch_market_data(symbol=symbol, interval="15m", limit=None)
+        df_5min = fetch_market_data(symbol=symbol, interval="5m", limit=CANDLE_LOOKBACK)
+        df_15min = fetch_market_data(symbol=symbol, interval="15m", limit=CANDLE_LOOKBACK)
         df_vix = fetch_vix_data(symbol=symbol)
 
         # Fix 5m and vix as usual

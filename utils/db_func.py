@@ -3,7 +3,7 @@ import pandas as pd
 import os
 from typing import Any, Optional, List, Dict
 from datetime import date, datetime, timedelta
-from config.config import CONFIG
+from config.config import CONFIG, DB_PATH
 from utils.black_scholes import (
     calculate_delta_for_strike_band,
     get_current_delta
@@ -13,7 +13,6 @@ from utils.utility import standardize_column_names
 import re
 from core.indicators import compute_smas, compute_smas_with_high_low, compute_intraday_vwap, add_ao_color, nifty_skipping_low, nifty_skipping_high
 
-DB_PATH = 'db/trading_bot.db'
 
 # Config values
 STRIKE_BAND = CONFIG["STRIKE_BAND"]
@@ -427,7 +426,7 @@ def ensure_market_data_unique_index(conn: sqlite3.Connection, interval: str) -> 
         ) from exc
 
 
-def store_market_data(df, symbol: str = 'NIFTY50', interval: str = '5m', vix_value: Optional[float] = None, db_path='db/trading_bot.db'):
+def store_market_data(df, symbol: str = 'NIFTY50', interval: str = '5m', vix_value: Optional[float] = None, db_path=DB_PATH):
 #Stores OHLCV + AO + Donchian channel data into the market_data table.
     """
     Stores processed DataFrame into respective interval-based market_data table.
