@@ -15,6 +15,7 @@ from utils.db_func import (
     summarize_option_snapshot_coverage,
 )
 from broker.zerodha_client import get_instruments, kite_from_saved_token
+from utils.live_quotes import get_quotes, get_spot_price
 import time
 import sqlite3
 from utils.iv import ProductionIVCalculator
@@ -225,14 +226,11 @@ def get_nifty50_spot_price():
             print("Failed to connect to Kite API")
             return None
         
-        # Get NIFTY 50 quote
-        quote = kite.quote("NSE:NIFTY 50")
-        if quote and "NSE:NIFTY 50" in quote:
-            quote_data = quote["NSE:NIFTY 50"]
-            if isinstance(quote_data, dict) and "last_price" in quote_data:
-                spot_price = quote_data["last_price"]
-                print(f"Current NIFTY 50 spot price: {spot_price}")
-                return spot_price
+        # Shared with the delta and OI jobs: one spot quote per minute
+        spot_price = get_spot_price(kite)
+        if spot_price is not None:
+            print(f"Current NIFTY 50 spot price: {spot_price}")
+            return spot_price
         print("Could not get NIFTY 50 spot price")
         return None
             
@@ -302,8 +300,6 @@ def fetch_live_option_chain(spot_price=None, required_contracts=None):
 
         required_quote_keys = sorted(set(required_quote_keys))
 
-        # batch fetch quotes
-        batch_size = 50
         results = []
         # prepare map tradingsymbol -> instrument
         ts_map = {f"NFO:{inst['tradingsymbol']}": inst for inst in filtered_option_symbols}
@@ -357,32 +353,16 @@ def fetch_live_option_chain(spot_price=None, required_contracts=None):
                 })
                 seen_symbols.add(sym)
 
+        # Quotes are shared with the OI and VIX jobs: contracts already quoted
+        # this minute are reused, only the rest are requested from Kite.
         keys = list(ts_map.keys())
-        for i in range(0, len(keys), batch_size):
-            chunk = keys[i:i+batch_size]
-            try:
-                quotes = kite.quote(chunk)
-                append_quotes(chunk, quotes)
-                # small pause
-                time.sleep(0.2)
-            except Exception as e:
-                print("Error fetching chunk quotes:", e)
-                time.sleep(0.5)
-                continue
+        append_quotes(keys, get_quotes(kite, keys))
 
         missing_required_keys = [key for key in required_quote_keys if key not in seen_symbols]
         if missing_required_keys:
             print(f"[OPTION SNAPSHOT] Retrying {len(missing_required_keys)} required contract quote(s)")
-            for i in range(0, len(missing_required_keys), 10):
-                chunk = missing_required_keys[i:i+10]
-                try:
-                    quotes = kite.quote(chunk)
-                    append_quotes(chunk, quotes)
-                    time.sleep(0.2)
-                except Exception as e:
-                    print("Error retrying required quote chunk:", e)
-                    time.sleep(0.5)
-                    continue
+            time.sleep(0.5)
+            append_quotes(missing_required_keys, get_quotes(kite, missing_required_keys))
 
         if required_contracts:
             coverage = summarize_option_snapshot_coverage(
@@ -413,10 +393,13 @@ def fetch_live_option_chain(spot_price=None, required_contracts=None):
         return None
 
 
-def calculate_live_vix(spot_price=None, strike_window=300):
+def calculate_live_vix(spot_price=None, strike_window=300, db_path=DB_PATH):
     """
     Calculate live VIX using Kite API data
     Also computes AO and Donchian indicators on the VIX time series and stores them.
+
+    Uses the nearest-expiry chain shared with the delta and OI jobs, so a VIX
+    run in the same minute as those jobs needs no extra quote requests.
     """
     try:
         # Get spot price if not provided
@@ -433,8 +416,8 @@ def calculate_live_vix(spot_price=None, strike_window=300):
                 print(f"Invalid spot_price: {spot_price}")
                 return None
         
-        # Fetch live option chain data
-        option_data = fetch_live_option_chain()
+        # Fetch live option chain data (nearest expiry, strikes around spot)
+        option_data = fetch_live_option_chain(spot_price=spot_price)
         if not option_data:
             print("No live option data available")
             return None
@@ -450,19 +433,6 @@ def calculate_live_vix(spot_price=None, strike_window=300):
         
         else:
             vix_value = calculate_vix2(option_data, spot_price, strike_window)
-        kite = kite_from_saved_token()
-
-        futures_price = get_nearest_nifty_futures_price(kite=kite)
-        if futures_price: 
-            if isinstance(futures_price, str):
-                try:
-                    futures_price = float(futures_price)
-                except:
-                    futures_price = None
-
-        print(f"Using futures price (forward) = {futures_price} (spot {spot_price})")
-        #vix_value = calculate_enhanced_vix(option_data, spot_price, futures_price=futures_price, verbose=True)
-        #vix_value = calculate_enhanced_vix_30d(option_data, spot_price, futures_price=futures_price, verbose=True)
 
         # fallback if enhanced fails
         if vix_value is None:
@@ -475,7 +445,7 @@ def calculate_live_vix(spot_price=None, strike_window=300):
             from utils.db_func import fetch_vix_data
             import pandas as pd
             try:
-                vix_df = fetch_vix_data(symbol="NIFTY50")  # Get all, then slice
+                vix_df = fetch_vix_data(symbol="NIFTY50", db_path=db_path)  # Get all, then slice
             except Exception as e:
                 print(f"Warning: Could not fetch existing VIX data: {e}")
                 # Create empty DataFrame with correct columns
@@ -508,7 +478,8 @@ def calculate_live_vix(spot_price=None, strike_window=300):
                 vix_ao_value=float(latest['vix_ao_value']) if pd.notna(latest['vix_ao_value']) else 0.0,
                 vix_donchian_upper=float(latest['vix_donchian_upper']) if pd.notna(latest['vix_donchian_upper']) else 0.0,
                 vix_donchian_lower=float(latest['vix_donchian_lower']) if pd.notna(latest['vix_donchian_lower']) else 0.0,
-                vix_donchian_mid=float(latest['vix_donchian_mid']) if pd.notna(latest['vix_donchian_mid']) else 0.0
+                vix_donchian_mid=float(latest['vix_donchian_mid']) if pd.notna(latest['vix_donchian_mid']) else 0.0,
+                db_path=db_path
             )
             #print(f"Live VIX calculated and stored: {vix_value:.2f} (with indicators)")
             return vix_value
@@ -520,7 +491,7 @@ def calculate_live_vix(spot_price=None, strike_window=300):
         print(f"Error in live VIX calculation: {e}")
         return None
 
-def calculate_and_store_vix(symbol: str = "NIFTY50", spot_price: float = None, strike_window: int = 300):
+def calculate_and_store_vix(symbol: str = "NIFTY50", spot_price: float = None, strike_window: int = 300, db_path=DB_PATH):
     """
     Calculates VIX and stores it in the database using live Kite API data.
     
@@ -528,7 +499,8 @@ def calculate_and_store_vix(symbol: str = "NIFTY50", spot_price: float = None, s
         symbol: Symbol name (default: NIFTY50)
         spot_price: Current spot price (will fetch if not provided)
         strike_window: Window around ATM for VIX calculation
-    
+        db_path: Database to store into
+
     Returns:
         VIX value or None if calculation fails
     """
@@ -536,7 +508,7 @@ def calculate_and_store_vix(symbol: str = "NIFTY50", spot_price: float = None, s
     if not symbol or not isinstance(symbol, str):
         symbol = "NIFTY50"
     if symbol == "NIFTY50" or symbol == "^NIFTY50":
-        return calculate_live_vix(spot_price, strike_window)
+        return calculate_live_vix(spot_price, strike_window, db_path=db_path)
     else:
         print(f"Live VIX calculation not supported for symbol: {symbol}")
         return None

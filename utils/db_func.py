@@ -426,14 +426,27 @@ def ensure_market_data_unique_index(conn: sqlite3.Connection, interval: str) -> 
         ) from exc
 
 
-def store_market_data(df, symbol: str = 'NIFTY50', interval: str = '5m', vix_value: Optional[float] = None, db_path=DB_PATH):
+def _write_from_string(write_from) -> Optional[str]:
+    """Stored-timestamp form of a 'write rows from here on' cutoff."""
+    if write_from is None:
+        return None
+    if hasattr(write_from, 'strftime'):
+        return write_from.strftime("%Y-%m-%d %H:%M:%S")
+    return str(write_from)
+
+
+def store_market_data(df, symbol: str = 'NIFTY50', interval: str = '5m', vix_value: Optional[float] = None, db_path=DB_PATH, write_from=None):
 #Stores OHLCV + AO + Donchian channel data into the market_data table.
     """
     Stores processed DataFrame into respective interval-based market_data table.
     Now includes VIX data alongside other market data.
     This version is robust to index duplicates, column-case differences, and
     merges last-N DB rows to compute rolling SL/SH correctly.
+
+    With write_from, indicators are still computed over the whole frame but
+    only rows at or after that timestamp are written.
     """
+    write_from_str = _write_from_string(write_from)
     table_name = f"market_data_{interval}"
     ensure_db_dir(db_path)
     conn = sqlite3.connect(db_path, timeout=20)
@@ -596,6 +609,9 @@ def store_market_data(df, symbol: str = 'NIFTY50', interval: str = '5m', vix_val
                 timestamp_str = timestamp_val.strftime("%Y-%m-%d %H:%M:%S")
             else:
                 timestamp_str = str(timestamp_val)
+
+            if write_from_str is not None and timestamp_str < write_from_str:
+                continue
 
             rows.append((
                 timestamp_str,
@@ -1488,19 +1504,13 @@ def calculate_and_store_high_accuracy_delta(
     try:
         # Get current spot price
         from broker.zerodha_client import kite_from_saved_token
+        from utils.live_quotes import get_spot_price
         kite = kite_from_saved_token()
         if not kite:
             print("Failed to connect to Kite API")
             return None
-        quote = kite.quote("NSE:NIFTY 50")
-        if quote and "NSE:NIFTY 50" in quote:
-            quote_data = quote["NSE:NIFTY 50"]
-            if isinstance(quote_data, dict) and "last_price" in quote_data:
-                spot_price = quote_data["last_price"]
-            else:
-                print("Could not get spot price")
-                return None
-        else:
+        spot_price = get_spot_price(kite)
+        if spot_price is None:
             print("Could not get spot price")
             return None
         
@@ -2269,22 +2279,27 @@ def create_sma_table(conn: sqlite3.Connection, interval : str):
 
     conn.commit()
     
-def store_sma_from_df(df: pd.DateOffset, symbol : str, interval: str, db_path= DB_PATH):
+def store_sma_from_df(df: pd.DateOffset, symbol : str, interval: str, db_path= DB_PATH, write_from=None):
     """
     Compute SMA with high/low tracking on df and store into market_sma_<interval>.
     - df: DataFrame indexed by timestamp (index can be DatetimeIndex or strings). Must contain 'close', 'high', 'low'.
     - symbol: single symbol string (e.g., 'NIFTY50').
     - interval: '1m','5m','15m','1h'
     - db_path: path to sqlite DB file
+    - write_from: when given, SMAs use the whole df but only rows at or after
+      this timestamp are written
     """
     df = df.copy()
     df.columns = [col.lower() for col in df.columns]
     df_smas = compute_smas_with_high_low(df)
+    write_from_str = _write_from_string(write_from)
 
     #prepare rows for insertoin
     rows = []
     for ts, row in df_smas.iterrows():
         ts_str = ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, "strftime") else str(ts)
+        if write_from_str is not None and ts_str < write_from_str:
+            continue
         def safe(x): return float(x) if pd.notna(x) else None
         rows.append((
             ts_str, symbol,

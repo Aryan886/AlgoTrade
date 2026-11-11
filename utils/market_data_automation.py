@@ -177,6 +177,9 @@ class MarketDataAutomation:
             '1h': 3600,  # 1 hour
             'oi': 60     # 1 minute
         }
+
+        # (name, duration, ok) for each job run in the current scheduler pass
+        self._cycle_job_results = []
     
     def is_market_holiday(self, date=None):
         """Check if the given date is a market holiday"""
@@ -631,16 +634,56 @@ class MarketDataAutomation:
         except Exception as e:
             return {'error': f'Error getting paper trading status: {e}'}
         
+    def _timed(self, name, job):
+        """Wrap a scheduled job so every run logs its name, start, duration and outcome."""
+        def run_timed_job():
+            started_at = datetime.now()
+            started = time.perf_counter()
+            error = None
+            try:
+                job()
+            except Exception as e:
+                # A failing job must not abort the rest of the pass.
+                error = e
+            duration = time.perf_counter() - started
+            self._cycle_job_results.append((name, duration, error is None))
+            line = f"JOB name={name} start={started_at:%H:%M:%S} duration={duration:.3f}s"
+            if error is None:
+                logger.info(f"{line} status=ok")
+            else:
+                logger.error(f"{line} status=failed error={error}")
+
+        return run_timed_job
+
+    def run_cycle(self, started_at=None):
+        """Run every due job once and log one summary line for the pass."""
+        started_at = started_at or datetime.now()
+        started = time.perf_counter()
+        self._cycle_job_results = []
+
+        schedule.run_pending()
+
+        results = self._cycle_job_results
+        if not results:
+            return
+        duration = time.perf_counter() - started
+        late = started_at.second + started_at.microsecond / 1_000_000
+        failed = sum(1 for _, _, ok in results if not ok)
+        logger.info(
+            f"CYCLE start={started_at:%H:%M:%S} late={late:.1f}s "
+            f"duration={duration:.3f}s jobs={len(results)} failed={failed}"
+        )
+
     def setup_schedule(self):
         """Setup the schedule for data fetching"""
         # Clear any existing schedules
         schedule.clear()
         
         # Market option data fetching (every minute/5min/15min)
-        schedule.every().minute.do(self.fetch_1m_data)
-        schedule.every(5).minutes.do(self.fetch_5m_data)
-        schedule.every(15).minutes.do(self.fetch_15m_data)
-        schedule.every().hour.at(":15").do(self.fetch_1h_data)
+        schedule.every().minute.do(self._timed("fetch_1m_data", self.fetch_1m_data))
+        schedule.every(5).minutes.do(self._timed("fetch_5m_data", self.fetch_5m_data))
+        schedule.every(15).minutes.do(self._timed("fetch_15m_data", self.fetch_15m_data))
+        schedule.every().hour.at(":15").do(self._timed("fetch_1h_data", self.fetch_1h_data))
         
         # Equity data fetching (every minute/5min/15min)
         #schedule.every().minute.do(self.fetch_1m_equity_data)   
@@ -648,28 +691,28 @@ class MarketDataAutomation:
         #schedule.every(15).minutes.do(self.fetch_15m_equity_data)
         
         # VIX calculation (every 5 minutes, independent of market data)
-        schedule.every(5).minutes.do(self.run_vix_job)
+        schedule.every(5).minutes.do(self._timed("run_vix_job", self.run_vix_job))
         
         # High-accuracy delta calculation (for delta neutral strategies)
-        schedule.every().minute.do(self.run_delta_job)
+        schedule.every().minute.do(self._timed("run_delta_job", self.run_delta_job))
 
         # NIFTY option open interest snapshots (independent append-only stream)
-        schedule.every().minute.do(self.fetch_open_interest_data)
+        schedule.every().minute.do(self._timed("fetch_open_interest_data", self.fetch_open_interest_data))
         
         # The Donchian strategy runs inside run_paper_trading_cycle only; a second
         # log-only run doubled the work and could trip the signal cooldown first.
 
         #PAPER TRADING - Run every minute during market hours
-        schedule.every().minute.do(self.run_paper_trading_cycle)
+        schedule.every().minute.do(self._timed("run_paper_trading_cycle", self.run_paper_trading_cycle))
         
         #SMA PAPER TRADING - Run every minute during market hours
-        schedule.every().minute.do(self.run_sma_paper_trading_cycle)
+        schedule.every().minute.do(self._timed("run_sma_paper_trading_cycle", self.run_sma_paper_trading_cycle))
 
         #Equity PAPER TRADING - Run every minute during market hours
         #schedule.every().minute.do(self.run_equity_paper_trading_cycle)
 
         #Nifty Options PAPER TRADING - Run every minute during market hours
-        schedule.every().minute.do(self.run_nifty_paper_trading_cycle)
+        schedule.every().minute.do(self._timed("run_nifty_paper_trading_cycle", self.run_nifty_paper_trading_cycle))
 
         logger.info("Schedule setup completed:")
         logger.info("- 1m data: Every minute (during market hours)")
@@ -691,7 +734,7 @@ class MarketDataAutomation:
         
         while self.is_running:
             try:
-                schedule.run_pending()
+                self.run_cycle()
                 time.sleep(1)
             except KeyboardInterrupt:
                 logger.info("Received interrupt signal")

@@ -8,7 +8,36 @@ from utils.db_func import store_market_data, store_signal, store_sma_from_df, st
 from core.indicators import compute_indicators, generate_signals, compute_smas, compute_smas_with_high_low
 
 
-from config.config import DB_PATH
+from config.config import CONFIG, DB_PATH
+
+# Days of history each interval needs so the longest indicator has enough candles.
+LOOKBACK_DAYS = {'1m': 5, '5m': 7, '15m': 10, '1h': 180}
+
+# Raw candles already downloaded, per (symbol, interval). A run only asks Kite
+# for candles from the last one held (it may still have been forming) onwards.
+_candle_windows = {}
+
+
+def reset_candle_windows():
+    """Forget the held candles so the next run downloads the full history again."""
+    _candle_windows.clear()
+
+
+def _merge_into_window(window, fresh, now, interval):
+    """Replace/append the fresh candles and drop those older than the lookback."""
+    merged = pd.concat([window[window.index < fresh.index[0]], fresh]).sort_index()
+    merged = merged[~merged.index.duplicated(keep='last')]
+
+    lookback_days = LOOKBACK_DAYS.get(interval)
+    if lookback_days is not None:
+        cutoff = pd.Timestamp(
+            now.replace(hour=9, minute=15, second=0, microsecond=0) - timedelta(days=lookback_days)
+        )
+        if merged.index.tz is not None:
+            cutoff = cutoff.tz_localize(merged.index.tz)
+        merged = merged[merged.index >= cutoff]
+    return merged
+
 
 class Nifty50DataFetcher:
     def __init__(self):
@@ -107,9 +136,12 @@ class Nifty50DataFetcher:
             print(f"Error fetching historical data: {e}")
             return None
 
-    def fetch_live_data(self, interval='minute'):
-        
-        #Fetch live data for NIFTY 50 for the current day
+    def fetch_live_data(self, interval='minute', now=None, since=None):
+        """
+        Fetch live NIFTY 50 candles up to now.
+        With `since`, only candles from that timestamp onwards are requested;
+        otherwise the full lookback for the interval is downloaded.
+        """
 
         if not self.kite:
             print("Not connected to Kite API. Please connect first.")
@@ -126,7 +158,7 @@ class Nifty50DataFetcher:
         kite_interval = interval_map.get(interval, interval)
         
         # Get current date and time
-        now = datetime.now()
+        now = now or datetime.now()
         today_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
         
         # Check if market is open
@@ -143,7 +175,10 @@ class Nifty50DataFetcher:
         if today_weekday >= 5:  # Saturday = 5, Sunday = 6
             print("Market is closed on weekends")
             return None
-        
+
+        if since is not None:
+            return self.fetch_historical_data(kite_interval, since, now)
+
         # Extend the start date to get more historical data for indicators
         # This ensures we have enough data for Donchian (20 periods) and AO (34 periods)
         if interval == '1m':
@@ -169,7 +204,7 @@ class Nifty50DataFetcher:
         
         print(f"[DEBUG] Fetching data for interval: {interval} (Kite format: {kite_interval})")
         print(f"[DEBUG] From: {today_start} To: {now}")
-        print(f"[DEBUG] Current time: {datetime.now()}")
+        print(f"[DEBUG] Current time: {now}")
         print(f"[DEBUG] Today's weekday: {today_weekday} (0=Monday, 6=Sunday)")
         
         # Try with extended date range first
@@ -184,7 +219,7 @@ class Nifty50DataFetcher:
             original_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
             return self.fetch_historical_data(kite_interval, original_start, now)
 
-def fetch_and_save_data(intervals=["1m", "5m", "15m"], return_interval=None, symbol="NIFTY50", period="1d"):
+def fetch_and_save_data(intervals=["1m", "5m", "15m"], return_interval=None, symbol="NIFTY50", period="1d", db_path=DB_PATH, now=None):
     """
     Fetch and save data for multiple intervals.
     
@@ -193,7 +228,13 @@ def fetch_and_save_data(intervals=["1m", "5m", "15m"], return_interval=None, sym
         return_interval: If specified, return data for this interval
         symbol: Symbol to fetch data for
         period: Period for data fetching
-    
+        db_path: Database to store into
+        now: Current time (defaults to the wall clock)
+
+    The first run for an interval downloads its full lookback and stores every
+    row. Later runs download only candles since the last one held, recompute
+    indicators on the in-memory window and store only the new/changed rows.
+
     Returns:
         List of tuples (interval, df, file_path) or (results, return_df) if return_interval specified
     """
@@ -219,10 +260,23 @@ def fetch_and_save_data(intervals=["1m", "5m", "15m"], return_interval=None, sym
         # Initialize full_path variable
         full_path = None
         
-        # Fetch data
-        df = fetcher.fetch_live_data(interval)
-        
+        # Fetch data: everything on the first run, only the new candles afterwards
+        window_key = (symbol, interval)
+        window = _candle_windows.get(window_key)
+        write_from = None
+        if window is None or window.empty:
+            df = fetcher.fetch_live_data(interval, now=now)
+        else:
+            write_from = window.index[-1]
+            fresh = fetcher.fetch_live_data(interval, now=now, since=write_from)
+            if fresh is not None and not fresh.empty:
+                df = _merge_into_window(window, fresh, now or datetime.now(), interval)
+            else:
+                df = None
+
         if df is not None and not df.empty:
+            _candle_windows[window_key] = df
+
             # Compute indicators
             df = compute_indicators(df)
 
@@ -237,7 +291,7 @@ def fetch_and_save_data(intervals=["1m", "5m", "15m"], return_interval=None, sym
 
             # Add sma
             try:
-                store_sma_from_df(df, symbol=symbol, interval=db_interval, db_path=DB_PATH)
+                store_sma_from_df(df, symbol=symbol, interval=db_interval, db_path=db_path, write_from=write_from)
             except Exception as e:
                 import traceback
                 traceback.print_exc()
@@ -254,26 +308,24 @@ def fetch_and_save_data(intervals=["1m", "5m", "15m"], return_interval=None, sym
                         symbol=signal['symbol'],
                         signal=signal['signal'],
                         reason=signal['reason'],
-                        confidence_score=signal['confidence_score']
+                        confidence_score=signal['confidence_score'],
+                        db_path=db_path
                     )
                     print(f"[SIGNAL STORED] {signal['signal']} signal for {signal['symbol']}")
                 except Exception as e:
                     print(f"[ERROR] Failed to store signal: {e}")
             
-            # Save to CSV file
-            data_path = get_data_path(f"{symbol}/{interval}")
-            data_path.mkdir(parents=True, exist_ok=True)
-            
-            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{symbol}_{interval}_{timestamp_str}.csv"
-            full_path = data_path / filename
-            
-            df.to_csv(full_path)
-            print(f"Saved data to: {full_path}")
-            print(f"Fetched {len(df)} rows for {interval} interval")
-            print(df.tail())
-            # Debug print before storing in database
-            print(f"[DEBUG] DataFrame columns: {df.columns.tolist()}")
+            # Per-run CSV dump, only when explicitly enabled (debugging aid)
+            if CONFIG.get("SAVE_CANDLE_CSV", False):
+                data_path = get_data_path(f"{symbol}/{interval}")
+                data_path.mkdir(parents=True, exist_ok=True)
+
+                timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"{symbol}_{interval}_{timestamp_str}.csv"
+                full_path = data_path / filename
+
+                df.to_csv(full_path)
+                print(f"Saved data to: {full_path}")
             #print(f"[DEBUG] Sample data:\n{df.head()}")
             # Store in database (VIX will be calculated separately)
             # Convert interval format for database table names
@@ -284,7 +336,7 @@ def fetch_and_save_data(intervals=["1m", "5m", "15m"], return_interval=None, sym
                 '1h': '1h'
             }
             db_interval = db_interval_map.get(interval, interval) or interval
-            store_market_data(df, symbol=symbol, interval=db_interval)
+            store_market_data(df, symbol=symbol, interval=db_interval, db_path=db_path, write_from=write_from)
             if return_interval and interval == return_interval:
                 df.dropna(inplace=True)
                 return_df = df.copy()
