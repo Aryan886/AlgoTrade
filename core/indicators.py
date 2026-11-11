@@ -76,23 +76,6 @@ def compute_indicators(
     if volume_col in df.columns:
         df['volume'] = df[volume_col]
 
-    # Try to fetch VIX data, but don't fail if it doesn't exist
-    try:
-        from utils.db_func import fetch_vix_data
-        vix_df = fetch_vix_data(symbol="NIFTY50")
-        if not vix_df.empty:
-            vix_df['ao_value'] = vix_df['vix_value'].rolling(window=5).mean() - vix_df['vix_value'].rolling(window=34).mean()
-            vix_df['donchian_upper'] = vix_df['vix_value'].rolling(window=donchian_period).max()
-            vix_df['donchian_lower'] = vix_df['vix_value'].rolling(window=donchian_period).min()
-            vix_df['donchian_mid'] = (vix_df['donchian_upper'] + vix_df['donchian_lower']) / 2
-            print("[DEBUG] VIX data processed successfully")
-        else:
-            print("[DEBUG] No VIX data available, continuing without VIX indicators")
-
-    except Exception as e:
-        print(f"[DEBUG] Error fetching VIX data: {e}, continuing without VIX indicators")
-
-
     return df
 
 

@@ -24,4 +24,5 @@ CONFIG = {
     "OI_STRIKE_INTERVAL": 50,     # NIFTY option strike spacing for OI snapshots
     "OI_EXPIRY_MODE": "nearest_only",
     "OI_FETCH_INTERVAL_SECONDS": 60,
+    "SAVE_CANDLE_CSV": False,     # Write a CSV of the candle frame on every fetch (debugging only)
 } 
