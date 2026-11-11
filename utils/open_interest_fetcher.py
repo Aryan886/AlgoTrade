@@ -14,11 +14,11 @@ from typing import Any, Dict, Iterable, List, Optional
 from broker.zerodha_client import get_instruments, kite_from_saved_token
 from config.config import CONFIG
 from utils.db_func import DB_PATH, rebuild_open_interest_5m_for_rows, store_open_interest_snapshot
+from utils.live_quotes import NIFTY_SPOT_QUOTE_KEY, get_quotes, get_spot_price
 
 
 logger = logging.getLogger(__name__)
 
-NIFTY_SPOT_QUOTE_KEY = "NSE:NIFTY 50"
 NFO_EXCHANGE = "NFO"
 
 
@@ -132,13 +132,10 @@ class NiftyOpenInterestFetcher:
     def fetch_spot_price(self) -> Optional[float]:
         if self.kite is None:
             return None
-        quote = self.kite.quote(NIFTY_SPOT_QUOTE_KEY)
-        spot_quote = quote.get(NIFTY_SPOT_QUOTE_KEY) if isinstance(quote, dict) else None
-        if not spot_quote:
-            return None
+        # Shared with the delta and VIX jobs: one spot quote per minute
         try:
-            return float(spot_quote.get("last_price"))
-        except Exception:
+            return float(get_spot_price(self.kite))
+        except (TypeError, ValueError):
             return None
 
     def fetch_snapshot(
@@ -173,10 +170,8 @@ class NiftyOpenInterestFetcher:
         if not quote_keys:
             return []
 
-        quotes = self.kite.quote(quote_keys)
-        if not isinstance(quotes, dict):
-            logger.warning("Unexpected OI quote response type: %s", type(quotes).__name__)
-            return []
+        # Contracts the delta job already quoted this minute are reused.
+        quotes = get_quotes(self.kite, quote_keys)
 
         snapshot_time = timestamp or datetime.now()
         rows = []

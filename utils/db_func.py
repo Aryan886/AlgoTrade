@@ -1504,19 +1504,13 @@ def calculate_and_store_high_accuracy_delta(
     try:
         # Get current spot price
         from broker.zerodha_client import kite_from_saved_token
+        from utils.live_quotes import get_spot_price
         kite = kite_from_saved_token()
         if not kite:
             print("Failed to connect to Kite API")
             return None
-        quote = kite.quote("NSE:NIFTY 50")
-        if quote and "NSE:NIFTY 50" in quote:
-            quote_data = quote["NSE:NIFTY 50"]
-            if isinstance(quote_data, dict) and "last_price" in quote_data:
-                spot_price = quote_data["last_price"]
-            else:
-                print("Could not get spot price")
-                return None
-        else:
+        spot_price = get_spot_price(kite)
+        if spot_price is None:
             print("Could not get spot price")
             return None
         
